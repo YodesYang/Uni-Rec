@@ -1,0 +1,15 @@
+eval:
+  metrics:
+    - auc
+    - logloss
+    - pcoc
+    - avg_pred
+    - positive_rate
+  sequence_length_buckets:
+    - 0
+    - 1
+    - 3
+    - 5
+    - 10
+    - 20
+    - 50

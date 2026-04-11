@@ -1,0 +1,11 @@
+model:
+  name: mlp_cvr
+  embed_dim: 16
+  dense_proj_dim: 8
+  hash_bucket_size: 50000
+  hidden_dims:
+    - 256
+    - 128
+  dropout: 0.1
+  activation: relu
+  domain_pooling: mean

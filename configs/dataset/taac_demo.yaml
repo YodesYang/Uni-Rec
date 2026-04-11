@@ -1,0 +1,25 @@
+data:
+  path: null
+  format: parquet
+  label_column: label_type
+  timestamp_column: timestamp
+  id_columns:
+    - user_id
+    - item_id
+  passthrough_columns:
+    - label_time
+    - timestamp
+  allowed_label_values:
+    - 1
+    - 2
+  positive_label_values:
+    - 2
+  max_rows: null
+  split:
+    train_ratio: 0.8
+    valid_ratio: 0.1
+    test_ratio: 0.1
+    order: ascending
+  dataloader:
+    num_workers: 0
+    pin_memory: false
