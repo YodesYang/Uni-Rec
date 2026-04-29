@@ -1,0 +1,21 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Local virtualenv ---
+.venv/
+venv/
+
+# --- Local data & training artifacts (do NOT submit to platform via git) ---
+data/
+runs/
+
+# --- Source PDF (oversized, image-only; markdown 解析版本已落到 document/) ---
+document/*.pdf
+
+# --- macOS / IDE / editor configs ---
+.DS_Store
+.idea/
+.vscode/
+.cursor/
