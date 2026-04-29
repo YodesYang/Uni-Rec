@@ -3,7 +3,7 @@
 > 单一事实源（single source of truth）。任何 TODO 状态改动只在本文件落定。
 > `document/knowledge_base.txt` §8 仅保留 stub，避免双源失同步。
 
-**最近一次审视**：2026-04-28 · 结论：T1 完成（CPU 33s 跑通 demo，AUC 0.68）；T4 解阻塞；时间线压力升级（初赛已开 5 天）。
+**最近一次审视**：2026-04-29 · 结论：T1 环境从 venv 切到 conda（`tencent-unirec`，python 3.11），AUC 复现一致；T4 仍解阻塞；初赛开赛 5 天。
 
 ---
 
@@ -77,10 +77,9 @@
 **复现 Recipe（自洽，复制即可执行）**：
 
 ```bash
-# ① 装依赖（建议 conda / venv，需 Python 3.10~3.12）
-python -m venv .venv
-.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
-.venv/bin/pip install numpy pyarrow tqdm scikit-learn tensorboard
+# ① 创建 conda 环境（一键复现，详见仓库根 environment.yml）
+conda env create -f environment.yml
+conda activate tencent-unirec
 
 # ② 下载 demo 数据
 mkdir -p data/demo data/demo_rg100 runs/demo/{ckpt,log,tb}
@@ -88,14 +87,14 @@ curl -sSL -o data/demo/demo_1000.parquet \
     https://huggingface.co/datasets/TAAC2026/data_sample_1000/resolve/main/demo_1000.parquet
 
 # ③ 重写 demo 为多 row group（避免 valid_ratio 把 train 吃光，仅 demo 需要）
-.venv/bin/python -c "
+python -c "
 import pyarrow.parquet as pq
 t = pq.read_table('data/demo/demo_1000.parquet')
 pq.write_table(t, 'data/demo_rg100/demo_1000.parquet', row_group_size=100)
 "
 
 # ④ 自动生成 schema.json（详见 T2）
-.venv/bin/python baseline/infer_schema.py \
+python baseline/infer_schema.py \
     --parquet data/demo_rg100/demo_1000.parquet \
     --output  data/demo_rg100/schema.json
 
@@ -104,14 +103,15 @@ TRAIN_DATA_PATH=data/demo_rg100 \
 TRAIN_CKPT_PATH=runs/demo/ckpt \
 TRAIN_LOG_PATH=runs/demo/log \
 TRAIN_TF_EVENTS_PATH=runs/demo/tb \
-PATH=.venv/bin:$PATH \
 bash baseline/run.sh \
     --batch_size 32 --num_epochs 2 --num_workers 0 \
     --seq_max_lens "seq_a:64,seq_b:64,seq_c:64,seq_d:64" \
     --device cpu
 ```
 
-**未提交清单**（仓库无 `.gitignore`，请按需手动忽略）：`.venv/`、`data/`、`runs/`、`baseline/__pycache__/`、`/tmp/taac_pdf/`
+> 平台注入：`TRAIN_DATA_PATH` / `TRAIN_CKPT_PATH` / `TRAIN_TF_EVENTS_PATH` 由 Tencent Angel 平台自动设置；上平台时 ⑤ 这块只保留 `bash baseline/run.sh` 即可。
+>
+> `TRAIN_LOG_PATH` 不在平台 env 列表中（已在 baseline 加 `/tmp` fallback，见 `bd1af1b`）。
 
 ---
 
@@ -249,5 +249,6 @@ LONGER 在初赛 100+ 字段、复赛 10× 数据上一般 ROI 最高。
 
 ## Changelog
 
-- **2026-04-28**：T1 完成。结合 PDF 全 58 页验证 baseline 即官方训练模板；本地 CPU 33s 跑通 demo，AUC 0.6799。沉淀「踩坑 & 解法」表 + Recipe 二版（含 row_group_size 重写步骤）。回写 PDF 关键事实（环境变量清单、平台规格、ckpt 命名约束、公榜参考分数）。
+- **2026-04-29**：T1 环境切换 venv → conda（`tencent-unirec`，python 3.11.15 / torch 2.10.0 CPU）。recipe 第 ① 步从 `python -m venv` 改为 `conda create`；后续步骤删除 `.venv/bin/` 前缀。conda env 跑通 1 epoch AUC 0.6761，与 venv 完全一致（seed=42 复现）。`.venv/` 已删除（释放 922MB）。
+- **2026-04-28**：T1 完成。结合 PDF 全 58 页验证 baseline 即官方训练模板；本地 CPU 33s 跑通 demo，AUC 0.6799。沉淀「踩坑 & 解法」表 + Recipe（含 row_group_size 重写步骤）。回写 PDF 关键事实（环境变量清单、平台规格、ckpt 命名约束、公榜参考分数）。
 - **2026-04-26**：创建文件，从 `knowledge_base.txt §8` 迁出 6 条 TODO；T5 决议暂缓；新增 7 步审视清单。

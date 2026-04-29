@@ -1,0 +1,32 @@
+# Conda environment for the TAAC 2026 / Tencent Uni-Rec baseline.
+#
+# Quick start:
+#     conda env create -f environment.yml
+#     conda activate tencent-unirec
+#
+# Defaults to a CPU PyTorch wheel (matches the macOS developer machine the
+# baseline was validated on, and works in any sandboxed / air-gapped CI).
+#
+# To install CUDA-enabled PyTorch instead (Linux + NVIDIA GPU):
+#     pip install --upgrade --force-reinstall \
+#         --index-url https://download.pytorch.org/whl/cu126 \
+#         torch
+# (replace cu126 with the wheel matching your local CUDA toolkit; the
+#  competition platform itself ships torch 2.7.1+cu126, see
+#  document/tencent_angel_platform_guide.md §5)
+
+name: tencent-unirec
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --index-url https://download.pytorch.org/whl/cpu
+      - --extra-index-url https://pypi.org/simple
+      - torch>=2.7,<3
+      - numpy>=2.2,<3
+      - pyarrow>=23,<25
+      - tqdm
+      - scikit-learn
+      - tensorboard
