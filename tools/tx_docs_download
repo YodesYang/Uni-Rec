@@ -1,0 +1,61 @@
+window._pages = []; // 全局存储，跨代码块保留
+
+(async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    const sc = document.querySelector('.scrollable--Ek0yf') ||
+        Array.from(document.querySelectorAll('div'))
+            .find(el => el.scrollHeight > el.clientHeight + 500 && el.clientHeight > 300);
+
+    const canvasToBase64 = (canvas) => {
+        const tmp = document.createElement('canvas');
+        tmp.width = canvas.width; tmp.height = canvas.height;
+        const ctx = tmp.getContext('2d');
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, tmp.width, tmp.height);
+        ctx.drawImage(canvas, 0, 0);
+        return tmp.toDataURL('image/jpeg', 0.92).split(',')[1];
+    };
+
+    sc.scrollTop = 0;
+    await sleep(1000);
+
+    const keys = new Set();
+    let scrollPos = 0;
+
+    while (true) {
+        document.querySelectorAll('.melo-page-canvas-view canvas').forEach(c => {
+            if (c.width < 100 || c.height < 100) return;
+            const key = c.className;
+            if (!keys.has(key)) {
+                keys.add(key);
+                window._pages.push({ key, base64: canvasToBase64(c) });
+                console.log(`✅ 捕获: ${key}`);
+            }
+        });
+
+        console.log(`累计 ${window._pages.length} 页`);
+        if (scrollPos >= sc.scrollHeight - sc.clientHeight - 10) break;
+        scrollPos += sc.clientHeight * 0.6;
+        sc.scrollTop = scrollPos;
+        await sleep(1200);
+    }
+
+    await sleep(1500);
+    document.querySelectorAll('.melo-page-canvas-view canvas').forEach(c => {
+        if (c.width < 100 || c.height < 100) return;
+        const key = c.className;
+        if (!keys.has(key)) {
+            keys.add(key);
+            window._pages.push({ key, base64: canvasToBase64(c) });
+        }
+    });
+
+    window._pages.sort((a, b) => {
+        const na = parseInt(a.key.match(/page-(\d+)/)?.[1] ?? 0);
+        const nb = parseInt(b.key.match(/page-(\d+)/)?.[1] ?? 0);
+        return na - nb;
+    });
+
+    console.log(`\n🎉 采集完成，共 ${window._pages.length} 页，现在运行第二段`);
+})();
