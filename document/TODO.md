@@ -3,7 +3,7 @@
 > 单一事实源（single source of truth）。任何 TODO 状态改动只在本文件落定。
 > `document/knowledge_base.txt` §8 仅保留 stub，避免双源失同步。
 
-**最近一次审视**：2026-04-26 · 结论：T2 完成；T5 暂缓；其余 `[~]` / `[!]` 状态保持。
+**最近一次审视**：2026-04-28 · 结论：T1 完成（CPU 33s 跑通 demo，AUC 0.68）；T4 解阻塞；时间线压力升级（初赛已开 5 天）。
 
 ---
 
@@ -40,39 +40,78 @@
 
 ## TODO 列表
 
-### T1 `[~]` 跑通 baseline 在 1k demo 上，记录 AUC / FLOPs / Params
+### T1 `[x]` 跑通 baseline 在 1k demo 上，记录 AUC / FLOPs / Params
 
-**阻塞点**：当前 workspace 无 demo 数据 + 无 torch 环境（Python 3.14.3 暂无 torch wheel）。
+**完成时间**：2026-04-28 · 平台：本地 macOS / CPU only / py3.11.7 / torch 2.11 CPU
 
-**Recipe（自洽，复制即可执行）**：
+**结果**（默认 run.sh 参数 + `--batch_size 32 --num_epochs 2 --device cpu --seq_max_lens seq_X:64`）：
+
+| 指标 | 值 |
+|------|---|
+| Total Params | 160.94 M（Sparse 158.45 M + Dense 2.49 M） |
+| Epoch 1 Val AUC / LogLoss | 0.6761 / 0.3380 |
+| Epoch 2 Val AUC / LogLoss | 0.6799 / 0.3327 |
+| 训练总耗时 | ~33 s（包含 2 次 reinit + 2 次 eval + 2 次 ckpt） |
+| 单 batch CPU forward | 658 ms（B=32, seq_max_len=256） |
+| ckpt 路径 | `runs/demo/ckpt/global_step58.layer=2.head=4.hidden=64.best_model/model.pt` |
+
+**FLOPs**：未在 CPU 跑通时测量（fvcore 对自定义 nn.Module 不准）。GPU 上跑 T4 时再用 `torch.profiler` 测准。
+
+**关键发现**（结合 PDF）：
+1. **baseline 文件 ≡ 官方训练模板**：PDF p4 列出的 `dataset.py / model.py / run.sh / train.py / trainer.py / utils.py` 与 `baseline/` 一字不差。
+2. **平台环境变量**（PDF p51 / p54）：
+   - 训练：`USER_CACHE_PATH` / `TRAIN_DATA_PATH` / `TRAIN_CKPT_PATH` / `TRAIN_TF_EVENTS_PATH`
+   - 评估：`USER_CACHE_PATH` / `MODEL_OUTPUT_PATH` / `EVAL_DATA_PATH` / `EVAL_RESULT_PATH` / `EVAL_INFER_PATH`
+   - ⚠ baseline `train.py` 用了 `TRAIN_LOG_PATH`，但 PDF 未列；本地 OK，平台上需自行兜底默认。
+3. **平台规格**（PDF p28 / p30）：Ubuntu 22.04、Python 3.10.20、CUDA 12.6、19GB GPU / 9 CPU / 55GB RAM。本地 py3.11 与平台 py3.10 接近，无明显兼容问题。
+4. **ckpt 命名约束**（PDF p51-53）：必须以 `global_step` 前缀，目录名 ≤ 300 字符。baseline `_build_step_dir_name` 已遵守。
+5. **公榜参考**（PDF p16）：HyFormer 配置 0.836~0.838 AUC；run-test 系列 0.851~0.861。
+
+**踩坑 & 解法**：
+| 现象 | 原因 | 解法 |
+|------|------|------|
+| `iter(train_loader)` 0 batch | demo 文件只有 1 row group，被 `valid_ratio=0.1` 取整后吃光 train | 用 `pq.write_table(t, ..., row_group_size=100)` 重写为 10 RG，训练 → 9 RG / 验证 → 1 RG。正式初赛数据多分片，不会有此问题。 |
+| sysctlbyname IOError 警告 | macOS 沙箱 + pyarrow CPU detection | 警告无害，可忽略；平台 Linux 无此问题 |
+| 大 vocab Embedding 占显存 | demo 里 ts 列被识别为 vocab≈1.7e9 | 已在 schema 中标 `ts_fid`（baseline `_load_schema` 自动剥离）；ID 列建议 `--emb_skip_threshold 1000000`（run.sh 默认） |
+
+**复现 Recipe（自洽，复制即可执行）**：
 
 ```bash
-# ① 安装依赖（建议 conda / venv，需 Python 3.10~3.12）
-pip install torch numpy pyarrow tqdm scikit-learn tensorboard
+# ① 装依赖（建议 conda / venv，需 Python 3.10~3.12）
+python -m venv .venv
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/pip install numpy pyarrow tqdm scikit-learn tensorboard
 
 # ② 下载 demo 数据
-mkdir -p data/demo
-curl -L -o data/demo/demo_1000.parquet \
+mkdir -p data/demo data/demo_rg100 runs/demo/{ckpt,log,tb}
+curl -sSL -o data/demo/demo_1000.parquet \
     https://huggingface.co/datasets/TAAC2026/data_sample_1000/resolve/main/demo_1000.parquet
 
-# ③ 自动生成 schema.json（详见 T2）
-python baseline/infer_schema.py \
-    --parquet data/demo/demo_1000.parquet \
-    --output  data/demo/schema.json
+# ③ 重写 demo 为多 row group（避免 valid_ratio 把 train 吃光，仅 demo 需要）
+.venv/bin/python -c "
+import pyarrow.parquet as pq
+t = pq.read_table('data/demo/demo_1000.parquet')
+pq.write_table(t, 'data/demo_rg100/demo_1000.parquet', row_group_size=100)
+"
 
-# ④ 启动训练（小数据建议 batch_size 调小，emb_skip_threshold 设大避免 OOB）
-TRAIN_DATA_PATH=data/demo \
+# ④ 自动生成 schema.json（详见 T2）
+.venv/bin/python baseline/infer_schema.py \
+    --parquet data/demo_rg100/demo_1000.parquet \
+    --output  data/demo_rg100/schema.json
+
+# ⑤ 启动训练（CPU；GPU 上去掉 --device cpu 即可）
+TRAIN_DATA_PATH=data/demo_rg100 \
 TRAIN_CKPT_PATH=runs/demo/ckpt \
 TRAIN_LOG_PATH=runs/demo/log \
 TRAIN_TF_EVENTS_PATH=runs/demo/tb \
-bash baseline/run.sh --batch_size 64 --num_epochs 3 --num_workers 0
-
-# ⑤ Params / FLOPs：训练日志会打印 Total parameters；FLOPs 用 fvcore 估算：
-#   pip install fvcore
-#   python -c "from fvcore.nn import FlopCountAnalysis; ..."
+PATH=.venv/bin:$PATH \
+bash baseline/run.sh \
+    --batch_size 32 --num_epochs 2 --num_workers 0 \
+    --seq_max_lens "seq_a:64,seq_b:64,seq_c:64,seq_d:64" \
+    --device cpu
 ```
 
-**待补**：跑通后把 `Val AUC / Params / FLOPs` 三个数字回填到本节。
+**未提交清单**（仓库无 `.gitignore`，请按需手动忽略）：`.venv/`、`data/`、`runs/`、`baseline/__pycache__/`、`/tmp/taac_pdf/`
 
 ---
 
@@ -199,7 +238,7 @@ LONGER 在初赛 100+ 字段、复赛 10× 数据上一般 ROI 最高。
 
 | 旧编号 | 新编号 | 状态 |
 |--------|--------|------|
-| §8.1 | T1 | `[~]` |
+| §8.1 | T1 | `[x]` |
 | §8.2 | T2 | `[x]` |
 | §8.3 | T3 | `[!]` |
 | §8.4 | T4 | `[~]` |
@@ -210,4 +249,5 @@ LONGER 在初赛 100+ 字段、复赛 10× 数据上一般 ROI 最高。
 
 ## Changelog
 
+- **2026-04-28**：T1 完成。结合 PDF 全 58 页验证 baseline 即官方训练模板；本地 CPU 33s 跑通 demo，AUC 0.6799。沉淀「踩坑 & 解法」表 + Recipe 二版（含 row_group_size 重写步骤）。回写 PDF 关键事实（环境变量清单、平台规格、ckpt 命名约束、公榜参考分数）。
 - **2026-04-26**：创建文件，从 `knowledge_base.txt §8` 迁出 6 条 TODO；T5 决议暂缓；新增 7 步审视清单。
