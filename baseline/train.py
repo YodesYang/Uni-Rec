@@ -199,7 +199,11 @@ def parse_args() -> argparse.Namespace:
     # Environment variables take precedence.
     args.data_dir = os.environ.get('TRAIN_DATA_PATH', args.data_dir)
     args.ckpt_dir = os.environ.get('TRAIN_CKPT_PATH', args.ckpt_dir)
-    args.log_dir = os.environ.get('TRAIN_LOG_PATH', args.log_dir)
+    # TRAIN_LOG_PATH is project-internal (not part of the platform's
+    # documented env var set); fall back to a writable temp dir so the
+    # script does not crash when neither env nor --log_dir is provided.
+    args.log_dir = (os.environ.get('TRAIN_LOG_PATH', args.log_dir)
+                    or '/tmp/taac_train_log')
     args.tf_events_dir = os.environ.get('TRAIN_TF_EVENTS_PATH')
 
     return args
