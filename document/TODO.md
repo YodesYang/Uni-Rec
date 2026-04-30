@@ -3,7 +3,7 @@
 > 单一事实源（single source of truth）。任何 TODO 状态改动只在本文件落定。
 > `document/knowledge_base.txt` §8 仅保留 stub，避免双源失同步。
 
-**最近一次审视**：2026-04-29 · 结论：T1 环境从 venv 切到 conda（`tencent-unirec`，python 3.11），AUC 复现一致；T4 仍解阻塞；初赛开赛 5 天。
+**最近一次审视**：2026-04-30（夜）· 结论：抓到乐享社区 141 题（含 26 条 Administrators / TAAC 官方答复，详见 `document/community/_industry_intel.md`），共 5 项硬情报落地——① 任务确认为 **CVR**（label_type=2 = 24h 内转化），与 baseline 现行处理一致；② **infer.py / model.py 在推理时必须与训练时完全一致** → **T7 升 `[!]` 阻塞**（我们已改 ns_tokenizer / seq_encoder / num_queries，平台默认 infer.py 100% 加载失败）；③ **测试集时间不重叠且在训练集之后**，但 baseline `valid_ratio=0.1` 是随机切 → **新增 T8** 改时间切；④ **推理 30 分钟硬上限** → 新增 T9 profile；⑤ 资源配额已迭代为「全队 2 quota，串行执行」+ 评估次数「每天 3 次，北京时间 12:00 刷新」。距初赛 ddl 25 天（5/25）。
 
 ---
 
@@ -119,6 +119,8 @@ bash baseline/run.sh \
 
 **实现**：`baseline/infer_schema.py`（2026-04-26 完成）
 
+(2026-04-30 夜: 社区情报佐证 — 官方 4/27 / 4/28 答复 `label_type=2` 即「24h 内转化的正样本」，dataset.py:512 早已正确 remap 为 1/0；`infer_schema.py` 的 4 条正则不匹配 `label_type` → 被静默跳过 → schema.json 不含 label_type → 结果正确。**残留风险**：脚本对所有未匹配列都静默跳过，若平台未来加非 `*_feats_*` / `domain_*_seq_*` 命名的特征列会被漏掉；现状不修（最小变更红线），日常 review 重跑后人工 diff 列名集合即可。)
+
 **关键点**：
 - 从列名正则识别四类特征（`user_int` / `user_dense` / `item_int` / `domain_X_seq`）
 - 整型列：`vocab_size = max(positive value) + 1`（可改 percentile）
@@ -145,24 +147,32 @@ python baseline/infer_schema.py \
 
 ---
 
-### T3 `[!]` 拉取真实初赛数据后，更新 knowledge_base.txt §3 的 fid 列表
+### T3 `[x]` 拉取真实初赛数据后，更新 knowledge_base.txt §3 的 fid 列表
 
-**阻塞点**：初赛数据需要登录 <https://taiji.algo.qq.com/> 下载。
+**结案时间**：2026-04-30（晨）· 通过平台首个 training job 的启动日志间接验证，无需把数据下载到本地。
 
-**解除条件**：从太极平台下载到任意一份 `*.parquet` 训练分片。
+(2026-04-30 夜: 社区情报新增 — 4/28 官方提到 demo 数据多了一个序列域特征，但只答 "all features have been anonymized";只要新列名仍符合 `domain_X_seq_N` 模式 `infer_schema.py` 会自动 detect 把 seq 域数从 4 → 5。**最小动作**：下次平台 job 日志若打印 5 个 seq 域,本节直接补一行确认;若仍是 4 个,说明新序列域命名变了,需到列名集合里 grep 排查。)
 
-**执行步骤（拿到数据后）**：
+**结论**：fid 集合与 demo §3 完全一致 → §3 维持现状。证据见下表：
 
-```bash
-python baseline/infer_schema.py --parquet <real_data_dir> \
-    --output schema.json --sample-rows 1000000
-```
+| 指标 | demo (1k) | 平台 (1.9M) | 一致？ |
+|---|---|---|---|
+| user_int fid 数 | 46 | 46 | ✓ |
+| item_int fid 数 | 14 | 14 | ✓ |
+| domain seq 数 | 4（a/b/c/d） | 4（a/b/c/d） | ✓ |
+| 总参数量 | 160.9 M | 198.7 M | sparse vocab 真值更大（demo 偏小），但**字段集**一致 |
 
-随后把脚本输出的 `user_int` / `user_dense` / `item_int` / `seq` 列数与 `knowledge_base.txt §3` 对照；如果差异显著，把 §3 的 fid 范围替换为真实值。
+**残留观察（不阻塞，沉淀给 T4 / 调参用）**：
+- `emb_skip_threshold=1e6`：demo 里 seq_a 跳了 1/8 个 fid，平台真实数据里**未跳**（实际 vocab < 1e6）。说明 demo 在该 fid 上 vocab 估值偏大；不影响正确性，只是真实 sparse 参数比 demo 多 1 个 tensor / +37.7 M 参数。
+- 真实数据 1.9M 行 / 1000 个 parquet 分片 → 本地为 demo 写的 `data/demo_rg100/` 重写步骤仅 demo 需要，平台无此问题。
 
 ---
 
 ### T4 `[~]` 复现 HyFormer 三种序列编码器消融
+
+(2026-04-29 晚: 首个平台 job 默认 `transformer`，已等同 T4-B 首跑；下一步在平台 "Copy" 该 job 切 `swiglu` / `longer` 即可并行启动 T4-A / T4-C，无需本地再跑。)
+
+(2026-04-30 夜: **撤回上面的"并行启动"判断** — 官方 4/27 答复明确「Each team allocated a single resource quota, shared across train+inference, **strictly serial**」;后已扩到 2 quota 但仍串行。**评估每天 3 次,北京时间 12:00 刷新**(早期官方答 AOE 15:59:59,实际已迭代),失败/取消的不计数。**新约束**:三组消融 + 调参的总评估开销受限 9 次/3 天,T4-A swiglu 跑完出 AUC 才能起 T4-C longer;`--seed 42` 复现性 + best_ckpt 选择规则不变。)
 
 baseline 中三种编码器都已实现：`baseline/model.py` 的 `SwiGLUEncoder` / `TransformerEncoder` / `LongerEncoder`，由 `--seq_encoder_type {swiglu, transformer, longer}` 切换。
 
@@ -232,6 +242,66 @@ LONGER 在初赛 100+ 字段、复赛 10× 数据上一般 ROI 最高。
 
 ---
 
+### T7 `[!]` 修改平台默认 `infer.py` 与自定义训练配置对齐
+
+(2026-04-30 夜: **`[~]` → `[!]` 升级**。社区情报锁定结论 — 官方 4/28 答复「**`infer.py` / `model.py` used during inference must be exactly identical to the one used during training**」(出处见 `_industry_intel.md` "推理模型load错误" 一题)。配合多条「评估出 AUC 但不上榜」的报告(4 条独立投诉,跨 4/26→4/29) → 印证不少队伍正撞这个坑。我们已偏离 baseline 默认 (`ns_tokenizer=rankmixer / user_ns_tokens=5 / item_ns_tokens=2 / num_queries=2`,T4 还会切 `seq_encoder`),不修 infer.py 必然 Eval Failed。)
+
+**阻塞条件**：
+- 必须等首个平台 baseline job 跑出 best_ckpt 并 Publish 后,从 Evaluation 页下载默认 `infer.py (15.6K)` + `model.py (63.6K)` + `dataset.py (30K)`,先 diff 看其加载策略
+
+**解除条件（任一即可）**：
+1. 默认 infer.py 走 `train_config.json` 完全动态构建 model → 直接用 → 改回 `[~]` 然后结案
+2. 默认 infer.py 含硬编码超参 → 修改 infer.py 三件套(model.py / infer.py)使之与训练完全一致(**修改现有文件,不新建,符合最小变更红线**) → 提交评估 → 公榜出现自定义模型分数 → 关闭
+
+**审查 checklist（下载默认文件后逐条核对）**：
+1. infer.py 是否 `json.load("train_config.json")` 动态读取 `ns_tokenizer_type / seq_encoder_type / num_queries / user_ns_tokens / item_ns_tokens` 来构建 model
+2. model.py 类签名是否与我们训练时 import 的一致(可能我们在自定义 model.py 加了新 nn.Module → 必须同步到 infer 包)
+3. dataset.py infer 时是否走 `is_training=False` 路径(label 列全 0,不依赖 label_type)
+4. 推理输出格式(predictions 字段名 / user_id 覆盖率)是否能产出 leaderboard 期望的字段;社区有题报"Missing 310000 answer user_ids in predictions(need full coverage)" → 推理必须**全量覆盖测试集 user_id**
+
+**风险评估**：
+- 评估管线断 → 训练分数永远上不了榜(本届硬阻塞,无 workaround)
+- 不影响数据 / 采样 / 权重 / 特征训练侧,**无 metric 影响,纯工程对齐**
+- 与 T9 (推理 30min 硬约束)联动 — 改 infer.py 时顺便测推理时长
+
+---
+
+### T8 `[ ]` 把验证集切分从 random 改为按时间切
+
+(2026-04-30 夜新增 · 触发证据: 官方 4/26 在 "basic questions on dataset" 答复「**test set timestamps do not overlap with training set and are from a later time period**」, 但 baseline `dataset.py` 当前用 `valid_ratio=0.1` 随机切 row group → **验证集与训练集时间分布相同, 而真实测试集是未来** → 离线 AUC 与公榜 AUC 必然有 gap, 调参方向会被带偏。这是**当前公榜大多数队伍尚未做**的离线-在线一致性修复, ROI 极高。)
+
+**最小动作**（30 分钟）：
+1. grep `valid_ratio` / `is_training` / row_group_range 在 baseline 调用链, 确认切法位置
+2. 改 `train.py` 里切分逻辑: 按 `_rg_list` 的 row group 顺序取**最后 10%** 作 valid, 而非随机切(原始 parquet 在平台上**已按 timestamp 写入**, row group 顺序 ≈ 时间序; 本地 demo 因 `row_group_size=100` 重写过也保留时间序)
+
+**验证方案**（user rule "影响数据/采样的改动须给出验证方案"）：
+- **离线 vs 在线一致性**: 改前/改后用同一 ckpt 跑两次 eval, 看离线 AUC 数字与公榜 AUC 的 gap 缩小多少(预期: 改前 gap 0.01~0.03, 改后 gap < 0.005; 若反之 → 说明 row group 不是时间序, 回滚)
+- **AUC 绝对值预期**: 改后离线 AUC **可能下降** 0.005~0.015(因为切走了"近期"训练样本), 但公榜 AUC 期望**上升** 0.003~0.01 — 这是健康信号
+- **Sanity**: 切完打印 train / valid 时间区间, 确认 valid 的 min_ts >= train 的 max_ts
+
+**配置开关**：加 `--valid_split_strategy {random,time}`, **默认 `random`(行为不变)**, 显式 `--valid_split_strategy time` 启用; 符合 user rule "默认行为不变 / 配置开关"
+
+---
+
+### T9 `[ ]` 测推理时长 + 控在 30min 硬上限以内
+
+(2026-04-30 夜新增 · 触发证据: 官方 4/27 答复「**A maximum time limit of 30 minutes is imposed on each inference task in both the Industry and Academic tracks**」, 超时即被系统 kill。社区已有 4 条"推理被 stop"投诉。我们 baseline 用 `transformer` 编码器 + 完整 sparse vocab(198.7M params) 在 0.2 GPU(~16GB 可用显存) 上推理速度未知, 必须 profile。)
+
+**最小动作**（首次 ckpt publish 后 30 分钟）：
+1. publish 第一个 ckpt 后看 evaluation log 里的 `Inference Time` 字段(社区案例报过 625.28s ≈ 10min, 距 30min 还有余量)
+2. 若 > 1500s(留 5min 安全边际) → 立即降 batch_size 推理 / 切 longer 编码器(top_k 压缩)
+3. 数字回填到本节作为 baseline 推理性能基线
+
+**联动 T7**：改 infer.py 时顺手把推理 batch 调成显存允许的最大值, 加 `torch.no_grad()` + bf16 推理(若 baseline 未启)
+
+**联动 T4**：消融时记录每组的「Train AUC / Eval AUC / Train time / **Infer time** / Params」, infer time 列原本不在 T4 表里, 本节补上
+
+**风险评估**：
+- 不影响训练 / 数据 / 权重, 只在推理阶段调 batch + dtype
+- 若 bf16 vs fp32 推理结果 AUC 差异 > 0.001 → 退回 fp32, 改用 batch 调优
+
+---
+
 ## 编号迁移记录
 
 `knowledge_base.txt §8.x` → 本文件 `Tx`，一一对应：
@@ -240,15 +310,21 @@ LONGER 在初赛 100+ 字段、复赛 10× 数据上一般 ROI 最高。
 |--------|--------|------|
 | §8.1 | T1 | `[x]` |
 | §8.2 | T2 | `[x]` |
-| §8.3 | T3 | `[!]` |
+| §8.3 | T3 | `[x]`（2026-04-30 结案 · 平台日志验证 fid 集合一致） |
 | §8.4 | T4 | `[~]` |
 | §8.5 | T5 | `[~]` |
 | §8.6 | T6 | `[!]` |
+| —    | T7 | `[!]`（2026-04-29 新增 / 2026-04-30 晨修正:平台预置 infer.py 转为审查 / 2026-04-30 夜升级 `[!]`:官方明确 infer.py 必须与训练一致,我们已偏离 baseline → 必修） |
+| —    | T8 | `[ ]`（2026-04-30 夜新增 · 验证集按时间切,fix baseline random valid 与"测试集是未来"的不一致） |
+| —    | T9 | `[ ]`（2026-04-30 夜新增 · 推理 30min 硬上限 profile） |
 
 ---
 
 ## Changelog
 
+- **2026-04-30 夜**：抓取乐享比赛社区 141 题(`document/community/lexiang_questions_2026-04-30-06-46-51.{json,md}`,工具 `tools/lexiang_questions_crawl`),按 organization 字段过滤出 26 条 Administrators / TAAC 官方答复,沉淀到 `document/community/_industry_intel.md`。本次审视带来 5 项硬变更:① **T7 `[~]` → `[!]` 升级** — 官方明确"infer.py 必须与训练一致",我们偏离了 baseline 默认超参,首次 publish 必修 infer.py 三件套;② **新增 T8** 验证集按时间切(官方"测试集时间不重叠且在训练集之后" ⊕ baseline 当前随机切 = 离线-在线一致性 bug,**ROI 最高的 baseline 改进**);③ **新增 T9** 推理 30min 硬上限 profile;④ T4 撤回"并行启动消融"判断 — 实际配额"全队 2 quota,严格串行"+评估每天 3 次北京时间 12:00 刷新(早期官方答 AOE 15:59:59 已迭代);⑤ T2/T3 inline 加情报佐证(label_type=2 处理已正确;新序列域若符合命名模式 infer_schema.py 自动覆盖)。距初赛 ddl 25 天。
+- **2026-04-30 晨**：平台首个 baseline job 启动成功（GPU / batch=256 / 1.9M 行 / 1000 分片）。沉淀三件事：① **T3 升 `[x]` 结案**——日志确认 46 user_int + 14 item_int + 4 domain seq 与 demo §3 完全一致；总参数量 198.7M（vs demo 160.9M），sparse vocab 真值更大但字段集未变。② **T7 修正**——平台 Evaluation 页**已预置 infer.py (15.6K)**，原"新建文件"计划作废，改为「Publish 后下载默认 infer.py 审查兼容性」，回归 user rule 最小变更红线。③ T4 启动 swiglu 第一组消融（剩余 1 个资源额度可立刻使用）。距初赛 ddl 25 天。
+- **2026-04-29 晚**：第一轮 baseline 提交平台训练成功（默认配置 = `transformer` 编码器，等同 T4-B 首跑）。沉淀本次审视：T4 阻塞实质解除，下一步走平台 "Copy" 流程并行启动 T4-A (swiglu) / T4-C (longer)，避免本地重跑；新增 **T7「补 `infer.py`」**（评估硬约束，未补即无法上榜，待用户显式授权新建文件后启动）；T3 仍 `[!]`，等首个平台 job 日志回流 vocab/dim 真实值后判定是否升 `[~]`。距初赛 ddl 26 天。
 - **2026-04-29**：T1 环境切换 venv → conda（`tencent-unirec`，python 3.11.15 / torch 2.10.0 CPU）。recipe 第 ① 步从 `python -m venv` 改为 `conda create`；后续步骤删除 `.venv/bin/` 前缀。conda env 跑通 1 epoch AUC 0.6761，与 venv 完全一致（seed=42 复现）。`.venv/` 已删除（释放 922MB）。
 - **2026-04-28**：T1 完成。结合 PDF 全 58 页验证 baseline 即官方训练模板；本地 CPU 33s 跑通 demo，AUC 0.6799。沉淀「踩坑 & 解法」表 + Recipe（含 row_group_size 重写步骤）。回写 PDF 关键事实（环境变量清单、平台规格、ckpt 命名约束、公榜参考分数）。
 - **2026-04-26**：创建文件，从 `knowledge_base.txt §8` 迁出 6 条 TODO；T5 决议暂缓；新增 7 步审视清单。
