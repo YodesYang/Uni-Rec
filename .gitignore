@@ -14,6 +14,9 @@ runs/
 # --- Source PDF (oversized, image-only; markdown 解析版本已落到 document/) ---
 document/*.pdf
 
+# --- Lexiang community raw JSON snapshots (oversized; 情报已沉淀到 _industry_intel.md) ---
+document/community/lexiang_questions_*.json
+
 # --- macOS / IDE noise ---
 .DS_Store
 .idea/
