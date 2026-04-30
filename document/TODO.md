@@ -270,6 +270,10 @@ LONGER 在初赛 100+ 字段、复赛 10× 数据上一般 ROI 最高。
 
 (2026-04-30 夜新增 · 触发证据: 官方 4/26 在 "basic questions on dataset" 答复「**test set timestamps do not overlap with training set and are from a later time period**」, 但 baseline `dataset.py` 当前用 `valid_ratio=0.1` 随机切 row group → **验证集与训练集时间分布相同, 而真实测试集是未来** → 离线 AUC 与公榜 AUC 必然有 gap, 调参方向会被带偏。这是**当前公榜大多数队伍尚未做**的离线-在线一致性修复, ROI 极高。)
 
+(2026-04-30 夜补 · **待自验证的两条社区线索**, 未纳入下面切法设计, 仅留 trace:
+1. **训练集 timestamp 严重不均衡**: 社区一截图示 train 跨 02-28~03-04 共 5 天, **03-03 单日 1.31M / 总 2.10M ≈ 63%**, 其它天 3~25%。若属实 → "取最后 10%" 实际几乎全是 03-04 末段;按 timestamp 排序后用更小切片(如 5%) 或许更接近真实 future 边缘 — 等下次平台 job 自打 `np.bincount(timestamps_in_days)` 验证后再定切法。
+2. **疑似时间穿越**: 同帖示评估日志中出现 `2026-02-27 11:00:13`(早于 train min `2026-02-28 00:35:09`)。但用户截图的字段标签不明(可能是 `timestamp` / `label_time` / 序列内 ts_fid 之一,后两者"早"是设计如此非穿越) — 下次 job 在 train + eval 各打印 `timestamp.p1/p50/p99` + 序列 `ts_fid.p1/p50/p99` 自验证;若 `eval timestamp.p1 < train timestamp.max` 才视为真穿越,届时本节切法假设要重审。)
+
 **最小动作**（30 分钟）：
 1. grep `valid_ratio` / `is_training` / row_group_range 在 baseline 调用链, 确认切法位置
 2. 改 `train.py` 里切分逻辑: 按 `_rg_list` 的 row group 顺序取**最后 10%** 作 valid, 而非随机切(原始 parquet 在平台上**已按 timestamp 写入**, row group 顺序 ≈ 时间序; 本地 demo 因 `row_group_size=100` 重写过也保留时间序)
