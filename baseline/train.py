@@ -78,6 +78,16 @@ def parse_args() -> argparse.Namespace:
                         help='Fraction of training Row Groups to use (takes the first N%)')
     parser.add_argument('--valid_ratio', type=float, default=0.1,
                         help='Fraction of all Row Groups used for validation (takes the tail)')
+    parser.add_argument('--valid_split_strategy', type=str, default='filename',
+                        choices=['filename', 'time'],
+                        help='How to order Row Groups before taking the tail '
+                             'as validation: '
+                             "'filename' (default, behavior-preserving) keeps "
+                             'the sorted(glob)+RG-index order assumed by the '
+                             'baseline; '
+                             "'time' sorts RGs by max(timestamp) ASC so the "
+                             'validation tail is strictly later than train, '
+                             'matching the TAAC 2026 test-set time gap.')
     parser.add_argument('--eval_every_n_steps', type=int, default=0,
                         help='Run validation every N steps '
                              '(0 = only at the end of each epoch)')
@@ -253,6 +263,7 @@ def main() -> None:
         buffer_batches=args.buffer_batches,
         seed=args.seed,
         seq_max_lens=seq_max_lens,
+        valid_split_strategy=args.valid_split_strategy,
     )
 
     # ---- NS groups ----

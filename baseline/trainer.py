@@ -442,12 +442,20 @@ class PCVRHyFormerRankingTrainer:
 
         all_logits_list = []
         all_labels_list = []
+        # Per-row diagnostic side-channel (only populated if dataset emits the
+        # _diag_* fields; safe to be empty otherwise).
+        diag_keys = ('_diag_user_int_nz', '_diag_item_int_nz',
+                     '_diag_seq_total_len', '_diag_label_type_raw')
+        all_diag: Dict[str, list] = {k: [] for k in diag_keys}
 
         with torch.no_grad():
             for step, batch in pbar:
                 logits, labels = self._evaluate_step(batch)
                 all_logits_list.append(logits.detach().cpu())
                 all_labels_list.append(labels.detach().cpu())
+                for k in diag_keys:
+                    if k in batch:
+                        all_diag[k].append(batch[k].numpy())
 
         all_logits = torch.cat(all_logits_list, dim=0)
         all_labels = torch.cat(all_labels_list, dim=0).long()
@@ -478,7 +486,87 @@ class PCVRHyFormerRankingTrainer:
         else:
             logloss = float('inf')
 
+        # Slice diagnostics (best-effort; never blocks the main metric).
+        if any(len(v) > 0 for v in all_diag.values()):
+            try:
+                diag_concat = {k: np.concatenate(v) for k, v in all_diag.items() if len(v) > 0}
+                if nan_mask.any():
+                    keep = ~nan_mask
+                    diag_concat = {k: arr[keep] for k, arr in diag_concat.items()}
+                self._slice_diagnose(probs, labels_np, diag_concat)
+            except Exception as e:
+                logging.warning(f"[diag] slice diagnose failed: {e}")
+
         return auc, logloss
+
+    def _slice_diagnose(
+        self,
+        probs: np.ndarray,
+        labels: np.ndarray,
+        diag: Dict[str, np.ndarray],
+    ) -> None:
+        """Log per-slice (n / pos_rate / AUC / pred_mean) tables for valid set.
+
+        Slices:
+        - ``user_int_nonzero`` (4-quantile): how many user_int features are
+          non-padding. Detects how the model handles cold/sparse users.
+        - ``item_int_nonzero`` (4-quantile): same on the item side.
+        - ``seq_total_len`` (4-quantile): sum of seq lengths across all 4
+          domains. Detects how the model handles low-activity users.
+        - ``label_type`` (categorical {0,1,2}): per-class AUC and base rate.
+          Sanity-checks that label_type==2 is the only positive class.
+
+        AUC bucket-vs-overall delta > 0.02 typically indicates a slice the
+        model is materially worse on, i.e. a feature-engineering target.
+        """
+        n_total = len(probs)
+        if n_total == 0:
+            return
+
+        header = (f"  {'bucket':<28s} {'n':>10s} {'pos_rate':>10s} "
+                  f"{'AUC':>8s} {'pred_mean':>10s}")
+
+        def _row(name: str, mask: np.ndarray) -> str:
+            n = int(mask.sum())
+            if n == 0:
+                return f"  {name:<28s} {n:>10d}"
+            p, s = labels[mask], probs[mask]
+            pos_rate = float(p.mean())
+            pred_mean = float(s.mean())
+            if len(np.unique(p)) < 2:
+                auc_str = '     nan'
+            else:
+                auc_str = f"{roc_auc_score(p, s):>8.4f}"
+            return (f"  {name:<28s} {n:>10d} {pos_rate:>10.4f} "
+                    f"{auc_str} {pred_mean:>10.4f}")
+
+        def _print_quantile(name: str, arr: np.ndarray, n_buckets: int = 4) -> None:
+            qs = np.unique(np.quantile(arr, np.linspace(0, 1, n_buckets + 1)))
+            if len(qs) < 2:
+                logging.info(f"[diag] {name}: degenerate (single value {qs[0]}), skipped")
+                return
+            # searchsorted on the interior cut points; side='right' so that
+            # the maximum value lands in the last bucket.
+            bucket = np.searchsorted(qs[1:-1], arr, side='right')
+            lines = [f"[diag] slice by {name} ({len(qs) - 1}-quantile):", header]
+            for b in range(len(qs) - 1):
+                mask = bucket == b
+                label = f"[{int(qs[b])},{int(qs[b + 1])}]"
+                lines.append(_row(label, mask))
+            logging.info('\n'.join(lines))
+
+        if '_diag_user_int_nz' in diag:
+            _print_quantile('user_int_nonzero', diag['_diag_user_int_nz'])
+        if '_diag_item_int_nz' in diag:
+            _print_quantile('item_int_nonzero', diag['_diag_item_int_nz'])
+        if '_diag_seq_total_len' in diag:
+            _print_quantile('seq_total_len', diag['_diag_seq_total_len'])
+        if '_diag_label_type_raw' in diag:
+            arr = diag['_diag_label_type_raw']
+            lines = ["[diag] slice by label_type (raw 0/1/2):", header]
+            for lt in (0, 1, 2):
+                lines.append(_row(f"label_type={lt}", arr == lt))
+            logging.info('\n'.join(lines))
 
     def _evaluate_step(
         self, batch: Dict[str, Any]

@@ -666,7 +666,64 @@ class PCVRParquetDataset(IterableDataset):
 
             result[f'{domain}_time_bucket'] = torch.from_numpy(time_bucket.copy())
 
+        # ---- Slice-diagnostic side-channel (training/valid only) ----
+        # These underscore-prefixed fields are NOT read by trainer's
+        # _make_model_input, so the training forward pass is unaffected.
+        # They are also gated on is_training=True so the inference path
+        # (infer.py with is_training=False) does NOT carry them, keeping
+        # the inference contract unchanged.
+        if self.is_training:
+            result['_diag_user_int_nz'] = torch.from_numpy(
+                (user_int != 0).sum(axis=1).astype(np.int32))
+            result['_diag_item_int_nz'] = torch.from_numpy(
+                (item_int != 0).sum(axis=1).astype(np.int32))
+            seq_total_len = np.zeros(B, dtype=np.int32)
+            for domain in self.seq_domains:
+                seq_total_len += self._buf_seq_lens[domain][:B].astype(np.int32)
+            result['_diag_seq_total_len'] = torch.from_numpy(seq_total_len)
+            # Re-read raw label_type (0/1/2) for per-class AUC slicing; the
+            # 'label' field was already collapsed to binary (label_type==2).
+            raw_lt = (batch.column(self._col_idx['label_type'])
+                      .fill_null(0).to_numpy(zero_copy_only=False)
+                      .astype(np.int8))
+            result['_diag_label_type_raw'] = torch.from_numpy(raw_lt)
+
         return result
+
+
+def _rg_ts_range(
+    pf_cache: Dict[str, "pq.ParquetFile"],
+    file_path: str,
+    rg_idx: int,
+) -> Optional[Tuple[int, int]]:
+    """Return ``(min_ts, max_ts)`` for a single row group.
+
+    Prefers the parquet column statistics (zero IO past the metadata that is
+    already loaded); falls back to actually reading the ``timestamp`` column
+    of that row group when statistics are missing. ``None`` if the row group
+    has no ``timestamp`` column at all.
+    """
+    pf = pf_cache.get(file_path)
+    if pf is None:
+        pf = pq.ParquetFile(file_path)
+        pf_cache[file_path] = pf
+    rg_meta = pf.metadata.row_group(rg_idx)
+    ts_col = None
+    for c in range(rg_meta.num_columns):
+        if rg_meta.column(c).path_in_schema == 'timestamp':
+            ts_col = c
+            break
+    if ts_col is None:
+        return None
+    stats = rg_meta.column(ts_col).statistics
+    if stats is not None and stats.has_min_max:
+        return (int(stats.min), int(stats.max))
+    arr = pq.read_table(
+        file_path, columns=['timestamp'], row_groups=[rg_idx]
+    ).column('timestamp').to_numpy()
+    if len(arr) == 0:
+        return None
+    return (int(arr.min()), int(arr.max()))
 
 
 def get_pcvr_data(
@@ -681,12 +738,28 @@ def get_pcvr_data(
     seed: int = 42,
     clip_vocab: bool = True,
     seq_max_lens: Optional[Dict[str, int]] = None,
+    valid_split_strategy: str = 'filename',
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
 
     The validation split is taken as the last ``valid_ratio`` fraction of Row
-    Groups (in the file order returned by ``glob``).
+    Groups. The order in which Row Groups are listed (and therefore which
+    fraction becomes "the last") is controlled by ``valid_split_strategy``:
+
+    - ``'filename'`` (default, behavior-preserving): keep Row Groups in
+      ``sorted(glob)`` + RG-index order. This is what the original baseline
+      does and assumes the parquet shards already happen to be in
+      time-ascending order.
+    - ``'time'``: read each Row Group's ``timestamp`` column statistics and
+      sort Row Groups by ``max(timestamp)`` ascending before splitting. This
+      is the right choice when the test set is guaranteed to be later than
+      the training set (TAAC 2026 setup) and the parquet write order is not
+      known to be time-ordered.
+
+    Either way, a sanity log is emitted with the train/valid timestamp
+    ranges and their overlap so the actual split alignment is visible
+    without any extra job.
 
     Returns:
         A tuple ``(train_loader, valid_loader, train_dataset)``. The third
@@ -699,12 +772,43 @@ def get_pcvr_data(
     import glob as _glob
     pq_files = sorted(_glob.glob(os.path.join(data_dir, '*.parquet')))
 
-    rg_info = []
+    rg_info: List[Tuple[str, int, int]] = []
     for f in pq_files:
         pf = pq.ParquetFile(f)
         for i in range(pf.metadata.num_row_groups):
             rg_info.append((f, i, pf.metadata.row_group(i).num_rows))
     total_rgs = len(rg_info)
+
+    if valid_split_strategy not in ('filename', 'time'):
+        raise ValueError(
+            f"Unknown valid_split_strategy={valid_split_strategy!r}; "
+            "expected 'filename' or 'time'.")
+
+    # Per-RG timestamp range cache, populated lazily for sanity logging and
+    # eagerly for `valid_split_strategy='time'`.
+    rg_ts_ranges: List[Optional[Tuple[int, int]]] = [None] * total_rgs
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+
+    if valid_split_strategy == 'time':
+        # Cost: at most one metadata lookup + (rare) one column read per RG;
+        # for 1000 RGs with statistics this is sub-second.
+        for i, (f, rg_idx, _) in enumerate(rg_info):
+            rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
+        n_missing = sum(r is None for r in rg_ts_ranges)
+        if n_missing:
+            raise ValueError(
+                "valid_split_strategy='time' requires every row group to "
+                "expose a 'timestamp' column with parseable min/max; got "
+                f"{n_missing}/{total_rgs} RGs without a timestamp range.")
+        order = sorted(
+            range(total_rgs),
+            key=lambda k: (rg_ts_ranges[k][1], rg_ts_ranges[k][0]),
+        )
+        rg_info = [rg_info[k] for k in order]
+        rg_ts_ranges = [rg_ts_ranges[k] for k in order]
+        logging.info(
+            f"[T8] valid_split_strategy=time: sorted {total_rgs} RGs "
+            f"by max(timestamp) ASC")
 
     n_valid_rgs = max(1, int(total_rgs * valid_ratio))
     n_train_rgs = total_rgs - n_valid_rgs
@@ -717,8 +821,44 @@ def get_pcvr_data(
     train_rows = sum(r[2] for r in rg_info[:n_train_rgs])
     valid_rows = sum(r[2] for r in rg_info[n_train_rgs:])
 
-    logging.info(f"Row Group split: {n_train_rgs} train ({train_rows} rows), "
+    logging.info(f"Row Group split ({valid_split_strategy}): "
+                 f"{n_train_rgs} train ({train_rows} rows), "
                  f"{n_valid_rgs} valid ({valid_rows} rows)")
+
+    # ---- T8: train/valid timestamp range sanity log (both strategies) ----
+    # For 'filename' we only need 4 boundary RGs to assess the cut alignment,
+    # avoiding scanning all 1000 RGs in the default path.
+    if valid_split_strategy == 'filename':
+        sample_idx = sorted({
+            0,
+            max(0, n_train_rgs - 1),
+            min(total_rgs - 1, n_train_rgs),
+            total_rgs - 1,
+        })
+        for i in sample_idx:
+            if 0 <= i < total_rgs and rg_ts_ranges[i] is None:
+                f, rg_idx, _ = rg_info[i]
+                rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
+    train_ts = [r for r in rg_ts_ranges[:n_train_rgs] if r is not None]
+    valid_ts = [r for r in rg_ts_ranges[n_train_rgs:] if r is not None]
+    if train_ts and valid_ts:
+        train_min, train_max = min(r[0] for r in train_ts), max(r[1] for r in train_ts)
+        valid_min, valid_max = min(r[0] for r in valid_ts), max(r[1] for r in valid_ts)
+        # Positive overlap_sec = train extends past valid_min => leakage of
+        # future-relative training rows into the valid window. For a clean
+        # time-aware split this should be <= 0.
+        overlap_sec = train_max - valid_min
+        logging.info(
+            f"[T8] train ts: [{train_min}, {train_max}]  "
+            f"valid ts: [{valid_min}, {valid_max}]  "
+            f"overlap_sec (train_max - valid_min, <=0 means clean split): "
+            f"{overlap_sec}")
+        if overlap_sec > 0 and valid_split_strategy == 'filename':
+            logging.warning(
+                "[T8] valid_split_strategy='filename' yields ts overlap with "
+                "train; consider --valid_split_strategy time for a "
+                "time-aware split (TAAC 2026 test set is strictly later "
+                "than training).")
 
     train_dataset = PCVRParquetDataset(
         parquet_path=data_dir,
