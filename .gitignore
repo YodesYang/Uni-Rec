@@ -11,11 +11,11 @@ venv/
 data/
 runs/
 
-# --- Source PDF (oversized, image-only; markdown 解析版本已落到 document/) ---
-document/*.pdf
+# --- Source PDF (oversized, image-only; markdown 解析版本已落到 docs/00-context/) ---
+docs/99-raw/platform-pdf/*.pdf
 
-# --- Lexiang community raw JSON snapshots (oversized; 情报已沉淀到 _industry_intel.md) ---
-document/community/lexiang_questions_*.json
+# --- Lexiang community raw JSON snapshots (oversized; 情报已沉淀到 docs/10-research/community-intel.md) ---
+docs/99-raw/community-snapshots/lexiang_questions_*.json
 
 # --- macOS / IDE noise ---
 .DS_Store

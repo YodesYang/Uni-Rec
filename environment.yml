@@ -13,7 +13,7 @@
 #         torch
 # (replace cu126 with the wheel matching your local CUDA toolkit; the
 #  competition platform itself ships torch 2.7.1+cu126, see
-#  document/tencent_angel_platform_guide.md §5)
+#  docs/00-context/platform-angel.md §5)
 
 name: tencent-unirec
 channels:

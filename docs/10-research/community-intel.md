@@ -1,6 +1,6 @@
 # 工业赛道情报抽取 (基于 lexiang 社区抓取)
 
-- 数据源: lexiang_questions_2026-04-30-06-46-51.json (141 题)
+- 数据源: `docs/99-raw/community-snapshots/lexiang_questions_2026-04-30-06-46-51.json` (141 题)
 - 工业赛道相关题数: 47
 - 含官方答复 (Administrators / TAAC): 26
 

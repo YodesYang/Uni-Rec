@@ -1,21 +1,21 @@
 ---
-description: TODO 审视纪律 — 接触 document/TODO.md 时强制运行 7 步深度审视
-globs: document/TODO.md
+description: TODO 审视纪律 — 接触 docs/20-tasks/active.md 时强制运行 7 步深度审视
+globs: docs/20-tasks/active.md
 alwaysApply: false
 ---
 
 # TODO 审视纪律
 
-任何涉及 `document/TODO.md` 的读写、引用、状态更新，**必须先完整读完该文件**，
-然后按其顶部「审视清单」中的 7 步顺序执行：
+任何涉及 `docs/20-tasks/active.md` 的读写、引用、状态更新，**必须先完整读完该文件**，
+然后按 `docs/20-tasks/README.md` 中「审视清单」的 7 步顺序执行：
 
 1. 状态校验
-2. 时间线压力
+2. 时间线压力（对照 `docs/00-context/competition.md §2`）
 3. 优先级重排
 4. Recipe 时效
 5. 红线复核（最小变更 / 不新建 test 文件 / 生产安全 / 输出克制）
 6. 下一步具象化（每条 `[~]`/`[ ]` 给出 30 分钟可做的最小动作）
-7. 沉淀回写（更新「最近一次审视」+ inline 状态注释）
+7. 沉淀回写（**覆盖**写「最近一次审视」，不累积；老结论进 changelog）
 
 ## 输出格式（强制）
 
@@ -31,16 +31,32 @@ alwaysApply: false
 
 ## 联动检查
 
-- 必须交叉对照 `document/knowledge_base.txt §2`（赛事时间表），
-  对最近 ddl ≤ 14 天的 TODO 标红 / 升级优先级。
-- 任何 TODO 状态变更 → 同步更新 TODO.md 顶部「最近一次审视」行，
+- 必须交叉对照 `docs/00-context/competition.md §2`（赛事时间表），
+  对最近 ddl ≤ 14 天的 task 标红 / 升级优先级。
+- 任何 task 状态变更 → 同步更新 `active.md` 顶部「最近一次审视」行（**覆盖式**），
   并在对应节点附 inline 注释 `(YYYY-MM-DD: ...)`。
-- 涉及代码改动时，决策要写回 `Changelog`，不要只在 chat 里口头确认。
+- 涉及代码改动时，决策推理写回 `docs/30-decisions/ADR-NNN-*.md`，
+  实验数字写回 `docs/40-experiments/EXP-NNN-*.md`，
+  active.md 对应 task 节点只留「→ 详见 ADR-NNN / EXP-NNN」一句话。
+
+## 升级路径（关键）
+
+```
+20-tasks/active.md  ─── 升决策推理 ──→  30-decisions/ADR-NNN-*.md
+                  └─── 升实验数字 ──→  40-experiments/EXP-NNN-*.md
+                  └─── 完成归档 ────→  20-tasks/archive.md
+```
+
+完成的 task `[x]` **必须**搬到 `archive.md` 并加 `→ EXP-NNN` / `→ ADR-NNN` 链接，
+不许留在 `active.md` 污染审视开销。
 
 ## 反模式（禁止）
 
-- ❌ 用户问「TODO 进展如何」时，跳过 TODO.md 直接凭印象回答。
-- ❌ 改 TODO 状态但忘记 bump「最近一次审视」与 `Changelog`。
-- ❌ 新增 TODO 不分配稳定的 `T<n>` 编号；或复用已退役编号。
-- ❌ 把 6 步以上审视结论塞进段落散文，而不是表格 / 列表。
-- ❌ 在 chat 里口头说「已完成 Tx」却不更新 TODO.md。
+- ❌ 用户问「TODO 进展如何」时，跳过 `active.md` 直接凭印象回答
+- ❌ 改 task 状态但忘记 bump「最近一次审视」与 `Changelog`
+- ❌ 新增 task 不分配稳定的 `T<N>` 编号；或复用已退役编号
+- ❌ 把 6 步以上审视结论塞进段落散文，而不是表格 / 列表
+- ❌ 在 chat 里口头说「已完成 T<N>」却不更新 `active.md`
+- ❌ 完成的 task `[x]` 留在 `active.md` 不归档（污染审视开销）
+- ❌ 把决策推理写在 task inline 而不升 ADR；把实验数字写在 task inline 而不升 EXP
+- ❌ 顶部「最近一次审视」累积写多条（应该覆盖式，老的进 Changelog）

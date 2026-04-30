@@ -1,6 +1,6 @@
 # Tencent Angel Machine Learning Platform — User Guide（精简整理版）
 
-> 来源：`document/Tencent Angel Machine Learning Platform User Guide.pdf`（图片版 PDF，不进 git）。
+> 来源：`docs/99-raw/platform-pdf/Tencent Angel Machine Learning Platform User Guide.pdf`（图片版 PDF，不进 git）。
 > 整理范围：全 58 页；剔除空白排版页；保留所有可执行约束与官方公榜数字。
 > 维护者复核日期：2026-04-28。
 
