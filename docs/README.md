@@ -16,6 +16,7 @@
 | 看平台手册（Tencent Angel） | [`00-context/platform-angel.md`](./00-context/platform-angel.md) |
 | 看「为什么这么改 baseline」（决策推理） | [`30-decisions/`](./30-decisions/) |
 | 看实验数字 / 历次 platform job 结果 | [`40-experiments/`](./40-experiments/) |
+| 看技术报告草稿（KDD 答辩用） | [`50-paper/draft-v0.md`](./50-paper/draft-v0.md) |
 | 看相关论文 | [`10-research/prior-art.md`](./10-research/prior-art.md) |
 | 看社区情报（官方答复 / 选手讨论） | [`10-research/community-intel.md`](./10-research/community-intel.md) |
 | 看候选改进想法（还没启动的） | [`10-research/ideas-backlog.md`](./10-research/ideas-backlog.md) |
@@ -54,6 +55,9 @@ docs/
 │   ├── README.md                          # 实验编号约定
 │   ├── EXP-001-baseline-cpu-demo.md       # 本地 demo baseline
 │   └── EXP-002-platform-baseline-job.md   # 平台首次 job
+│
+├── 50-paper/                              # 技术报告（KDD 答辩用）
+│   └── draft-v0.md                        # T6 草稿（迭代覆盖）
 │
 └── 99-raw/                                # 原始数据（备份用）
     ├── community-snapshots/               # 乐享社区抓取快照（带 diff 脚本）
@@ -94,11 +98,12 @@ docs/
 | `20-tasks/archive.md` | 中（task 完成时一次性追加） | 完成 task 的人 |
 | `30-decisions/ADR-*` | 永不修改（新决策写新 ADR）| 决策者 |
 | `40-experiments/EXP-*` | 永不修改（实验跑完一次性写）| 跑实验的人 |
+| `50-paper/draft-v*.md` | 中（迭代覆盖；文件名升 v0/v1/v2）| T6 owner |
 
 ---
 
 ## 当前赛事状态（一行快速看）
 
-距初赛 ddl **25 天**（5/25）· 公榜分 **0.843371** · 社区 SOTA **0.85809**（差 +0.0148）· 评估额度每天 **3 次串行** · T7 `infer.py` 对齐是**当前最大阻塞**。
+距初赛 ddl **25 天**（5/25）· 当前最佳 Leaderboard **0.84381**（swiglu encoder）· 社区 SOTA **0.85809**（差 +0.0143）· 评估额度每天 **4 次** / 资源 **4** 配额（榜单重置补偿）· T7 / T9 已结案 → 当前最高 ROI 动作：**重新发布 transformer step=38050 ckpt**（30 秒，+0.002 预期）+ 新一轮 platform job 验证 T8 时间切。
 
 详见 [`20-tasks/active.md`](./20-tasks/active.md) 顶部「最近一次审视」一行。
