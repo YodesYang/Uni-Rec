@@ -16,3 +16,8 @@ alwaysApply: true
 - 推理时长基线（基于 1.9M train + 523k test，单 GPU 19GB，batch=256）：transformer ≈ 514s / longer ≈ 203s / swiglu ≈ 82s，全部远低于 30min 硬上限；编码器选型对推理时长影响 6 倍以上
 - 推理需输出 `predictions.json`，user_id 必须**全量覆盖测试集**（社区有题报「Missing 310000 user_ids」直接掉分）；本届 baseline 已覆盖 523244 条
 - baseline `trainer.py::_save_step_checkpoint` 已自动把 `schema.json` + `train_config.json` + `ns_groups.json` 复制到每个 `*.best_model/` 目录 → 无需额外手工同步
+
+## 协作与提交约定
+
+- **Commit 触发条件**：Agent 完成一个**稳定且重要**的任务（里程碑达成 / 本地 working tree 自包含可还原 / 文档·代码同步） → Agent **主动 commit**，commit 前必须先给用户看 message 草稿，等用户点头再执行；commit 信息沿用本仓库 conventional 风格（`docs:` / `chore:` / `fix(scope):` 等）
+- **Push 触发条件**：明确开始新的、独立的工作单元前（如新一轮 platform job 启动 / 切代码分支 / 开始改新的 baseline 文件） → Agent **主动提醒** 用户 push，但**不主动**推送到 `main`（GitHub 远端 `origin` 为 `git@github.com:YodesYang/Tencent_Uni_Rec.git`，主分支政策敏感）；除非用户显式说「push」
