@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-04-30（PDT 21:50 · 训练日志回流 + T4 收口 + T6 启动）· 结论：T4 / T7 / T9 三连归档（archive.md 现 6 条），active.md 剩 4 条 task。**核心新证据**（详见 [EXP-002 §训练侧 Local Val AUC 收敛曲线](../40-experiments/EXP-002-platform-baseline-job.md)）：① **transformer published 错 ckpt** — 训练已到 epoch 6 / Best step=38050 (Val 0.8641)，但 Publish 的是 step=7610 (Val 0.8617)；**重新发布 step=38050 是当前最高 ROI 的零代码动作**（预计 leaderboard 0.834 → ~0.836）；② **Local Val AUC vs Leaderboard AUC 系统性 gap ≈ 0.021~0.028** — 远超噪声，强烈指向 `valid_split_strategy=filename` 与 test 集的时间外推不匹配，**T8 重要性升级**；③ swiglu 既最快（35min/epoch）又最高 Val AUC（0.8650）+ 最高 leaderboard（0.84381），与 HyFormer 论文 "Transformer ≥ SwiGLU" 期望反向 → T4 直接结案；④ 本轮训练 jobs 启动于 T8/T10 探针落地之前，**`[T8] / [diag]` 行不在本 log 里**，T8/T10 仍需新一轮 platform job 才能验证。**关键待办（按 ROI 排序）**：① **重新发布 transformer step=38050 ckpt → 1 次评估**（30 秒动作，预计 +0.002 leaderboard）；② T8 + T10 必须在新一轮 platform job（用 baseline tip 含 ADR-001/002 探针）中验证，否则 P0 特征工程方向无依据；③ T6 报告草稿已启动 → `docs/50-paper/draft-v0.md`，骨架就位待你 review。Leaderboard Delayed Feedback ≈ 北京时间次日 15:00 刷新。距初赛 ddl **25 天**（5/25）。
+**最近一次审视**：2026-05-01（PDT 00:55 · ADR-003 特征工程规划落地 + Ensemble 红线入库）· 结论：用户提问「是否有特征工程规划」+「ensemble 是否禁止」→ 回看 docs 确认 ① ensemble 官方明确禁止（competition.md line 77）但 MoE / multi-task 例外；② 之前确实没有正式特征工程规划。**修补动作**：① 升 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md) — 4 类候选（P0-A 缺失计数 / P0-B 序列活跃度 / P0-C 历史 CVR 防泄露 / P1 multi-task）+ 5/3~5/15 EXP-003~007 实施时序 + Ensemble 合规核对清单；② team-memory.mdc 补 Ensemble 红线铁律（防止下次新会话又推荐 ensemble）；③ T10 节点的 6 行决策表追加 → ADR-003 链接。**之前回合的轨迹**（保留 trace）：T4 / T7 / T9 三连归档（archive.md 现 6 条），4 个 platform jobs 在跑（baseline-retrain / swiglu+time / swiglu+d_model=128 / swiglu+dropout=0.05），明早回收数据。**核心新证据**（详见 [EXP-002 §训练侧 Local Val AUC 收敛曲线](../40-experiments/EXP-002-platform-baseline-job.md)）：① **transformer published 错 ckpt** — 训练已到 epoch 6 / Best step=38050 (Val 0.8641)，但 Publish 的是 step=7610 (Val 0.8617)；**重新发布 step=38050 是当前最高 ROI 的零代码动作**（预计 leaderboard 0.834 → ~0.836）；② **Local Val AUC vs Leaderboard AUC 系统性 gap ≈ 0.021~0.028** — 远超噪声，强烈指向 `valid_split_strategy=filename` 与 test 集的时间外推不匹配，**T8 重要性升级**；③ swiglu 既最快（35min/epoch）又最高 Val AUC（0.8650）+ 最高 leaderboard（0.84381），与 HyFormer 论文 "Transformer ≥ SwiGLU" 期望反向 → T4 直接结案；④ 本轮训练 jobs 启动于 T8/T10 探针落地之前，**`[T8] / [diag]` 行不在本 log 里**，T8/T10 仍需新一轮 platform job 才能验证。**关键待办（按 ROI 排序）**：① **重新发布 transformer step=38050 ckpt → 1 次评估**（30 秒动作，预计 +0.002 leaderboard）；② T8 + T10 必须在新一轮 platform job（用 baseline tip 含 ADR-001/002 探针）中验证，否则 P0 特征工程方向无依据；③ T6 报告草稿已启动 → `docs/50-paper/draft-v0.md`，骨架就位待你 review。Leaderboard Delayed Feedback ≈ 北京时间次日 15:00 刷新。距初赛 ddl **25 天**（5/25）。
 
 ---
 
@@ -86,15 +86,15 @@
 - ⚠️ **本轮 EXP-002 三组训练 jobs 启动于 T10 探针落地之前 → log 里没有 `[diag]` 行** → 必须新一轮 platform job 才能拿到 4 张切片表
 - ⏳ **待新一轮平台 job 4 张切片表回流** → 决定 P0 特征工程方向
 
-**待平台 job 验证后再分类决策**（每个分支对应不同的 P0 特征工程方向）：
+**待平台 job 验证后再分类决策**（每个分支对应不同的 P0 特征工程方向，**实施方案见 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md)**）：
 
-| 平台 job 切片表观察 | 解读 | P0 优先级动作 |
+| 平台 job 切片表观察 | 解读 | P0 优先级动作 → 详见 ADR-003 |
 |---|---|---|
-| `label_type=0` 占比 > 50% | 任务是 CTCVR（曝光为主） | 维持 baseline 损失，重点做 user/item 缺失计数 dense 特征 |
-| `label_type=0` 占比 < 5% | 任务是 click-conditional CVR | 重新评估损失（可能需要 IPS 或 ESMM 风格辅助任务） |
-| `user_int_nonzero` 桶间 AUC 差 > 0.02 | 用户冷启动是薄弱点 | P0：把 `user_int_nonzero` 自身做 dense 特征（带分桶 embedding） |
-| `item_int_nonzero` 桶间 AUC 差 > 0.02 | 商品冷启动是薄弱点 | P0：item_int_nonzero 同上 + item_id 历史 ctr/cvr 统计 |
-| `seq_total_len` 桶间 AUC 差 > 0.02 | 用户活跃度是薄弱点 | P0：每个 domain 的 seq_len 单独成 dense 特征 |
+| `label_type=0` 占比 > 50% | 任务是 CTCVR（曝光为主） | 维持 baseline 损失，重点做 user/item 缺失计数 dense 特征（→ P0-A） |
+| `label_type=0` 占比 < 5% | 任务是 click-conditional CVR | 重新评估损失（可能需要 IPS 或 ESMM 风格辅助任务）（→ P1） |
+| `user_int_nonzero` 桶间 AUC 差 > 0.02 | 用户冷启动是薄弱点 | P0-A：缺失计数 dense feature |
+| `item_int_nonzero` 桶间 AUC 差 > 0.02 | 商品冷启动是薄弱点 | P0-A + P0-C：item_int_nonzero + 历史 ctr/cvr 统计（防泄露 cutoff） |
+| `seq_total_len` 桶间 AUC 差 > 0.02 | 用户活跃度是薄弱点 | P0-B：每个 domain 的 seq_len + ts_range 单独成 dense 特征 |
 | `label_type=1` 与 `=2` 的 pred_mean 差距小 | 模型未充分区分点击 vs 转化 | P1：转辅助任务（CTR + CVR multi-task） |
 
 **最小动作**（下次平台 job 触发后 30 分钟内）：
@@ -107,6 +107,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-01 PDT 00:55（ADR-003 特征工程规划 + Ensemble 红线入库）**：用户两连问触发本次更新 — ① "ensemble 不允许吧？" → 我回看 docs/00-context/competition.md line 77 确认禁令 + 4/3 官方 Q&A 例外（MoE OK），承认我之前 Stage 3 的 multi-seed/multi-encoder ensemble 推荐违规；② "我们目前有规划特征工程吗？" → 回看确认仅有 T10 探针决策表雏形，无正式规划。**修补动作**：① 升 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md) — 4 类候选（P0-A 缺失计数 +0.003~0.008 / P0-B 序列活跃度 +0.003~0.010 / P0-C 历史 CVR 防泄露 +0.005~0.012 / P1 multi-task +0.005~0.015）+ 5/3~5/15 EXP-003~007 实施时序 + Ensemble 合规核对清单；② team-memory.mdc 补「Ensemble 红线 + MoE 例外 + SWA 灰色」铁律；③ active.md T10 切片决策表追加 → ADR-003 链接；④ 30-decisions/README.md 索引补 ADR-003。距初赛 ddl 24 天。
 
 - **2026-04-30 PDT 21:50（训练日志回流 + T4 收口 + T6 启动）**：用户上传完整 train_log.txt（1092 行，覆盖三组训练直至 Early Stop）。① **T4 `[~]` → `[x]` 归档**：swiglu 既最快（35min/epoch，3.5×）又最高 Local Val AUC（0.8650）+ 最高 leaderboard（0.84381），与 HyFormer Table 1 反向；② **T6 `[!]` → `[~]`**：原阻塞「T1 + T4 至少 2 组数据」满足，启动草稿 `docs/50-paper/draft-v0.md`；③ **新发现：transformer 发布错 ckpt** — 训练已到 epoch 6 (Best step=38050 Val 0.8641)，发布的是 step=7610 (Val 0.8617)，重新发布是 30 秒动作零代码改动预计 +0.002 leaderboard；④ **新发现：Local Val vs Leaderboard 系统性 gap ≈ 0.021~0.028** — 强烈指向 filename split 的 train/val 时间高度重叠，T8 重要性升级；⑤ T8/T10 inline 增加「本轮训练早于探针落地」说明，仍需新一轮 platform job 验证；⑥ docs/README.md 顶部赛事状态行同步刷新。距初赛 ddl 25 天。
 

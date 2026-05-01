@@ -9,6 +9,7 @@ alwaysApply: true
 - 补偿规则：每队资源配额提升至 4，每日提交次数上限提升至 4（提交策略可更激进，建议建立实验追踪表避免浪费配额）
 - 重要假设：官方原文仅明确提及 test dataset 有问题，但措辞含 "update the dataset"，重新下载时务必同时核对 train 数据是否也变更
 - Leaderboard 有 Delayed Feedback 机制（防止过拟合公榜）：Round 1 部分提交结果会被故意延迟显示；按官方答复，每天 16:00 AOE 前完成的评估在 19:00 AOE 同日更新榜单（≈ 北京时间次日 15:00），所以「Evaluation Success ≠ 已上榜」，**不要等不到分数就以为 infer 失败**
+- **Ensemble 红线**（`docs/00-context/competition.md` line 77 官方禁令 + 4/3 官方 Q&A 例外）：❌ multi-seed / multi-encoder prediction averaging、stacking、blending、TTA 全部禁止；✅ MoE / Sparse-MoE 端到端联合训练**不算** ensemble；✅ multi-task multi-head（同 forward pass）不算；✅ hyperparameter search 取最强单 ckpt publish 不算；⚠️ SWA（Stochastic Weight Averaging）属灰色地带 → 用之前**必须**到赛事群发问澄清，不要假设
 
 ## 推理与评估管线
 
