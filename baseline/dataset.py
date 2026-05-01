@@ -151,6 +151,7 @@ class PCVRParquetDataset(IterableDataset):
         shuffle: bool = True,
         buffer_batches: int = 20,
         row_group_range: Optional[Tuple[int, int]] = None,
+        row_groups: Optional[List[Tuple[str, int, int]]] = None,
         clip_vocab: bool = True,
         is_training: bool = True,
     ) -> None:
@@ -167,14 +168,22 @@ class PCVRParquetDataset(IterableDataset):
             buffer_batches: shuffle buffer size in units of batches.
             row_group_range: ``(start, end)`` slice of Row Groups; ``None`` to
                 use all Row Groups.
+            row_groups: explicit Row Group list. When provided, it takes
+                precedence over ``row_group_range`` and preserves caller-defined
+                ordering, e.g. timestamp-sorted splits.
             clip_vocab: if True, clip out-of-bound ids to 0; if False, raise.
             is_training: if True, derive ``label`` from ``label_type == 2``;
                 if False, return an all-zeros label column.
         """
         super().__init__()
 
-        # Accept either a directory or a single file path.
-        if os.path.isdir(parquet_path):
+        # Accept either a directory, a single file path, or an explicit Row
+        # Group list supplied by get_pcvr_data after custom ordering.
+        if row_groups is not None:
+            if not row_groups:
+                raise ValueError("row_groups must be non-empty when provided")
+            self._parquet_files = sorted({f for f, _, _ in row_groups})
+        elif os.path.isdir(parquet_path):
             import glob
             files = sorted(glob.glob(os.path.join(parquet_path, '*.parquet')))
             if not files:
@@ -193,13 +202,16 @@ class PCVRParquetDataset(IterableDataset):
         self._oob_stats: Dict[Tuple[str, int], Dict[str, int]] = {}
 
         # Build the list of Row Groups.
-        self._rg_list = []
-        for f in self._parquet_files:
-            pf = pq.ParquetFile(f)
-            for i in range(pf.metadata.num_row_groups):
-                self._rg_list.append((f, i, pf.metadata.row_group(i).num_rows))
+        if row_groups is not None:
+            self._rg_list = list(row_groups)
+        else:
+            self._rg_list = []
+            for f in self._parquet_files:
+                pf = pq.ParquetFile(f)
+                for i in range(pf.metadata.num_row_groups):
+                    self._rg_list.append((f, i, pf.metadata.row_group(i).num_rows))
 
-        if row_group_range is not None:
+        if row_group_range is not None and row_groups is None:
             start, end = row_group_range
             self._rg_list = self._rg_list[start:end]
 
@@ -867,7 +879,7 @@ def get_pcvr_data(
         seq_max_lens=seq_max_lens,
         shuffle=shuffle_train,
         buffer_batches=buffer_batches,
-        row_group_range=(0, n_train_rgs),
+        row_groups=rg_info[:n_train_rgs],
         clip_vocab=clip_vocab,
     )
 
@@ -889,7 +901,7 @@ def get_pcvr_data(
         seq_max_lens=seq_max_lens,
         shuffle=False,
         buffer_batches=0,
-        row_group_range=(n_train_rgs, total_rgs),
+        row_groups=rg_info[n_train_rgs:],
         clip_vocab=clip_vocab,
     )
     valid_loader = DataLoader(

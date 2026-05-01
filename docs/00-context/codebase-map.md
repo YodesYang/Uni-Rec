@@ -33,6 +33,7 @@ baseline/
 **新增功能**（2026-04-30 ADR-001 + ADR-002）：
 - `_rg_ts_range()` helper + `get_pcvr_data(valid_split_strategy={'filename','time'})` 参数 + sanity log（详见 ADR-001）
 - `_convert_batch()` 末尾在 `is_training=True` 分支加 4 个 `_diag_*` 字段（详见 ADR-002）
+- 2026-05-02 修复 `time` split 只排序日志、不影响 dataset 实际 RG 列表的问题：`PCVRParquetDataset` 支持显式 `row_groups`，`get_pcvr_data` 直接传入排序后的 train/valid RG 列表。
 
 ---
 
