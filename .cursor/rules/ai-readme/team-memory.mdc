@@ -20,6 +20,14 @@ alwaysApply: true
 - **平台 Copy 陷阱**：Training 页 "Copy" 功能 = 克隆冻结的 script_archive snapshot，**不会同步本地最新代码**。引入新 CLI flag / 新代码后必须 Create New Training Job 重新上传 baseline/，否则 argparse 报 "unrecognized arguments" → exit code 2（已踩坑：2026-05-01 swiglu+`--valid_split_strategy time` 用 Copy 启动直接 Failed）
 - **Publish ckpt verify 三步检查清单**：从平台 Model Management Publish ckpt 前必须 verify ① 是 `*.best_model/` 子目录（非中间步 ckpt）；② 是训练**完成（或至少早停）后**的全局最新 best（否则可能用 epoch 1 ckpt）；③ 子目录内含 `model.pt` + `train_config.json` + `schema.json` 三件套（缺 train_config 会让 default infer.py 走 baseline default 配置）。已踩坑：2026-04-30 transformer 发布 epoch 1 step=7610 而非全局 best step=38050，损失 0.0024 Val AUC ≈ leaderboard 0.002 AUC
 
+## 实验纪律与训练配额
+
+- **不要把 10h full train 当默认探索路径**：非平凡代码改动 / 超参想法必须先过分层漏斗，再决定是否消耗完整平台训练与评估额度
+- **实验分层漏斗**：① 静态 / 本地检查（`py_compile`、`git diff --check`、必要时小样本 smoke run）→ ② fast proxy run（限制 Row Groups / steps / 1 epoch）→ ③ 2~3 epoch 半程确认 → ④ full train 只用于高置信候选复核 → ⑤ leaderboard eval 只用于 full train 且 valid 信号可信的 ckpt
+- **新增功能优先支持快速验证开关**：涉及训练链路的新实验应优先考虑 `max_train_steps`、`limit_train_rgs`、`limit_valid_rgs` 或等价参数，避免每个想法都等待 10 小时才暴露 shape / 数据切分 / 收敛问题
+- **实验记录最小字段**：每次平台任务必须记录 commit、job name、关键 args、valid AUC / LogLoss、public score、是否使用 default infer.py、结论；没有这些字段的结果不作为路线决策依据
+- **当前策略**：full train 是复核，不是探索；优先建立 fast proxy 与 valid→leaderboard 映射，再推进 T8.5 / P0 特征工程
+
 ## 协作与提交约定
 
 - **Commit 触发条件**：Agent 完成一个**稳定且重要**的任务（里程碑达成 / 本地 working tree 自包含可还原 / 文档·代码同步） → Agent **主动 commit**，commit 前必须先给用户看 message 草稿，等用户点头再执行；commit 信息沿用本仓库 conventional 风格（`docs:` / `chore:` / `fix(scope):` 等）

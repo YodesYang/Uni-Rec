@@ -6,11 +6,23 @@
 
 ---
 
-**最近一次审视**：2026-05-01（PDT 09:35 · EXP-003 第一批回收）· 结论：冲前五目标下，`swiglu` 仍是主线骨干，`d_model=128` 路线确认低 ROI（leaderboard 0.836944，较基线 0.84381 退步 -0.0069）；`swiglu+time` 本轮因旧任务链路修改提交导致探针证据不完整，结论暂不采信，已新建 job 重跑；`swiglu+dropout=0.05` 训练完成待评估；transformer re-train 仍在跑。落盘 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md)，并把报告草稿更新为“先关 d_model 扩容、优先回收 dropout + T8/T10 有效证据”。当前 Top5 路径：① 回收 transformer-retrain + dropout 线上分；② 拿到新建 swiglu-time 的 `[T8] overlap_sec` + `[diag]`；③ 按 ADR-003 触发 P0 特征工程。
+**最近一次审视**：2026-05-01（PDT 19:15 · time split 修复后实验纪律调整）· 结论：冲前五目标下，`swiglu` 仍是主线骨干，`d_model=128` 路线确认低 ROI（leaderboard 0.836944，较基线 0.84381 退步 -0.0069）；`swiglu+time` 必须以 2026-05-01 修复 `PCVRParquetDataset(row_groups=...)` 后重新上传的 job 为准，修复前 time job 不再作为路线结论依据；`swiglu+dropout=0.05` 训练完成待评估；transformer re-train 仍在跑。当前 Top5 路径：① 回收 transformer-retrain + dropout + 修复后 swiglu-time 线上分；② 建立 fast proxy 训练开关，避免每个想法默认等待 10h full train；③ 优先推进 T8.5 row-level timestamp cutoff，再按 ADR-003 做 P0 特征工程。
 
 ---
 
 ## 任务列表
+
+### T11 `[!]` 建立快速实验漏斗，降低 10h full train 探索成本
+
+**决策（2026-05-01）**：full train 只作为高置信候选复核，不再作为默认探索路径。所有非平凡代码改动 / 超参想法先走 fast proxy，再决定是否消耗完整训练与评估额度。
+
+**实施顺序**：
+1. 在训练链路补快速实验开关：`max_train_steps`、`limit_train_rgs`、`limit_valid_rgs` 或等价参数
+2. 建立固定 proxy 流程：静态检查 → 小样本 smoke → 1 epoch / limited RG → 2~3 epoch 半程确认 → full train
+3. 每个平台 job 记录 commit、job name、关键 args、valid AUC / LogLoss、public score、结论，建立 valid→leaderboard 映射
+4. 后续 T8.5 / P0 特征工程先过 proxy，再投 10h full train
+
+**当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，若不先做 gating，等待成本会继续主导迭代速度。
 
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
@@ -109,6 +121,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-01 PDT 19:15（实验纪律入库）**：把“不要用 10h full train 做默认探索”的规则写入 team-memory，并新增 T11。后续路线改为分层漏斗：静态 / smoke → fast proxy → 半程确认 → full train → leaderboard eval；当前最优工程动作是先补快速训练开关，再推进 T8.5 row-level timestamp cutoff 与 ADR-003 P0 特征工程。
 
 - **2026-05-01 PDT 09:35（EXP-003 第一批回收）**：新增 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md) 记录三组 swiglu 批次实验。关键结论：① `d_model=128` 线上显著退步（0.836944），判定低 ROI 路线，暂时关闭；② `swiglu+time` 本轮来自旧任务链路修改提交，探针证据缺失，结论暂不采信并已新建 job 重跑；③ `dropout=0.05` 训练完成待评估；④ transformer re-train 仍在跑。T8/T10 节点同步加“结果有效性”提示，避免后续误读。
 
