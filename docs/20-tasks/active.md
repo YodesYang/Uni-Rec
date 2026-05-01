@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-01（PDT 00:55 · ADR-003 特征工程规划落地 + Ensemble 红线入库）· 结论：用户提问「是否有特征工程规划」+「ensemble 是否禁止」→ 回看 docs 确认 ① ensemble 官方明确禁止（competition.md line 77）但 MoE / multi-task 例外；② 之前确实没有正式特征工程规划。**修补动作**：① 升 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md) — 4 类候选（P0-A 缺失计数 / P0-B 序列活跃度 / P0-C 历史 CVR 防泄露 / P1 multi-task）+ 5/3~5/15 EXP-003~007 实施时序 + Ensemble 合规核对清单；② team-memory.mdc 补 Ensemble 红线铁律（防止下次新会话又推荐 ensemble）；③ T10 节点的 6 行决策表追加 → ADR-003 链接。**之前回合的轨迹**（保留 trace）：T4 / T7 / T9 三连归档（archive.md 现 6 条），4 个 platform jobs 在跑（baseline-retrain / swiglu+time / swiglu+d_model=128 / swiglu+dropout=0.05），明早回收数据。**核心新证据**（详见 [EXP-002 §训练侧 Local Val AUC 收敛曲线](../40-experiments/EXP-002-platform-baseline-job.md)）：① **transformer published 错 ckpt** — 训练已到 epoch 6 / Best step=38050 (Val 0.8641)，但 Publish 的是 step=7610 (Val 0.8617)；**重新发布 step=38050 是当前最高 ROI 的零代码动作**（预计 leaderboard 0.834 → ~0.836）；② **Local Val AUC vs Leaderboard AUC 系统性 gap ≈ 0.021~0.028** — 远超噪声，强烈指向 `valid_split_strategy=filename` 与 test 集的时间外推不匹配，**T8 重要性升级**；③ swiglu 既最快（35min/epoch）又最高 Val AUC（0.8650）+ 最高 leaderboard（0.84381），与 HyFormer 论文 "Transformer ≥ SwiGLU" 期望反向 → T4 直接结案；④ 本轮训练 jobs 启动于 T8/T10 探针落地之前，**`[T8] / [diag]` 行不在本 log 里**，T8/T10 仍需新一轮 platform job 才能验证。**关键待办（按 ROI 排序）**：① **重新发布 transformer step=38050 ckpt → 1 次评估**（30 秒动作，预计 +0.002 leaderboard）；② T8 + T10 必须在新一轮 platform job（用 baseline tip 含 ADR-001/002 探针）中验证，否则 P0 特征工程方向无依据；③ T6 报告草稿已启动 → `docs/50-paper/draft-v0.md`，骨架就位待你 review。Leaderboard Delayed Feedback ≈ 北京时间次日 15:00 刷新。距初赛 ddl **25 天**（5/25）。
+**最近一次审视**：2026-05-01（PDT 09:35 · EXP-003 第一批回收）· 结论：冲前五目标下，`swiglu` 仍是主线骨干，`d_model=128` 路线确认低 ROI（leaderboard 0.836944，较基线 0.84381 退步 -0.0069）；`swiglu+time` 本轮因旧任务链路修改提交导致探针证据不完整，结论暂不采信，已新建 job 重跑；`swiglu+dropout=0.05` 训练完成待评估；transformer re-train 仍在跑。落盘 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md)，并把报告草稿更新为“先关 d_model 扩容、优先回收 dropout + T8/T10 有效证据”。当前 Top5 路径：① 回收 transformer-retrain + dropout 线上分；② 拿到新建 swiglu-time 的 `[T8] overlap_sec` + `[diag]`；③ 按 ADR-003 触发 P0 特征工程。
 
 ---
 
@@ -61,6 +61,7 @@
 - ✅ sanity log 自动打印 train/valid ts 范围 + `overlap_sec`
 - ✅ 本地 demo 验证（filename overlap=765s / time overlap=770s，是 demo 数据特性）
 - ⚠️ **本轮 EXP-002 三组训练 jobs 启动于 T8 探针落地之前 → log 里没有 `[T8]` 行** → 必须新一轮 platform job（baseline tip 含探针）才能拿到真实 overlap_sec
+- ⚠️ **EXP-003 第一轮 swiglu+time 结果暂不采信**：用户确认该轮是在旧 swiglu 任务链路上改参数提交，日志缺有效探针证据；已新建 job 重跑
 - ⏳ **待新一轮平台 job 验证 overlap_sec 真实值** → 决定是否切换到 `time` 策略
 
 **残留待平台验证**（下一次 platform job 时）：
@@ -84,6 +85,7 @@
 - ✅ 默认每次 evaluate 都跑，无 CLI 开关，开销 < 1s
 - ✅ 推理路径完全无影响（`is_training=False` 不写入 `_diag_*`）
 - ⚠️ **本轮 EXP-002 三组训练 jobs 启动于 T10 探针落地之前 → log 里没有 `[diag]` 行** → 必须新一轮 platform job 才能拿到 4 张切片表
+- ⚠️ **EXP-003 第一轮 swiglu+time 同样缺 `[diag]` 有效证据**（旧任务链路改参数提交），已新建 job 重跑
 - ⏳ **待新一轮平台 job 4 张切片表回流** → 决定 P0 特征工程方向
 
 **待平台 job 验证后再分类决策**（每个分支对应不同的 P0 特征工程方向，**实施方案见 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md)**）：
@@ -107,6 +109,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-01 PDT 09:35（EXP-003 第一批回收）**：新增 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md) 记录三组 swiglu 批次实验。关键结论：① `d_model=128` 线上显著退步（0.836944），判定低 ROI 路线，暂时关闭；② `swiglu+time` 本轮来自旧任务链路修改提交，探针证据缺失，结论暂不采信并已新建 job 重跑；③ `dropout=0.05` 训练完成待评估；④ transformer re-train 仍在跑。T8/T10 节点同步加“结果有效性”提示，避免后续误读。
 
 - **2026-05-01 PDT 00:55（ADR-003 特征工程规划 + Ensemble 红线入库）**：用户两连问触发本次更新 — ① "ensemble 不允许吧？" → 我回看 docs/00-context/competition.md line 77 确认禁令 + 4/3 官方 Q&A 例外（MoE OK），承认我之前 Stage 3 的 multi-seed/multi-encoder ensemble 推荐违规；② "我们目前有规划特征工程吗？" → 回看确认仅有 T10 探针决策表雏形，无正式规划。**修补动作**：① 升 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md) — 4 类候选（P0-A 缺失计数 +0.003~0.008 / P0-B 序列活跃度 +0.003~0.010 / P0-C 历史 CVR 防泄露 +0.005~0.012 / P1 multi-task +0.005~0.015）+ 5/3~5/15 EXP-003~007 实施时序 + Ensemble 合规核对清单；② team-memory.mdc 补「Ensemble 红线 + MoE 例外 + SWA 灰色」铁律；③ active.md T10 切片决策表追加 → ADR-003 链接；④ 30-decisions/README.md 索引补 ADR-003。距初赛 ddl 24 天。
 

@@ -2,7 +2,7 @@
 
 > **状态**：v0 骨架 · 由 T6 启动，2026-04-30 PDT 21:50
 > **赛题**：腾讯广告算法大赛 2026 · Industrial Track（PCVR 预估）
-> **当前最佳**：Leaderboard AUC **0.84381**（swiglu encoder） · 距社区 SOTA 0.85809 差 0.0143
+> **当前最佳**：Leaderboard AUC **0.84381**（swiglu encoder） · 距社区 SOTA 0.85809 差 0.0143（2026-05-01 批次实验回收中，详见 `EXP-003`）
 > **本草稿覆盖范围**：仅记录已落地实验数据 + 架构选型推理；**所有 "TODO" 标签项需后续实验回填**
 > **迭代规则**：覆盖式更新（小改）；做出方向性结论时 → 升 `draft-v1.md` 并把当前版本标记为 archived
 
@@ -135,6 +135,12 @@ seq_max_lens={a:256, b:256, c:512, d:512}
 | **SwiGLU** | **0.8650 (30440)** | **0.84381** | **81.93s** | **~35 min** |
 | LONGER | 0.8634 (53270, Early Stop @ E12) | 0.8422 | 203.1s | ~40 min |
 
+2026-05-01 批次补充（`EXP-003`）：
+
+- `SwiGLU + d_model=128`：Local best 0.8649（step 15220），Leaderboard 0.836944，较 swiglu 基线退步 -0.0069，当前判定为低 ROI 路线。
+- `SwiGLU + valid_split_strategy=time`：线上 0.842532，但该轮来自旧任务链路修改、缺少有效 `[T8]`/`[diag]` 探针证据；已新建 job 重跑，暂不下结论。
+- `SwiGLU + dropout=0.05`：训练完成（Local best 0.864563，step 53270），待评估额度刷新后提交线上验证。
+
 > ⚠️ Transformer Leaderboard 用的是 step=7610（Val 0.8617），并非全局最佳 step=38050（Val 0.8641）。Re-publish 后预计 Leaderboard 跃升至 ~0.836，**待回填**。
 
 **收敛轨迹**（Local Val AUC，每 epoch 一次 validation）：
@@ -176,7 +182,7 @@ LONGER:      E1 0.8589 → E2 0.8612 → E3 0.8622 → E4 0.8625 → E5 0.8624 �
 
 - 三个模型 gap 一致在 **0.021~0.030** → 不是模型问题，是 **valid 集与 test 集分布不一致**
 - 当前 `valid_split_strategy=filename` 取 sorted glob 的最后 10% RG → valid 与 train 时间高度重叠（社区证据：03-03 单日占 train 63%）
-- **TODO**（T8 后续）：跑一次 `--valid_split_strategy time` 对比 `overlap_sec`，验证按时间切是否能把 gap 缩到 ≤ 0.015
+- **TODO**（T8 后续）：必须用**新建 job 且确认探针生效**的 `--valid_split_strategy time` 回收 `[T8] overlap_sec` 与 `[diag]`，再判断 time split 对 gap 的真实影响（旧任务链路修改提交的结果不采信）
 
 ### 3.5 切片诊断（T10 信号）
 
@@ -243,7 +249,7 @@ INFO - Using schema: .../best_model/schema.json
 | 高 | Re-publish transformer step=38050 | +0.002 | 1 评估配额 / 30 秒 |
 | 高 | T8 time-aware split 上线 + 重训 | +0.005~0.015（缩 train/test gap） | 1 训练 + 1 评估 |
 | 中 | T10 切片表 → P0 特征工程 | +0.003~0.010 | 取决于发现的弱片段 |
-| 中 | SwiGLU + RoPE 或 d_model=128 | +0.002~0.005 | 1 训练 + 1 评估 |
+| 中 | SwiGLU + dropout 小范围扫描（0.03~0.08） | +0.001~0.004 | 1 训练 + 1 评估 |
 | 低-中 | T5 OneTrans Mixed-Param 复现 | +0.001~0.005 | ~600 行新代码 |
 
 ### 5.2 与 prior art 的差异
@@ -277,6 +283,7 @@ INFO - Using schema: .../best_model/schema.json
 
 **已用素材源**：
 - [`docs/40-experiments/EXP-002-platform-baseline-job.md`](../40-experiments/EXP-002-platform-baseline-job.md) — 三组评估数据 + Local Val AUC 曲线
+- [`docs/40-experiments/EXP-003-platform-batch-2026-05-01.md`](../40-experiments/EXP-003-platform-batch-2026-05-01.md) — swiglu-time / d_model=128 / dropout=0.05 批次回收
 - [`docs/30-decisions/ADR-001-time-aware-valid-split.md`](../30-decisions/ADR-001-time-aware-valid-split.md) — T8 决策推理
 - [`docs/30-decisions/ADR-002-slice-diagnostics.md`](../30-decisions/ADR-002-slice-diagnostics.md) — T10 决策推理
 - [`docs/10-research/prior-art.md`](../10-research/prior-art.md) — HyFormer / OneTrans / RankMixer / LONGER
