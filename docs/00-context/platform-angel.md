@@ -100,7 +100,7 @@ global_step3557.layer=2.head=4.hidden=64.best_model
 3. main() 必须在 EVAL_RESULT_PATH 目录下产出 "predictions.json"
 4. 上传脚本总大小 ≤ 100 MB
 5. 单次 inference 最长 30 分钟，超时强制 kill
-6. 每队每滚动 24h 最多 3 次评估提交（Failed/Stopped 不计入）
+6. 每队每滚动 24h 最多 4 次评估提交（Failed/Stopped 不计入）
 ```
 
 `predictions.json` 格式：
@@ -292,7 +292,7 @@ shell / python 读法与训练阶段相同，把 `TRAIN_*` 替换为对应 `EVAL
 
 - `infer.py` 文件名严格、`main()` 无参 —— 否则 evaluation 直接 Failed
 - `predictions.json` 必须放在 `EVAL_RESULT_PATH/`
-- 24h 滚动窗口最多 3 次有效提交（Failed / Stopped 不计入）
+- 24h 滚动窗口最多 **4 次**有效提交（Failed / Stopped 不计入）
 - 单次 inference 30 分钟硬上限，超时强 kill
 - inference 脚本总大小 ≤ 100 MB
 - 单队最多 20 个 Released model

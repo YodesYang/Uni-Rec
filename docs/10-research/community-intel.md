@@ -4,6 +4,9 @@
 - 工业赛道相关题数: 47
 - 含官方答复 (Administrators / TAAC): 26
 
+> ⚠️ **历史快照·部分官方答复中的规则数字 / 工程结论已被后续迭代覆盖**（原文保留用于回溯；不要直接当作当前规则使用）。
+> **当前规则 / 工程结论口径**：以 `docs/00-context/competition.md` + `docs/00-context/platform-angel.md` + `.cursor/rules/ai-readme/team-memory.mdc` + `docs/40-experiments/` 为准。
+
 ---
 
 ## 📘 2026 Tencent Advertising Algorithm Competition Player Guide
