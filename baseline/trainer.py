@@ -57,6 +57,7 @@ class PCVRHyFormerRankingTrainer:
         schema_path: Optional[str] = None,
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
+        max_train_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.model: nn.Module = model
@@ -106,11 +107,17 @@ class PCVRHyFormerRankingTrainer:
         self.sparse_weight_decay: float = sparse_weight_decay
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
+        self.max_train_steps: int = max_train_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
                      f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+        if self.max_train_steps < 0:
+            raise ValueError("max_train_steps must be >= 0")
+        if self.max_train_steps > 0:
+            logging.info(
+                f"Fast proxy enabled: max_train_steps={self.max_train_steps}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -299,11 +306,14 @@ class PCVRHyFormerRankingTrainer:
             train_pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader),
                               dynamic_ncols=True)
             loss_sum = 0.0
+            epoch_steps = 0
 
             for step, batch in train_pbar:
                 loss = self._train_step(batch)
                 total_step += 1
+                epoch_steps += 1
                 loss_sum += loss
+                validated_this_step = False
 
                 if self.writer:
                     self.writer.add_scalar('Loss/train', loss, total_step)
@@ -324,12 +334,43 @@ class PCVRHyFormerRankingTrainer:
                         self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
                     self._handle_validation_result(total_step, val_auc, val_logloss)
+                    validated_this_step = True
 
                     if self.early_stopping.early_stop:
                         logging.info(f"Early stopping at step {total_step}")
                         return
 
-            logging.info(f"Epoch {epoch}, Average Loss: {loss_sum / len(self.train_loader)}")
+                if self.max_train_steps > 0 and total_step >= self.max_train_steps:
+                    avg_loss = loss_sum / max(1, epoch_steps)
+                    logging.info(
+                        f"Reached max_train_steps={self.max_train_steps} at "
+                        f"epoch {epoch}, step {step + 1}; "
+                        f"Average Loss: {avg_loss}")
+
+                    if not validated_this_step:
+                        val_auc, val_logloss = self.evaluate(epoch=epoch)
+                        self.model.train()
+                        torch.cuda.empty_cache()
+
+                        logging.info(
+                            f"Max-step Validation | AUC: {val_auc}, "
+                            f"LogLoss: {val_logloss}")
+
+                        if self.writer:
+                            self.writer.add_scalar('AUC/valid', val_auc, total_step)
+                            self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
+
+                        self._handle_validation_result(
+                            total_step, val_auc, val_logloss)
+
+                    logging.info(
+                        f"Stopping training after max_train_steps="
+                        f"{self.max_train_steps}")
+                    return
+
+            logging.info(
+                f"Epoch {epoch}, Average Loss: "
+                f"{loss_sum / max(1, epoch_steps)}")
 
             val_auc, val_logloss = self.evaluate(epoch=epoch)
             self.model.train()

@@ -75,9 +75,17 @@ def parse_args() -> argparse.Namespace:
                         help='Shuffle buffer size, in units of batches. '
                              'Lower values reduce memory usage.')
     parser.add_argument('--train_ratio', type=float, default=1.0,
-                        help='Fraction of training Row Groups to use (takes the first N%)')
+                        help='Fraction of training Row Groups to use (takes the first N%%)')
     parser.add_argument('--valid_ratio', type=float, default=0.1,
                         help='Fraction of all Row Groups used for validation (takes the tail)')
+    parser.add_argument('--limit_train_rgs', type=int, default=0,
+                        help='Fast-proxy switch: cap train Row Groups after the '
+                             'normal split, keeping the tail closest to the '
+                             'validation cut (0 = disabled)')
+    parser.add_argument('--limit_valid_rgs', type=int, default=0,
+                        help='Fast-proxy switch: cap validation Row Groups after '
+                             'the normal split, keeping the first N validation '
+                             'Row Groups (0 = disabled)')
     parser.add_argument('--valid_split_strategy', type=str, default='filename',
                         choices=['filename', 'time'],
                         help='How to order Row Groups before taking the tail '
@@ -91,6 +99,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--eval_every_n_steps', type=int, default=0,
                         help='Run validation every N steps '
                              '(0 = only at the end of each epoch)')
+    parser.add_argument('--max_train_steps', type=int, default=0,
+                        help='Fast-proxy switch: stop after N optimizer steps, '
+                             'run a final validation, and save best checkpoint '
+                             'if improved (0 = disabled/full training)')
     parser.add_argument('--seq_max_lens', type=str,
                         default='seq_a:256,seq_b:256,seq_c:512,seq_d:512',
                         help='Per-domain sequence truncation, format: seq_d:256,seq_c:128')
@@ -206,6 +218,10 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
+    for name in ('limit_train_rgs', 'limit_valid_rgs', 'max_train_steps'):
+        if getattr(args, name) < 0:
+            parser.error(f"--{name} must be >= 0")
+
     # Environment variables take precedence.
     args.data_dir = os.environ.get('TRAIN_DATA_PATH', args.data_dir)
     args.ckpt_dir = os.environ.get('TRAIN_CKPT_PATH', args.ckpt_dir)
@@ -264,6 +280,8 @@ def main() -> None:
         seed=args.seed,
         seq_max_lens=seq_max_lens,
         valid_split_strategy=args.valid_split_strategy,
+        limit_train_rgs=args.limit_train_rgs,
+        limit_valid_rgs=args.limit_valid_rgs,
     )
 
     # ---- NS groups ----
@@ -364,6 +382,7 @@ def main() -> None:
         schema_path=schema_path,
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
+        max_train_steps=args.max_train_steps,
         train_config=vars(args),
     )
 

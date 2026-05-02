@@ -12,17 +12,22 @@
 
 ## 任务列表
 
-### T11 `[!]` 建立快速实验漏斗，降低 10h full train 探索成本
+### T11 `[~]` 建立快速实验漏斗，降低 10h full train 探索成本
 
 **决策（2026-05-01）**：full train 只作为高置信候选复核，不再作为默认探索路径。所有非平凡代码改动 / 超参想法先走 fast proxy，再决定是否消耗完整训练与评估额度。
 
 **实施顺序**：
-1. 在训练链路补快速实验开关：`max_train_steps`、`limit_train_rgs`、`limit_valid_rgs` 或等价参数
+1. ✅ 在训练链路补快速实验开关：`max_train_steps`、`limit_train_rgs`、`limit_valid_rgs`
 2. 建立固定 proxy 流程：静态检查 → 小样本 smoke → 1 epoch / limited RG → 2~3 epoch 半程确认 → full train
 3. 每个平台 job 记录 commit、job name、关键 args、valid AUC / LogLoss、public score、结论，建立 valid→leaderboard 映射
 4. 后续 T8.5 / P0 特征工程先过 proxy，再投 10h full train
 
-**当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，若不先做 gating，等待成本会继续主导迭代速度。
+**当前状态**：
+- ✅ 代码开关已落地：`--limit_train_rgs`、`--limit_valid_rgs`、`--max_train_steps`，默认 0，不影响 full train
+- ⏳ 待下一次平台 smoke job 验证：建议先用 `--limit_train_rgs 64 --limit_valid_rgs 16 --max_train_steps 500 --num_workers 4` 跑 swiglu 快速链路
+- ⏳ 待平台结果回流后，把 proxy AUC / LogLoss 与 full train / public score 关联到 EXP 表
+
+**当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，后续新想法默认先过本任务定义的 gating。
 
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
@@ -121,6 +126,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-01 PDT 19:35（T11 fast proxy 开关落地）**：训练链路新增 `--limit_train_rgs`、`--limit_valid_rgs`、`--max_train_steps`，默认 0 行为不变；fast proxy job 可以在常规 split 后限制 RG 数，并在指定 optimizer step 后立即 final validation + 保存 best_model，用于把 shape / 数据切分 / 初步收敛问题从 10h full train 前置暴露。
 
 - **2026-05-01 PDT 19:15（实验纪律入库）**：把“不要用 10h full train 做默认探索”的规则写入 team-memory，并新增 T11。后续路线改为分层漏斗：静态 / smoke → fast proxy → 半程确认 → full train → leaderboard eval；当前最优工程动作是先补快速训练开关，再推进 T8.5 row-level timestamp cutoff 与 ADR-003 P0 特征工程。
 

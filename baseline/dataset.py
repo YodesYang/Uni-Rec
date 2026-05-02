@@ -751,6 +751,8 @@ def get_pcvr_data(
     clip_vocab: bool = True,
     seq_max_lens: Optional[Dict[str, int]] = None,
     valid_split_strategy: str = 'filename',
+    limit_train_rgs: int = 0,
+    limit_valid_rgs: int = 0,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -780,6 +782,11 @@ def get_pcvr_data(
         the model.
     """
     random.seed(seed)
+
+    if limit_train_rgs < 0:
+        raise ValueError("limit_train_rgs must be >= 0")
+    if limit_valid_rgs < 0:
+        raise ValueError("limit_valid_rgs must be >= 0")
 
     import glob as _glob
     pq_files = sorted(_glob.glob(os.path.join(data_dir, '*.parquet')))
@@ -822,37 +829,95 @@ def get_pcvr_data(
             f"[T8] valid_split_strategy=time: sorted {total_rgs} RGs "
             f"by max(timestamp) ASC")
 
-    n_valid_rgs = max(1, int(total_rgs * valid_ratio))
-    n_train_rgs = total_rgs - n_valid_rgs
+    base_n_valid_rgs = max(1, int(total_rgs * valid_ratio))
+    base_n_train_rgs = total_rgs - base_n_valid_rgs
 
     # train_ratio: use only the first N% of the training Row Groups.
     if train_ratio < 1.0:
-        n_train_rgs = max(1, int(n_train_rgs * train_ratio))
-        logging.info(f"train_ratio={train_ratio}: using {n_train_rgs} train Row Groups")
+        base_n_train_rgs = max(1, int(base_n_train_rgs * train_ratio))
+        logging.info(
+            f"train_ratio={train_ratio}: using {base_n_train_rgs} "
+            "train Row Groups")
+    base_n_valid_rgs = total_rgs - base_n_train_rgs
 
-    train_rows = sum(r[2] for r in rg_info[:n_train_rgs])
-    valid_rows = sum(r[2] for r in rg_info[n_train_rgs:])
+    train_start_idx = 0
+    train_end_idx = base_n_train_rgs
+    valid_start_idx = base_n_train_rgs
+    valid_end_idx = total_rgs
+
+    split_train_rows = sum(r[2] for r in rg_info[train_start_idx:train_end_idx])
+    split_valid_rows = sum(r[2] for r in rg_info[valid_start_idx:valid_end_idx])
 
     logging.info(f"Row Group split ({valid_split_strategy}): "
-                 f"{n_train_rgs} train ({train_rows} rows), "
-                 f"{n_valid_rgs} valid ({valid_rows} rows)")
+                 f"{base_n_train_rgs} train ({split_train_rows} rows), "
+                 f"{base_n_valid_rgs} valid ({split_valid_rows} rows)")
+
+    if limit_train_rgs > 0:
+        available = train_end_idx - train_start_idx
+        if limit_train_rgs < available:
+            train_start_idx = train_end_idx - limit_train_rgs
+            logging.info(
+                f"limit_train_rgs={limit_train_rgs}: using last "
+                f"{limit_train_rgs}/{available} train Row Groups closest to "
+                "the validation cut")
+        else:
+            logging.info(
+                f"limit_train_rgs={limit_train_rgs}: no-op because only "
+                f"{available} train Row Groups are available")
+
+    if limit_valid_rgs > 0:
+        available = valid_end_idx - valid_start_idx
+        if limit_valid_rgs < available:
+            valid_end_idx = valid_start_idx + limit_valid_rgs
+            logging.info(
+                f"limit_valid_rgs={limit_valid_rgs}: using first "
+                f"{limit_valid_rgs}/{available} validation Row Groups")
+        else:
+            logging.info(
+                f"limit_valid_rgs={limit_valid_rgs}: no-op because only "
+                f"{available} validation Row Groups are available")
+
+    train_rgs = rg_info[train_start_idx:train_end_idx]
+    valid_rgs = rg_info[valid_start_idx:valid_end_idx]
+    if not train_rgs:
+        raise ValueError(
+            "Train Row Group split is empty; adjust valid_ratio, "
+            "train_ratio, or limit_train_rgs")
+    if not valid_rgs:
+        raise ValueError(
+            "Validation Row Group split is empty; adjust valid_ratio or "
+            "limit_valid_rgs")
+    train_rows = sum(r[2] for r in train_rgs)
+    valid_rows = sum(r[2] for r in valid_rgs)
+
+    if limit_train_rgs > 0 or limit_valid_rgs > 0:
+        logging.info(
+            "Fast proxy Row Group view: "
+            f"{len(train_rgs)} train ({train_rows} rows), "
+            f"{len(valid_rgs)} valid ({valid_rows} rows)")
 
     # ---- T8: train/valid timestamp range sanity log (both strategies) ----
     # For 'filename' we only need 4 boundary RGs to assess the cut alignment,
     # avoiding scanning all 1000 RGs in the default path.
     if valid_split_strategy == 'filename':
         sample_idx = sorted({
-            0,
-            max(0, n_train_rgs - 1),
-            min(total_rgs - 1, n_train_rgs),
-            total_rgs - 1,
+            train_start_idx,
+            max(train_start_idx, train_end_idx - 1),
+            valid_start_idx,
+            max(valid_start_idx, valid_end_idx - 1),
         })
         for i in sample_idx:
             if 0 <= i < total_rgs and rg_ts_ranges[i] is None:
                 f, rg_idx, _ = rg_info[i]
                 rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
-    train_ts = [r for r in rg_ts_ranges[:n_train_rgs] if r is not None]
-    valid_ts = [r for r in rg_ts_ranges[n_train_rgs:] if r is not None]
+    train_ts = [
+        r for r in rg_ts_ranges[train_start_idx:train_end_idx]
+        if r is not None
+    ]
+    valid_ts = [
+        r for r in rg_ts_ranges[valid_start_idx:valid_end_idx]
+        if r is not None
+    ]
     if train_ts and valid_ts:
         train_min, train_max = min(r[0] for r in train_ts), max(r[1] for r in train_ts)
         valid_min, valid_max = min(r[0] for r in valid_ts), max(r[1] for r in valid_ts)
@@ -879,7 +944,7 @@ def get_pcvr_data(
         seq_max_lens=seq_max_lens,
         shuffle=shuffle_train,
         buffer_batches=buffer_batches,
-        row_groups=rg_info[:n_train_rgs],
+        row_groups=train_rgs,
         clip_vocab=clip_vocab,
     )
 
@@ -901,7 +966,7 @@ def get_pcvr_data(
         seq_max_lens=seq_max_lens,
         shuffle=False,
         buffer_batches=0,
-        row_groups=rg_info[n_train_rgs:],
+        row_groups=valid_rgs,
         clip_vocab=clip_vocab,
     )
     valid_loader = DataLoader(

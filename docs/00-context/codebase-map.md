@@ -34,6 +34,7 @@ baseline/
 - `_rg_ts_range()` helper + `get_pcvr_data(valid_split_strategy={'filename','time'})` 参数 + sanity log（详见 ADR-001）
 - `_convert_batch()` 末尾在 `is_training=True` 分支加 4 个 `_diag_*` 字段（详见 ADR-002）
 - 2026-05-02 修复 `time` split 只排序日志、不影响 dataset 实际 RG 列表的问题：`PCVRParquetDataset` 支持显式 `row_groups`，`get_pcvr_data` 直接传入排序后的 train/valid RG 列表。
+- 2026-05-01 T11：`get_pcvr_data(limit_train_rgs, limit_valid_rgs)` 支持 fast proxy 数据切片；默认 0，不影响 full train。
 
 ---
 
@@ -65,6 +66,7 @@ baseline/
 
 **新增功能**（2026-04-30 ADR-002）：
 - `evaluate()` 收集 `_diag_*` 字段 + `_slice_diagnose()` 方法跑 4 张切片表（详见 ADR-002）
+- 2026-05-01 T11：`max_train_steps` 支持达到指定 optimizer step 后立即跑 final validation 并停止；默认 0，不影响 full train。
 
 ---
 
@@ -76,6 +78,11 @@ baseline/
 
 **新增 CLI flag**（ADR-001）：
 - `--valid_split_strategy {filename,time}`，默认 `filename`（行为不变）
+
+**新增 CLI flag**（T11 fast proxy）：
+- `--limit_train_rgs N`：常规切分后只取靠近 valid cut 的最后 N 个 train RG
+- `--limit_valid_rgs N`：常规切分后只取前 N 个 valid RG
+- `--max_train_steps N`：训练 N 个 optimizer step 后跑一次 final validation 并退出
 
 ---
 
