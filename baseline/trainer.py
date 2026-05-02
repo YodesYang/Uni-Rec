@@ -49,6 +49,9 @@ class PCVRHyFormerRankingTrainer:
         loss_type: str = 'bce',
         focal_alpha: float = 0.1,
         focal_gamma: float = 2.0,
+        multi_task_loss: bool = False,
+        click_loss_weight: float = 1.0,
+        conversion_loss_weight: float = 2.0,
         sparse_lr: float = 0.05,
         sparse_weight_decay: float = 0.0,
         reinit_sparse_after_epoch: int = 1,
@@ -102,6 +105,9 @@ class PCVRHyFormerRankingTrainer:
         self.loss_type: str = loss_type
         self.focal_alpha: float = focal_alpha
         self.focal_gamma: float = focal_gamma
+        self.multi_task_loss: bool = multi_task_loss
+        self.click_loss_weight: float = click_loss_weight
+        self.conversion_loss_weight: float = conversion_loss_weight
         self.reinit_sparse_after_epoch: int = reinit_sparse_after_epoch
         self.reinit_cardinality_threshold: int = reinit_cardinality_threshold
         self.sparse_lr: float = sparse_lr
@@ -123,6 +129,9 @@ class PCVRHyFormerRankingTrainer:
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
+                     f"multi_task_loss={multi_task_loss}, "
+                     f"click_loss_weight={click_loss_weight}, "
+                     f"conversion_loss_weight={conversion_loss_weight}, "
                      f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
         if self.max_train_steps < 0:
             raise ValueError("max_train_steps must be >= 0")
@@ -186,9 +195,19 @@ class PCVRHyFormerRankingTrainer:
             key_names = (
                 "seq_encoder_type", "valid_split_strategy", "valid_ratio",
                 "train_ratio", "limit_train_rgs", "limit_valid_rgs",
-                "max_train_steps", "d_model", "num_queries",
-                "dropout_rate", "loss_type", "batch_size", "num_workers",
-                "seed",
+                "max_train_steps", "enable_row_time_cutoff",
+                "enable_count_features", "enable_seq_stats_features",
+                "enable_history_cvr_features", "history_cvr_item_fids",
+                "history_cvr_cache_path",
+                "history_cvr_bin_sec", "history_cvr_cutoff_sec",
+                "history_cvr_time_mode", "history_cvr_available_lag_sec",
+                "history_cvr_prior_strength",
+                "enable_mature_negative_weighting",
+                "negative_maturity_sec", "immature_negative_weight",
+                "d_model", "num_queries",
+                "dropout_rate", "loss_type", "multi_task_loss",
+                "click_loss_weight", "conversion_loss_weight",
+                "action_num", "batch_size", "num_workers", "seed",
             )
             summary["key_train_config"] = {
                 k: self.train_config.get(k) for k in key_names
@@ -284,15 +303,23 @@ class PCVRHyFormerRankingTrainer:
 
         if self.train_config:
             import json
-            cfg_to_dump = self.train_config
+            cfg_to_dump = dict(self.train_config)
             if ns_groups_copied:
                 # Override the stored path to a filename relative to ckpt_dir;
                 # infer.py already falls back to `<ckpt_dir>/<basename>` when
                 # the recorded path is not absolute, which keeps the ckpt
                 # portable across hosts.
-                cfg_to_dump = dict(self.train_config)
                 cfg_to_dump['ns_groups_json'] = os.path.basename(
                     self.ns_groups_path)
+            history_path = cfg_to_dump.get('history_cvr_cache_path')
+            if (
+                cfg_to_dump.get('enable_history_cvr_features')
+                and history_path
+                and os.path.exists(history_path)
+            ):
+                shutil.copy2(history_path, ckpt_dir)
+                cfg_to_dump['history_cvr_cache_path'] = os.path.basename(
+                    history_path)
             with open(os.path.join(ckpt_dir, 'train_config.json'), 'w') as f:
                 json.dump(cfg_to_dump, f, indent=2)
 
@@ -584,23 +611,60 @@ class PCVRHyFormerRankingTrainer:
             seq_time_buckets=seq_time_buckets,
         )
 
+    def _binary_loss(
+        self,
+        logits: torch.Tensor,
+        label: torch.Tensor,
+        sample_weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.loss_type == 'focal':
+            loss_vec = sigmoid_focal_loss(
+                logits, label, alpha=self.focal_alpha,
+                gamma=self.focal_gamma, reduction='none')
+        else:
+            loss_vec = F.binary_cross_entropy_with_logits(
+                logits, label, reduction='none')
+        if sample_weight is None:
+            return loss_vec.mean()
+        sample_weight = sample_weight.to(loss_vec.dtype)
+        return (loss_vec * sample_weight).sum() / sample_weight.sum().clamp_min(1.0)
+
     def _train_step(self, batch: Dict[str, Any]) -> float:
         """Run a single training step and return the scalar loss value."""
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
+        sample_weight = device_batch.get('sample_weight')
+        if sample_weight is not None:
+            sample_weight = sample_weight.float()
 
         self.dense_optimizer.zero_grad()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
-        logits = logits.squeeze(-1)  # (B,)
+        logits = self.model(model_input)  # (B, action_num)
 
-        if self.loss_type == 'focal':
-            loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+        if self.multi_task_loss:
+            if logits.ndim != 2 or logits.shape[1] < 2:
+                raise ValueError(
+                    "multi_task_loss requires model action_num >= 2")
+            click_label = device_batch.get('label_click', label).float()
+            click_logits = logits[:, 0]
+            conversion_logits = logits[:, -1]
+            click_loss = F.binary_cross_entropy_with_logits(
+                click_logits, click_label)
+            conversion_loss = self._binary_loss(
+                conversion_logits, label, sample_weight)
+            loss = (
+                self.click_loss_weight * click_loss
+                + self.conversion_loss_weight * conversion_loss
+            )
         else:
-            loss = F.binary_cross_entropy_with_logits(logits, label)
+            if logits.ndim == 2 and logits.shape[1] > 1:
+                logits = logits[:, -1]
+            else:
+                logits = logits.squeeze(-1)
+            loss = self._binary_loss(logits, label, sample_weight)
         loss.backward()
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.
@@ -762,6 +826,9 @@ class PCVRHyFormerRankingTrainer:
 
         model_input = self._make_model_input(device_batch)
         logits, _ = self.model.predict(model_input)  # (B, 1), (B, D)
-        logits = logits.squeeze(-1)  # (B,)
+        if logits.ndim == 2 and logits.shape[1] > 1:
+            logits = logits[:, -1]
+        else:
+            logits = logits.squeeze(-1)  # (B,)
 
         return logits, label

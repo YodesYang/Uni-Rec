@@ -16,6 +16,7 @@ import logging
 import random
 import json
 import gc
+from collections import defaultdict
 
 import numpy as np
 import pyarrow as pa
@@ -131,6 +132,117 @@ BUCKET_BOUNDARIES = np.array([
 # ``--use_time_buckets`` and derive the concrete bucket count from here.
 NUM_TIME_BUCKETS = len(BUCKET_BOUNDARIES) + 1
 
+# Synthetic user-dense feature ids. They are not read from parquet columns;
+# they are appended in-memory when the corresponding CLI flags are enabled.
+COUNT_FEATURE_FID = 900001
+SEQ_STATS_FEATURE_FID = 900002
+HISTORY_CVR_FEATURE_FID = 900003
+
+
+class HistoryCVRStore:
+    """Leak-safe historical conversion-rate lookup table.
+
+    The store is built from training Row Groups only. At lookup time each row
+    uses cumulative statistics whose bin end is <= ``timestamp - cutoff_sec``.
+    This lets train, validation, and inference share one compact sidecar while
+    preserving time order.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        cutoff_sec: Optional[int] = None,
+        prior_strength: Optional[float] = None,
+    ) -> None:
+        if not path:
+            raise ValueError("history CVR features require a cache path")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"history CVR cache not found: {path}")
+
+        data = np.load(path)
+        self.path = path
+        self.fids = data['fids'].astype(np.int64)
+        self.fid_offsets = data['fid_offsets'].astype(np.int64)
+        self.values = data['values'].astype(np.int64)
+        self.value_offsets = data['value_offsets'].astype(np.int64)
+        self.bin_end_ts = data['bin_end_ts'].astype(np.int64)
+        self.counts = data['counts'].astype(np.float32)
+        self.positives = data['positives'].astype(np.float32)
+        self.global_bin_end_ts = data['global_bin_end_ts'].astype(np.int64)
+        self.global_counts = data['global_counts'].astype(np.float32)
+        self.global_positives = data['global_positives'].astype(np.float32)
+        self.global_prior = float(data['global_prior'][0])
+        self.cutoff_sec = int(
+            cutoff_sec if cutoff_sec is not None else data['cutoff_sec'][0])
+        self.prior_strength = float(
+            prior_strength if prior_strength is not None
+            else data['prior_strength'][0])
+        self.feature_dim = 2 + 2 * len(self.fids)
+
+        self._fid_to_slot = {int(fid): i for i, fid in enumerate(self.fids)}
+        self._value_to_slot: Dict[int, Dict[int, int]] = {}
+        for i, fid in enumerate(self.fids):
+            start = int(self.fid_offsets[i])
+            end = int(self.fid_offsets[i + 1])
+            self._value_to_slot[int(fid)] = {
+                int(v): j for j, v in enumerate(self.values[start:end], start)
+            }
+
+    def _global_at(self, cutoff_ts: int) -> Tuple[float, float]:
+        idx = int(np.searchsorted(
+            self.global_bin_end_ts, cutoff_ts, side='right')) - 1
+        if idx < 0:
+            return 0.0, 0.0
+        return float(self.global_positives[idx]), float(self.global_counts[idx])
+
+    def _value_at(
+        self,
+        fid: int,
+        value: int,
+        cutoff_ts: int,
+    ) -> Tuple[float, float]:
+        slot = self._value_to_slot.get(fid, {}).get(value)
+        if slot is None:
+            return 0.0, 0.0
+        start = int(self.value_offsets[slot])
+        end = int(self.value_offsets[slot + 1])
+        idx = int(np.searchsorted(
+            self.bin_end_ts[start:end], cutoff_ts, side='right')) - 1
+        if idx < 0:
+            return 0.0, 0.0
+        pos = float(self.positives[start + idx])
+        cnt = float(self.counts[start + idx])
+        return pos, cnt
+
+    def lookup_batch(
+        self,
+        timestamps: "npt.NDArray[np.int64]",
+        item_int: "npt.NDArray[np.int64]",
+        fid_offsets: List[Tuple[int, int]],
+    ) -> "npt.NDArray[np.float32]":
+        out = np.zeros((len(timestamps), self.feature_dim), dtype=np.float32)
+        for row_idx, ts in enumerate(timestamps):
+            cutoff_ts = int(ts) - self.cutoff_sec
+            global_pos, global_cnt = self._global_at(cutoff_ts)
+            global_rate = (
+                global_pos / global_cnt if global_cnt > 0
+                else self.global_prior)
+            out[row_idx, 0] = global_rate
+            out[row_idx, 1] = np.log1p(global_cnt)
+
+            for local_idx, (fid, offset) in enumerate(fid_offsets):
+                value = int(item_int[row_idx, offset])
+                pos, cnt = self._value_at(fid, value, cutoff_ts)
+                rate = (
+                    (pos + self.prior_strength * global_rate)
+                    / (cnt + self.prior_strength)
+                    if cnt > 0 else global_rate
+                )
+                base = 2 + 2 * local_idx
+                out[row_idx, base] = rate
+                out[row_idx, base + 1] = np.log1p(cnt)
+        return out
+
 
 class PCVRParquetDataset(IterableDataset):
     """PCVR dataset that reads raw multi-column Parquet directly.
@@ -154,6 +266,20 @@ class PCVRParquetDataset(IterableDataset):
         row_groups: Optional[List[Tuple[str, int, int]]] = None,
         clip_vocab: bool = True,
         is_training: bool = True,
+        timestamp_min: Optional[int] = None,
+        timestamp_max: Optional[int] = None,
+        enable_count_features: bool = False,
+        enable_seq_stats_features: bool = False,
+        enable_history_cvr_features: bool = False,
+        history_cvr_cache_path: Optional[str] = None,
+        history_cvr_time_mode: str = 'timestamp_cutoff',
+        history_cvr_cutoff_sec: int = 86400,
+        history_cvr_available_lag_sec: int = 0,
+        history_cvr_prior_strength: float = 20.0,
+        enable_mature_negative_weighting: bool = False,
+        negative_maturity_sec: int = 86400,
+        immature_negative_weight: float = 0.0,
+        negative_maturity_end_ts: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -174,6 +300,35 @@ class PCVRParquetDataset(IterableDataset):
             clip_vocab: if True, clip out-of-bound ids to 0; if False, raise.
             is_training: if True, derive ``label`` from ``label_type == 2``;
                 if False, return an all-zeros label column.
+            timestamp_min: optional inclusive row-level timestamp lower bound.
+            timestamp_max: optional exclusive row-level timestamp upper bound.
+            enable_count_features: append user/item non-zero counts to dense
+                features.
+            enable_seq_stats_features: append per-domain sequence lengths and
+                timestamp ranges to dense features.
+            enable_history_cvr_features: append leak-safe historical item CVR
+                statistics loaded from ``history_cvr_cache_path``.
+            history_cvr_cache_path: ``.npz`` sidecar produced by
+                ``_build_history_cvr_cache``.
+            history_cvr_time_mode: ``timestamp_cutoff`` uses event timestamp
+                bins plus a lookup lag; ``available`` bins rows by label
+                availability time.
+            history_cvr_cutoff_sec: minimum age of rows allowed into the
+                historical lookup for the current sample in
+                ``timestamp_cutoff`` mode.
+            history_cvr_available_lag_sec: optional lookup lag in
+                ``available`` mode.
+            history_cvr_prior_strength: smoothing strength against the global
+                historical conversion rate.
+            enable_mature_negative_weighting: downweight negatives whose
+                24h conversion window has not fully elapsed by the observation
+                end timestamp.
+            negative_maturity_sec: conversion observation window used to decide
+                whether a negative sample is mature.
+            immature_negative_weight: sample weight assigned to immature
+                negatives; 0 drops them from the loss.
+            negative_maturity_end_ts: max observable timestamp for the training
+                split. Required when mature-negative weighting is enabled.
         """
         super().__init__()
 
@@ -197,6 +352,47 @@ class PCVRParquetDataset(IterableDataset):
         self.buffer_batches = buffer_batches
         self.clip_vocab = clip_vocab
         self.is_training = is_training
+        self.timestamp_min = timestamp_min
+        self.timestamp_max = timestamp_max
+        self.enable_count_features = enable_count_features
+        self.enable_seq_stats_features = enable_seq_stats_features
+        self.enable_history_cvr_features = enable_history_cvr_features
+        self.history_cvr_cache_path = history_cvr_cache_path
+        self.history_cvr_time_mode = history_cvr_time_mode
+        self.history_cvr_cutoff_sec = history_cvr_cutoff_sec
+        self.history_cvr_available_lag_sec = history_cvr_available_lag_sec
+        self.history_cvr_prior_strength = history_cvr_prior_strength
+        self.enable_mature_negative_weighting = enable_mature_negative_weighting
+        self.negative_maturity_sec = negative_maturity_sec
+        self.immature_negative_weight = immature_negative_weight
+        self.negative_maturity_end_ts = negative_maturity_end_ts
+        if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
+            raise ValueError(
+                "history_cvr_time_mode must be 'timestamp_cutoff' or "
+                "'available'")
+        if self.history_cvr_available_lag_sec < 0:
+            raise ValueError("history_cvr_available_lag_sec must be >= 0")
+        self._history_store: Optional[HistoryCVRStore] = None
+        if self.enable_history_cvr_features:
+            store_cutoff_sec = (
+                history_cvr_available_lag_sec
+                if history_cvr_time_mode == 'available'
+                else history_cvr_cutoff_sec
+            )
+            self._history_store = HistoryCVRStore(
+                history_cvr_cache_path or "",
+                cutoff_sec=store_cutoff_sec,
+                prior_strength=history_cvr_prior_strength,
+            )
+        if self.enable_mature_negative_weighting:
+            if self.negative_maturity_end_ts is None:
+                raise ValueError(
+                    "enable_mature_negative_weighting requires "
+                    "negative_maturity_end_ts")
+            if self.negative_maturity_sec < 0:
+                raise ValueError("negative_maturity_sec must be >= 0")
+            if self.immature_negative_weight < 0:
+                raise ValueError("immature_negative_weight must be >= 0")
         # Out-of-bound statistics:
         #   {(group, col_idx): {'count': N, 'max': M, 'min_oob': M, 'vocab': V}}
         self._oob_stats: Dict[Tuple[str, int], Dict[str, int]] = {}
@@ -279,7 +475,13 @@ class PCVRParquetDataset(IterableDataset):
         logging.info(
             f"PCVRParquetDataset: {self.num_rows} rows from "
             f"{len(self._parquet_files)} file(s), batch_size={batch_size}, "
-            f"buffer_batches={buffer_batches}, shuffle={shuffle}")
+            f"buffer_batches={buffer_batches}, shuffle={shuffle}, "
+            f"timestamp_min={timestamp_min}, timestamp_max={timestamp_max}, "
+            f"count_features={enable_count_features}, "
+            f"seq_stats_features={enable_seq_stats_features}, "
+            f"history_cvr_features={enable_history_cvr_features}, "
+            f"history_cvr_time_mode={history_cvr_time_mode}, "
+            f"mature_negative_weighting={enable_mature_negative_weighting}")
 
     def _load_schema(self, schema_path: str, seq_max_lens: Dict[str, int]) -> None:
         """Populate per-group schema information from ``schema_path``."""
@@ -307,6 +509,28 @@ class PCVRParquetDataset(IterableDataset):
         self.user_dense_schema: FeatureSchema = FeatureSchema()
         for fid, dim in self._user_dense_cols:
             self.user_dense_schema.add(fid, dim)
+        if self.enable_count_features:
+            self.user_dense_schema.add(COUNT_FEATURE_FID, 2)
+        if self.enable_seq_stats_features:
+            self.user_dense_schema.add(SEQ_STATS_FEATURE_FID, 2 * len(raw['seq']))
+        self._history_item_offsets: List[Tuple[int, int]] = []
+        if self.enable_history_cvr_features:
+            if self._history_store is None:
+                raise ValueError("history CVR store was not loaded")
+            for fid in self._history_store.fids:
+                try:
+                    offset, length = self.item_int_schema.get_offset_length(int(fid))
+                except KeyError as e:
+                    raise ValueError(
+                        f"history CVR fid {int(fid)} is not in item_int schema"
+                    ) from e
+                if length != 1:
+                    raise ValueError(
+                        f"history CVR fid {int(fid)} must be scalar; got "
+                        f"length={length}")
+                self._history_item_offsets.append((int(fid), int(offset)))
+            self.user_dense_schema.add(
+                HISTORY_CVR_FEATURE_FID, self._history_store.feature_dim)
 
         # ---- item_dense (empty) ----
         self.item_dense_schema: FeatureSchema = FeatureSchema()
@@ -358,6 +582,8 @@ class PCVRParquetDataset(IterableDataset):
             pf = pq.ParquetFile(file_path)
             for batch in pf.iter_batches(batch_size=self.batch_size, row_groups=[rg_idx]):
                 batch_dict = self._convert_batch(batch)
+                if batch_dict is None:
+                    continue
                 if self.shuffle and self.buffer_batches > 1:
                     buffer.append(batch_dict)
                     if len(buffer) >= self.buffer_batches:
@@ -514,17 +740,62 @@ class PCVRParquetDataset(IterableDataset):
 
         return padded
 
-    def _convert_batch(self, batch: "pa.RecordBatch") -> Dict[str, Any]:
+    def _filter_result_rows(
+        self,
+        result: Dict[str, Any],
+        keep_mask: "npt.NDArray[np.bool_]",
+    ) -> Optional[Dict[str, Any]]:
+        """Apply a row-level timestamp filter to every per-row field."""
+        if keep_mask.all():
+            return result
+        if not keep_mask.any():
+            return None
+
+        keep_tensor = torch.from_numpy(keep_mask)
+        out: Dict[str, Any] = {}
+        for key, value in result.items():
+            if isinstance(value, torch.Tensor) and value.shape[:1] == keep_tensor.shape:
+                out[key] = value[keep_tensor]
+            elif key == 'user_id':
+                out[key] = [v for v, keep in zip(value, keep_mask) if keep]
+            else:
+                out[key] = value
+        return out
+
+    def _convert_batch(self, batch: "pa.RecordBatch") -> Optional[Dict[str, Any]]:
         """Convert an Arrow RecordBatch into a training-ready dict of tensors."""
         B = batch.num_rows
 
         # ---- meta ----
         timestamps = batch.column(self._col_idx['timestamp']).to_numpy().astype(np.int64)
+        keep_mask = np.ones(B, dtype=np.bool_)
+        if self.timestamp_min is not None:
+            keep_mask &= timestamps >= self.timestamp_min
+        if self.timestamp_max is not None:
+            keep_mask &= timestamps < self.timestamp_max
+        raw_label_types = (
+            batch.column(self._col_idx['label_type']).fill_null(0)
+            .to_numpy(zero_copy_only=False).astype(np.int64)
+            if self.is_training else np.zeros(B, dtype=np.int64)
+        )
         if self.is_training:
-            labels = (batch.column(self._col_idx['label_type']).fill_null(0)
-                      .to_numpy(zero_copy_only=False).astype(np.int64) == 2).astype(np.int64)
+            labels = (raw_label_types == 2).astype(np.int64)
+            click_labels = (raw_label_types >= 1).astype(np.int64)
         else:
             labels = np.zeros(B, dtype=np.int64)
+            click_labels = np.zeros(B, dtype=np.int64)
+        sample_weight: Optional[np.ndarray] = None
+        if self.is_training and self.enable_mature_negative_weighting:
+            if self.negative_maturity_end_ts is None:
+                raise ValueError("negative_maturity_end_ts was not set")
+            sample_weight = np.ones(B, dtype=np.float32)
+            negative_mask = raw_label_types != 2
+            immature_mask = (
+                negative_mask
+                & ((int(self.negative_maturity_end_ts) - timestamps)
+                   < int(self.negative_maturity_sec))
+            )
+            sample_weight[immature_mask] = float(self.immature_negative_weight)
         user_ids = batch.column(self._col_idx['user_id']).to_pylist()
 
         # ---- user_int: write into pre-allocated buffer ----
@@ -582,16 +853,29 @@ class PCVRParquetDataset(IterableDataset):
             padded = self._pad_varlen_float_column(col, dim, B)
             user_dense[:, offset:offset + dim] = padded
 
+        dense_offset = sum(dim for _, dim in self._user_dense_cols)
+        if self.enable_count_features:
+            # Log-scale synthetic magnitudes so they stay in the same rough
+            # numeric regime as the existing dense inputs.
+            user_dense[:, dense_offset] = np.log1p(
+                (user_int != 0).sum(axis=1).astype(np.float32))
+            user_dense[:, dense_offset + 1] = np.log1p(
+                (item_int != 0).sum(axis=1).astype(np.float32))
+            dense_offset += 2
+
         result = {
             'user_int_feats': torch.from_numpy(user_int.copy()),
             'user_dense_feats': torch.from_numpy(user_dense.copy()),
             'item_int_feats': torch.from_numpy(item_int.copy()),
             'item_dense_feats': torch.zeros(B, 0, dtype=torch.float32),
             'label': torch.from_numpy(labels),
+            'label_click': torch.from_numpy(click_labels),
             'timestamp': torch.from_numpy(timestamps),
             'user_id': user_ids,
             '_seq_domains': self.seq_domains,
         }
+        if sample_weight is not None:
+            result['sample_weight'] = torch.from_numpy(sample_weight)
 
         # ---- Sequence features: fused padding directly into the 3D buffer ----
         for domain in self.seq_domains:
@@ -678,6 +962,43 @@ class PCVRParquetDataset(IterableDataset):
 
             result[f'{domain}_time_bucket'] = torch.from_numpy(time_bucket.copy())
 
+        if self.enable_seq_stats_features:
+            for domain in self.seq_domains:
+                lengths = np.log1p(
+                    self._buf_seq_lens[domain][:B].astype(np.float32))
+                user_dense[:, dense_offset] = lengths
+                dense_offset += 1
+
+                _, ts_ci = self._seq_plan[domain]
+                ts_range = np.zeros(B, dtype=np.float32)
+                if ts_ci is not None:
+                    ts_col = batch.column(ts_ci)
+                    ts_offs = ts_col.offsets.to_numpy()
+                    ts_vals = ts_col.values.to_numpy()
+                    max_len = self._seq_maxlen[domain]
+                    for i in range(B):
+                        s = int(ts_offs[i])
+                        e = int(ts_offs[i + 1])
+                        if e <= s:
+                            continue
+                        vals = ts_vals[s:s + min(e - s, max_len)]
+                        vals = vals[vals > 0]
+                        if len(vals) > 0:
+                            ts_range[i] = float(vals.max() - vals.min())
+                user_dense[:, dense_offset] = np.log1p(ts_range)
+                dense_offset += 1
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
+        if self.enable_history_cvr_features:
+            if self._history_store is None:
+                raise ValueError("history CVR store was not loaded")
+            hist_feats = self._history_store.lookup_batch(
+                timestamps, item_int, self._history_item_offsets)
+            dim = hist_feats.shape[1]
+            user_dense[:, dense_offset:dense_offset + dim] = hist_feats
+            dense_offset += dim
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
         # ---- Slice-diagnostic side-channel (training/valid only) ----
         # These underscore-prefixed fields are NOT read by trainer's
         # _make_model_input, so the training forward pass is unaffected.
@@ -695,12 +1016,10 @@ class PCVRParquetDataset(IterableDataset):
             result['_diag_seq_total_len'] = torch.from_numpy(seq_total_len)
             # Re-read raw label_type (0/1/2) for per-class AUC slicing; the
             # 'label' field was already collapsed to binary (label_type==2).
-            raw_lt = (batch.column(self._col_idx['label_type'])
-                      .fill_null(0).to_numpy(zero_copy_only=False)
-                      .astype(np.int8))
-            result['_diag_label_type_raw'] = torch.from_numpy(raw_lt)
+            result['_diag_label_type_raw'] = torch.from_numpy(
+                raw_label_types.astype(np.int8))
 
-        return result
+        return self._filter_result_rows(result, keep_mask)
 
 
 def _rg_ts_range(
@@ -730,12 +1049,331 @@ def _rg_ts_range(
     stats = rg_meta.column(ts_col).statistics
     if stats is not None and stats.has_min_max:
         return (int(stats.min), int(stats.max))
-    arr = pq.read_table(
-        file_path, columns=['timestamp'], row_groups=[rg_idx]
-    ).column('timestamp').to_numpy()
+    arr = pf.read_row_group(rg_idx, columns=['timestamp']).column('timestamp').to_numpy()
     if len(arr) == 0:
         return None
     return (int(arr.min()), int(arr.max()))
+
+
+def _row_ts_cutoff(
+    row_groups: List[Tuple[str, int, int]],
+    valid_ratio: float,
+) -> Tuple[int, int, int, int, int]:
+    """Return row-level timestamp cutoff and exact split counts.
+
+    Returns:
+        ``(cutoff_ts, total_rows, train_rows_after, valid_rows_after,
+        target_valid_rows)``. Rows equal to the cutoff go to validation, so
+        duplicate cutoff timestamps can make ``valid_rows_after`` larger than
+        ``target_valid_rows``.
+    """
+    ts_parts = []
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+    for file_path, rg_idx, _ in row_groups:
+        pf = pf_cache.get(file_path)
+        if pf is None:
+            pf = pq.ParquetFile(file_path)
+            pf_cache[file_path] = pf
+        arr = pf.read_row_group(
+            rg_idx, columns=['timestamp']).column('timestamp').to_numpy()
+        if len(arr) > 0:
+            ts_parts.append(arr.astype(np.int64, copy=False))
+    if not ts_parts:
+        raise ValueError("enable_row_time_cutoff found no timestamp rows")
+    all_ts = np.concatenate(ts_parts)
+    n_valid = max(1, int(len(all_ts) * valid_ratio))
+    cutoff_idx = max(0, len(all_ts) - n_valid)
+    cutoff = int(np.partition(all_ts, cutoff_idx)[cutoff_idx])
+    train_rows_after = int((all_ts < cutoff).sum())
+    valid_rows_after = int((all_ts >= cutoff).sum())
+    return cutoff, int(len(all_ts)), train_rows_after, valid_rows_after, n_valid
+
+
+def _row_groups_ts_range(
+    row_groups: List[Tuple[str, int, int]],
+) -> Optional[Tuple[int, int]]:
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+    ranges = []
+    for file_path, rg_idx, _ in row_groups:
+        ts_range = _rg_ts_range(pf_cache, file_path, rg_idx)
+        if ts_range is not None:
+            ranges.append(ts_range)
+    if not ranges:
+        return None
+    return min(r[0] for r in ranges), max(r[1] for r in ranges)
+
+
+def _parse_history_cvr_item_fids(
+    raw: str,
+    item_int_cols: List[List[int]],
+) -> List[int]:
+    scalar_fids = [int(fid) for fid, _, dim in item_int_cols if int(dim) == 1]
+    if not raw or raw.strip().lower() in ('scalar', 'item_scalar'):
+        return scalar_fids
+    selected = [int(x.strip()) for x in raw.split(',') if x.strip()]
+    scalar_set = set(scalar_fids)
+    bad = [fid for fid in selected if fid not in scalar_set]
+    if bad:
+        raise ValueError(
+            "history CVR currently supports scalar item_int fids only; "
+            f"invalid fids={bad}, scalar_fids={scalar_fids}")
+    return selected
+
+
+def _table_column_numpy(
+    table: "pa.Table",
+    name: str,
+    dtype: Any,
+) -> "npt.NDArray[Any]":
+    return (
+        table.column(name).combine_chunks().fill_null(0)
+        .to_numpy(zero_copy_only=False).astype(dtype, copy=False)
+    )
+
+
+def _accumulate_bin_stats(
+    stats: Dict[int, List[float]],
+    bins: "npt.NDArray[np.int64]",
+    positives: "npt.NDArray[np.float32]",
+) -> None:
+    if len(bins) == 0:
+        return
+    uniq, inv = np.unique(bins, return_inverse=True)
+    counts = np.bincount(inv).astype(np.float64)
+    pos = np.bincount(inv, weights=positives.astype(np.float64))
+    for bin_idx, cnt, p in zip(uniq, counts, pos):
+        row = stats.setdefault(int(bin_idx), [0.0, 0.0])
+        row[0] += float(cnt)
+        row[1] += float(p)
+
+
+def _accumulate_value_bin_stats(
+    stats: Dict[Tuple[int, int], List[float]],
+    values: "npt.NDArray[np.int64]",
+    bins: "npt.NDArray[np.int64]",
+    positives: "npt.NDArray[np.float32]",
+) -> None:
+    if len(values) == 0:
+        return
+    pairs = np.empty(len(values), dtype=[('value', '<i8'), ('bin', '<i8')])
+    pairs['value'] = values
+    pairs['bin'] = bins
+    uniq, inv = np.unique(pairs, return_inverse=True)
+    counts = np.bincount(inv).astype(np.float64)
+    pos = np.bincount(inv, weights=positives.astype(np.float64))
+    for pair, cnt, p in zip(uniq, counts, pos):
+        key = (int(pair['value']), int(pair['bin']))
+        row = stats.setdefault(key, [0.0, 0.0])
+        row[0] += float(cnt)
+        row[1] += float(p)
+
+
+def _finalize_cumulative_rows(
+    rows: List[Tuple[int, float, float]],
+    bin_sec: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not rows:
+        return (
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=np.float32),
+            np.zeros(0, dtype=np.float32),
+        )
+    rows = sorted(rows, key=lambda x: x[0])
+    bin_end_ts = np.array(
+        [(int(b) + 1) * bin_sec - 1 for b, _, _ in rows],
+        dtype=np.int64,
+    )
+    counts = np.cumsum(
+        np.array([cnt for _, cnt, _ in rows], dtype=np.float64)
+    ).astype(np.float32)
+    positives = np.cumsum(
+        np.array([pos for _, _, pos in rows], dtype=np.float64)
+    ).astype(np.float32)
+    return bin_end_ts, counts, positives
+
+
+def _build_history_cvr_cache(
+    row_groups: List[Tuple[str, int, int]],
+    schema_path: str,
+    cache_path: str,
+    item_fids_raw: str = 'scalar',
+    bin_sec: int = 3600,
+    cutoff_sec: int = 86400,
+    prior_strength: float = 20.0,
+    time_mode: str = 'timestamp_cutoff',
+    available_lag_sec: int = 0,
+    negative_maturity_sec: int = 86400,
+    timestamp_min: Optional[int] = None,
+    timestamp_max: Optional[int] = None,
+) -> List[int]:
+    """Build a compact time-cumulative history-CVR sidecar.
+
+    The sidecar includes only the provided training Row Groups. Validation and
+    inference rows later perform time-ordered lookups against it, so labels
+    from validation/test data are never used. In ``available`` mode, positives
+    enter history at ``label_time`` and negatives enter after the maturity
+    window, which models delayed feedback more faithfully than event-time bins.
+    """
+    if bin_sec <= 0:
+        raise ValueError("history_cvr_bin_sec must be > 0")
+    if cutoff_sec < 0:
+        raise ValueError("history_cvr_cutoff_sec must be >= 0")
+    if time_mode not in ('timestamp_cutoff', 'available'):
+        raise ValueError(
+            "history_cvr_time_mode must be 'timestamp_cutoff' or 'available'")
+    if available_lag_sec < 0:
+        raise ValueError("history_cvr_available_lag_sec must be >= 0")
+    if negative_maturity_sec < 0:
+        raise ValueError("negative_maturity_sec must be >= 0")
+
+    with open(schema_path, 'r', encoding='utf-8') as f:
+        raw_schema = json.load(f)
+    selected_fids = _parse_history_cvr_item_fids(
+        item_fids_raw, raw_schema['item_int'])
+    if not selected_fids:
+        raise ValueError("history CVR selected no item fids")
+
+    columns = ['timestamp', 'label_type']
+    if time_mode == 'available':
+        columns.append('label_time')
+    columns += [
+        f'item_int_feats_{fid}' for fid in selected_fids
+    ]
+    global_stats: Dict[int, List[float]] = {}
+    per_fid_stats: Dict[int, Dict[Tuple[int, int], List[float]]] = {
+        fid: {} for fid in selected_fids
+    }
+    total_rows = 0
+    total_pos = 0.0
+
+    lookup_cutoff_sec = (
+        int(available_lag_sec)
+        if time_mode == 'available'
+        else int(cutoff_sec)
+    )
+    logging.info(
+        f"[P0-C] Building history CVR cache at {cache_path}: "
+        f"fids={selected_fids}, bin_sec={bin_sec}, time_mode={time_mode}, "
+        f"lookup_cutoff_sec={lookup_cutoff_sec}, "
+        f"negative_maturity_sec={negative_maturity_sec}, "
+        f"timestamp_min={timestamp_min}, timestamp_max={timestamp_max}, "
+        f"source_row_groups={len(row_groups)}")
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+    for file_path, rg_idx, _ in row_groups:
+        pf = pf_cache.get(file_path)
+        if pf is None:
+            pf = pq.ParquetFile(file_path)
+            pf_cache[file_path] = pf
+        table = pf.read_row_group(rg_idx, columns=columns)
+        timestamps = _table_column_numpy(table, 'timestamp', np.int64)
+        raw_labels = _table_column_numpy(table, 'label_type', np.int64)
+        keep_mask = np.ones(len(timestamps), dtype=np.bool_)
+        if timestamp_min is not None:
+            keep_mask &= timestamps >= int(timestamp_min)
+        if timestamp_max is not None:
+            keep_mask &= timestamps < int(timestamp_max)
+        if not keep_mask.any():
+            continue
+        timestamps = timestamps[keep_mask]
+        raw_labels = raw_labels[keep_mask]
+        positives = (raw_labels == 2).astype(np.float32)
+        if time_mode == 'available':
+            label_times = _table_column_numpy(
+                table, 'label_time', np.int64)[keep_mask]
+            available_times = timestamps + int(negative_maturity_sec)
+            positive_mask = raw_labels == 2
+            positive_available = np.where(
+                label_times > 0, label_times, timestamps)
+            positive_available = np.maximum(positive_available, timestamps)
+            available_times[positive_mask] = positive_available[positive_mask]
+            bins = available_times // int(bin_sec)
+        else:
+            bins = timestamps // int(bin_sec)
+
+        total_rows += int(len(timestamps))
+        total_pos += float(positives.sum())
+        _accumulate_bin_stats(global_stats, bins.astype(np.int64), positives)
+
+        for fid in selected_fids:
+            arr = _table_column_numpy(
+                table, f'item_int_feats_{fid}', np.int64).copy()
+            arr = arr[keep_mask].copy()
+            arr[arr <= 0] = 0
+            mask = arr > 0
+            _accumulate_value_bin_stats(
+                per_fid_stats[fid],
+                arr[mask].astype(np.int64, copy=False),
+                bins[mask].astype(np.int64, copy=False),
+                positives[mask],
+            )
+
+    os.makedirs(os.path.dirname(cache_path) or '.', exist_ok=True)
+
+    values: List[int] = []
+    fid_offsets = [0]
+    value_offsets = [0]
+    bin_end_parts: List[np.ndarray] = []
+    count_parts: List[np.ndarray] = []
+    positive_parts: List[np.ndarray] = []
+    for fid in selected_fids:
+        grouped: Dict[int, List[Tuple[int, float, float]]] = defaultdict(list)
+        for (value, bin_idx), (cnt, pos) in per_fid_stats[fid].items():
+            grouped[int(value)].append((int(bin_idx), float(cnt), float(pos)))
+        for value in sorted(grouped):
+            values.append(int(value))
+            bin_end_ts, counts, positives = _finalize_cumulative_rows(
+                grouped[value], bin_sec)
+            bin_end_parts.append(bin_end_ts)
+            count_parts.append(counts)
+            positive_parts.append(positives)
+            value_offsets.append(value_offsets[-1] + len(bin_end_ts))
+        fid_offsets.append(len(values))
+
+    global_rows = [
+        (bin_idx, cnt, pos)
+        for bin_idx, (cnt, pos) in global_stats.items()
+    ]
+    global_bin_end_ts, global_counts, global_positives = (
+        _finalize_cumulative_rows(global_rows, bin_sec)
+    )
+    global_prior = float(total_pos / total_rows) if total_rows > 0 else 0.0
+
+    np.savez_compressed(
+        cache_path,
+        version=np.array([1], dtype=np.int32),
+        fids=np.array(selected_fids, dtype=np.int64),
+        fid_offsets=np.array(fid_offsets, dtype=np.int64),
+        values=np.array(values, dtype=np.int64),
+        value_offsets=np.array(value_offsets, dtype=np.int64),
+        bin_end_ts=(
+            np.concatenate(bin_end_parts)
+            if bin_end_parts else np.zeros(0, dtype=np.int64)
+        ),
+        counts=(
+            np.concatenate(count_parts)
+            if count_parts else np.zeros(0, dtype=np.float32)
+        ),
+        positives=(
+            np.concatenate(positive_parts)
+            if positive_parts else np.zeros(0, dtype=np.float32)
+        ),
+        global_bin_end_ts=global_bin_end_ts,
+        global_counts=global_counts,
+        global_positives=global_positives,
+        global_prior=np.array([global_prior], dtype=np.float32),
+        cutoff_sec=np.array([lookup_cutoff_sec], dtype=np.int64),
+        prior_strength=np.array([prior_strength], dtype=np.float32),
+        bin_sec=np.array([bin_sec], dtype=np.int64),
+        time_mode=np.array([time_mode]),
+        available_lag_sec=np.array([available_lag_sec], dtype=np.int64),
+        negative_maturity_sec=np.array([negative_maturity_sec], dtype=np.int64),
+        source_rows=np.array([total_rows], dtype=np.int64),
+    )
+    logging.info(
+        f"[P0-C] History CVR cache ready: path={cache_path}, "
+        f"source_rows={total_rows}, global_prior={global_prior:.6f}, "
+        f"values={len(values)}, entries={value_offsets[-1]}")
+    return selected_fids
 
 
 def get_pcvr_data(
@@ -753,6 +1391,20 @@ def get_pcvr_data(
     valid_split_strategy: str = 'filename',
     limit_train_rgs: int = 0,
     limit_valid_rgs: int = 0,
+    enable_row_time_cutoff: bool = False,
+    enable_count_features: bool = False,
+    enable_seq_stats_features: bool = False,
+    enable_history_cvr_features: bool = False,
+    history_cvr_cache_path: Optional[str] = None,
+    history_cvr_item_fids: str = 'scalar',
+    history_cvr_bin_sec: int = 3600,
+    history_cvr_cutoff_sec: int = 86400,
+    history_cvr_time_mode: str = 'timestamp_cutoff',
+    history_cvr_available_lag_sec: int = 0,
+    history_cvr_prior_strength: float = 20.0,
+    enable_mature_negative_weighting: bool = False,
+    negative_maturity_sec: int = 86400,
+    immature_negative_weight: float = 0.0,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -771,9 +1423,11 @@ def get_pcvr_data(
       the training set (TAAC 2026 setup) and the parquet write order is not
       known to be time-ordered.
 
-    Either way, a sanity log is emitted with the train/valid timestamp
-    ranges and their overlap so the actual split alignment is visible
-    without any extra job.
+    Either way, a sanity log is emitted with the train/valid timestamp ranges
+    and their overlap so the actual split alignment is visible without any
+    extra job. When ``enable_row_time_cutoff`` is set, the validation minimum
+    timestamp becomes a hard row-level cut: train keeps ``timestamp < cutoff``
+    and valid keeps ``timestamp >= cutoff``.
 
     Returns:
         A tuple ``(train_loader, valid_loader, train_dataset)``. The third
@@ -787,6 +1441,19 @@ def get_pcvr_data(
         raise ValueError("limit_train_rgs must be >= 0")
     if limit_valid_rgs < 0:
         raise ValueError("limit_valid_rgs must be >= 0")
+    if history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
+        raise ValueError(
+            "history_cvr_time_mode must be 'timestamp_cutoff' or 'available'")
+    if history_cvr_bin_sec <= 0:
+        raise ValueError("history_cvr_bin_sec must be > 0")
+    if history_cvr_cutoff_sec < 0:
+        raise ValueError("history_cvr_cutoff_sec must be >= 0")
+    if history_cvr_available_lag_sec < 0:
+        raise ValueError("history_cvr_available_lag_sec must be >= 0")
+    if negative_maturity_sec < 0:
+        raise ValueError("negative_maturity_sec must be >= 0")
+    if immature_negative_weight < 0:
+        raise ValueError("immature_negative_weight must be >= 0")
 
     import glob as _glob
     pq_files = sorted(_glob.glob(os.path.join(data_dir, '*.parquet')))
@@ -899,7 +1566,7 @@ def get_pcvr_data(
     # ---- T8: train/valid timestamp range sanity log (both strategies) ----
     # For 'filename' we only need 4 boundary RGs to assess the cut alignment,
     # avoiding scanning all 1000 RGs in the default path.
-    if valid_split_strategy == 'filename':
+    if valid_split_strategy == 'filename' and not enable_row_time_cutoff:
         sample_idx = sorted({
             train_start_idx,
             max(train_start_idx, train_end_idx - 1),
@@ -908,6 +1575,11 @@ def get_pcvr_data(
         })
         for i in sample_idx:
             if 0 <= i < total_rgs and rg_ts_ranges[i] is None:
+                f, rg_idx, _ = rg_info[i]
+                rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
+    if enable_row_time_cutoff:
+        for i in range(train_start_idx, valid_end_idx):
+            if rg_ts_ranges[i] is None:
                 f, rg_idx, _ = rg_info[i]
                 rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
     train_ts = [
@@ -937,6 +1609,93 @@ def get_pcvr_data(
                 "time-aware split (TAAC 2026 test set is strictly later "
                 "than training).")
 
+    train_timestamp_min = None
+    train_timestamp_max = None
+    valid_timestamp_min = None
+    valid_timestamp_max = None
+    cutoff_train_rows = None
+    cutoff_valid_rows = None
+    if enable_row_time_cutoff:
+        candidate_start_idx = train_start_idx
+        candidate_end_idx = valid_end_idx
+        candidate_rgs = rg_info[candidate_start_idx:candidate_end_idx]
+        (
+            row_cutoff_ts,
+            cutoff_total_rows,
+            cutoff_train_rows,
+            cutoff_valid_rows,
+            cutoff_target_valid_rows,
+        ) = _row_ts_cutoff(candidate_rgs, valid_ratio)
+        train_timestamp_max = row_cutoff_ts
+        valid_timestamp_min = row_cutoff_ts
+
+        train_rgs = [
+            rg for rg, ts in zip(candidate_rgs, rg_ts_ranges[candidate_start_idx:candidate_end_idx])
+            if ts is not None and ts[0] < row_cutoff_ts
+        ]
+        valid_rgs = [
+            rg for rg, ts in zip(candidate_rgs, rg_ts_ranges[candidate_start_idx:candidate_end_idx])
+            if ts is not None and ts[1] >= row_cutoff_ts
+        ]
+        if not train_rgs or not valid_rgs:
+            raise ValueError(
+                "Row-level timestamp cutoff produced an empty train or valid "
+                "Row Group view; adjust valid_ratio or disable "
+                "enable_row_time_cutoff")
+        train_rows = sum(r[2] for r in train_rgs)
+        valid_rows = sum(r[2] for r in valid_rgs)
+        logging.info(
+            f"[T8.5] row-level timestamp cutoff enabled: cutoff={row_cutoff_ts}; "
+            "train keeps timestamp < cutoff, valid keeps timestamp >= cutoff")
+        logging.info(
+            "[T8.5] exact row-level target after filtering: "
+            f"candidate_rows={cutoff_total_rows}, "
+            f"train_rows={cutoff_train_rows}, "
+            f"valid_rows={cutoff_valid_rows} "
+            f"(target_valid_rows={cutoff_target_valid_rows})")
+        logging.info(
+            "[T8.5] Row Groups touching row-level split: "
+            f"{len(train_rgs)} train ({train_rows} pre-filter rows), "
+            f"{len(valid_rgs)} valid ({valid_rows} pre-filter rows)")
+
+    negative_maturity_end_ts = None
+    if enable_mature_negative_weighting:
+        if train_timestamp_max is not None:
+            negative_maturity_end_ts = int(train_timestamp_max)
+        else:
+            train_ts_range = _row_groups_ts_range(train_rgs)
+            if train_ts_range is None:
+                raise ValueError(
+                    "enable_mature_negative_weighting could not determine "
+                    "the training timestamp range")
+            negative_maturity_end_ts = int(train_ts_range[1])
+        logging.info(
+            "[DF] mature-negative weighting enabled: "
+            f"observation_end_ts={negative_maturity_end_ts}, "
+            f"negative_maturity_sec={negative_maturity_sec}, "
+            f"immature_negative_weight={immature_negative_weight}")
+
+    if enable_history_cvr_features:
+        if not history_cvr_cache_path:
+            raise ValueError(
+                "enable_history_cvr_features requires history_cvr_cache_path")
+        selected_fids = _build_history_cvr_cache(
+            row_groups=train_rgs,
+            schema_path=schema_path,
+            cache_path=history_cvr_cache_path,
+            item_fids_raw=history_cvr_item_fids,
+            bin_sec=history_cvr_bin_sec,
+            cutoff_sec=history_cvr_cutoff_sec,
+            time_mode=history_cvr_time_mode,
+            available_lag_sec=history_cvr_available_lag_sec,
+            negative_maturity_sec=negative_maturity_sec,
+            timestamp_min=train_timestamp_min,
+            timestamp_max=train_timestamp_max,
+            prior_strength=history_cvr_prior_strength,
+        )
+        logging.info(
+            f"[P0-C] History CVR selected item fids: {selected_fids}")
+
     train_dataset = PCVRParquetDataset(
         parquet_path=data_dir,
         schema_path=schema_path,
@@ -946,6 +1705,20 @@ def get_pcvr_data(
         buffer_batches=buffer_batches,
         row_groups=train_rgs,
         clip_vocab=clip_vocab,
+        timestamp_min=train_timestamp_min,
+        timestamp_max=train_timestamp_max,
+        enable_count_features=enable_count_features,
+        enable_seq_stats_features=enable_seq_stats_features,
+        enable_history_cvr_features=enable_history_cvr_features,
+        history_cvr_cache_path=history_cvr_cache_path,
+        history_cvr_time_mode=history_cvr_time_mode,
+        history_cvr_cutoff_sec=history_cvr_cutoff_sec,
+        history_cvr_available_lag_sec=history_cvr_available_lag_sec,
+        history_cvr_prior_strength=history_cvr_prior_strength,
+        enable_mature_negative_weighting=enable_mature_negative_weighting,
+        negative_maturity_sec=negative_maturity_sec,
+        immature_negative_weight=immature_negative_weight,
+        negative_maturity_end_ts=negative_maturity_end_ts,
     )
 
     use_cuda = torch.cuda.is_available()
@@ -968,13 +1741,32 @@ def get_pcvr_data(
         buffer_batches=0,
         row_groups=valid_rgs,
         clip_vocab=clip_vocab,
+        timestamp_min=valid_timestamp_min,
+        timestamp_max=valid_timestamp_max,
+        enable_count_features=enable_count_features,
+        enable_seq_stats_features=enable_seq_stats_features,
+        enable_history_cvr_features=enable_history_cvr_features,
+        history_cvr_cache_path=history_cvr_cache_path,
+        history_cvr_time_mode=history_cvr_time_mode,
+        history_cvr_cutoff_sec=history_cvr_cutoff_sec,
+        history_cvr_available_lag_sec=history_cvr_available_lag_sec,
+        history_cvr_prior_strength=history_cvr_prior_strength,
     )
     valid_loader = DataLoader(
         valid_dataset, batch_size=None,
         num_workers=0, pin_memory=use_cuda,
     )
 
-    logging.info(f"Parquet train: {train_rows} rows, valid: {valid_rows} rows, "
-                 f"batch_size={batch_size}, buffer_batches={buffer_batches}")
+    if enable_row_time_cutoff:
+        logging.info(
+            f"Parquet train: {train_rows} pre-filter rows "
+            f"(expected {cutoff_train_rows} after row filter), "
+            f"valid: {valid_rows} pre-filter rows "
+            f"(expected {cutoff_valid_rows} after row filter), "
+            f"batch_size={batch_size}, buffer_batches={buffer_batches}")
+    else:
+        logging.info(
+            f"Parquet train: {train_rows} rows, valid: {valid_rows} rows, "
+            f"batch_size={batch_size}, buffer_batches={buffer_batches}")
 
     return train_loader, valid_loader, train_dataset

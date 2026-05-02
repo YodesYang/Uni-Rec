@@ -103,6 +103,55 @@ def parse_args() -> argparse.Namespace:
                         help='Fast-proxy switch: stop after N optimizer steps, '
                              'run a final validation, and save best checkpoint '
                              'if improved (0 = disabled/full training)')
+    parser.add_argument('--enable_row_time_cutoff', action='store_true', default=False,
+                        help='T8.5 switch: after the Row Group split, filter rows '
+                             'by the validation minimum timestamp so train keeps '
+                             'timestamp < cutoff and valid keeps timestamp >= cutoff '
+                             '(default off)')
+    parser.add_argument('--enable_count_features', action='store_true', default=False,
+                        help='P0-A switch: append user/item non-zero feature counts '
+                             'to user dense features (default off)')
+    parser.add_argument('--enable_seq_stats_features', action='store_true', default=False,
+                        help='P0-B switch: append per-domain sequence length and '
+                             'timestamp-range features to user dense features '
+                             '(default off)')
+    parser.add_argument('--enable_history_cvr_features', action='store_true', default=False,
+                        help='P0-C switch: append leak-safe historical item CVR '
+                             'features from a training-only sidecar (default off)')
+    parser.add_argument('--history_cvr_cache_path', type=str, default=None,
+                        help='Path for the generated P0-C history CVR sidecar '
+                             '(defaults to <log_dir>/history_cvr_stats.npz)')
+    parser.add_argument('--history_cvr_item_fids', type=str, default='scalar',
+                        help="Item int fids for P0-C history CVR features. "
+                             "'scalar' means all scalar item_int fids; or pass "
+                             "a comma-separated list such as '5,7,12,16'.")
+    parser.add_argument('--history_cvr_bin_sec', type=int, default=3600,
+                        help='Time-bin width for cumulative P0-C history stats')
+    parser.add_argument('--history_cvr_cutoff_sec', type=int, default=86400,
+                        help='Only use history rows at least this many seconds '
+                             'older than the current row')
+    parser.add_argument('--history_cvr_time_mode', type=str,
+                        default='timestamp_cutoff',
+                        choices=['timestamp_cutoff', 'available'],
+                        help='History-CVR time semantics: timestamp_cutoff bins '
+                             'rows by event timestamp; available bins positives '
+                             'by label_time and negatives by matured availability')
+    parser.add_argument('--history_cvr_available_lag_sec', type=int, default=0,
+                        help='Additional lookup lag in seconds when '
+                             '--history_cvr_time_mode=available')
+    parser.add_argument('--history_cvr_prior_strength', type=float, default=20.0,
+                        help='Smoothing strength for historical CVR rates')
+    parser.add_argument('--enable_mature_negative_weighting',
+                        action='store_true', default=False,
+                        help='Delayed-feedback switch: downweight negatives '
+                             'whose conversion window has not fully elapsed '
+                             'by the train observation end timestamp')
+    parser.add_argument('--negative_maturity_sec', type=int, default=86400,
+                        help='Conversion observation window used by available '
+                             'history-CVR and mature-negative weighting')
+    parser.add_argument('--immature_negative_weight', type=float, default=0.0,
+                        help='Sample weight for immature negatives; 0 drops '
+                             'them from the conversion loss')
     parser.add_argument('--seq_max_lens', type=str,
                         default='seq_a:256,seq_b:256,seq_c:512,seq_d:512',
                         help='Per-domain sequence truncation, format: seq_d:256,seq_c:128')
@@ -165,6 +214,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--multi_task_loss', action='store_true', default=False,
+                        help='P1 switch: train action_num=2 heads as '
+                             'click(label_type>=1) + conversion(label_type==2); '
+                             'inference/eval use the conversion head')
+    parser.add_argument('--click_loss_weight', type=float, default=1.0,
+                        help='Loss weight for the click head when '
+                             '--multi_task_loss is enabled')
+    parser.add_argument('--conversion_loss_weight', type=float, default=2.0,
+                        help='Loss weight for the conversion head when '
+                             '--multi_task_loss is enabled')
 
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
@@ -218,9 +277,22 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    for name in ('limit_train_rgs', 'limit_valid_rgs', 'max_train_steps'):
+    for name in (
+        'limit_train_rgs',
+        'limit_valid_rgs',
+        'max_train_steps',
+        'history_cvr_cutoff_sec',
+        'history_cvr_available_lag_sec',
+        'negative_maturity_sec',
+    ):
         if getattr(args, name) < 0:
             parser.error(f"--{name} must be >= 0")
+    if args.history_cvr_bin_sec <= 0:
+        parser.error("--history_cvr_bin_sec must be > 0")
+    if args.history_cvr_prior_strength < 0:
+        parser.error("--history_cvr_prior_strength must be >= 0")
+    if args.immature_negative_weight < 0:
+        parser.error("--immature_negative_weight must be >= 0")
 
     # Environment variables take precedence.
     args.data_dir = os.environ.get('TRAIN_DATA_PATH', args.data_dir)
@@ -230,7 +302,15 @@ def parse_args() -> argparse.Namespace:
     # script does not crash when neither env nor --log_dir is provided.
     args.log_dir = (os.environ.get('TRAIN_LOG_PATH', args.log_dir)
                     or '/tmp/taac_train_log')
-    args.tf_events_dir = os.environ.get('TRAIN_TF_EVENTS_PATH')
+    args.tf_events_dir = (
+        os.environ.get('TRAIN_TF_EVENTS_PATH')
+        or os.path.join(args.log_dir, 'tb')
+    )
+    if args.enable_history_cvr_features and not args.history_cvr_cache_path:
+        args.history_cvr_cache_path = os.path.join(
+            args.log_dir, 'history_cvr_stats.npz')
+    if args.multi_task_loss:
+        args.action_num = 2
 
     return args
 
@@ -282,6 +362,20 @@ def main() -> None:
         valid_split_strategy=args.valid_split_strategy,
         limit_train_rgs=args.limit_train_rgs,
         limit_valid_rgs=args.limit_valid_rgs,
+        enable_row_time_cutoff=args.enable_row_time_cutoff,
+        enable_count_features=args.enable_count_features,
+        enable_seq_stats_features=args.enable_seq_stats_features,
+        enable_history_cvr_features=args.enable_history_cvr_features,
+        history_cvr_cache_path=args.history_cvr_cache_path,
+        history_cvr_item_fids=args.history_cvr_item_fids,
+        history_cvr_bin_sec=args.history_cvr_bin_sec,
+        history_cvr_cutoff_sec=args.history_cvr_cutoff_sec,
+        history_cvr_time_mode=args.history_cvr_time_mode,
+        history_cvr_available_lag_sec=args.history_cvr_available_lag_sec,
+        history_cvr_prior_strength=args.history_cvr_prior_strength,
+        enable_mature_negative_weighting=args.enable_mature_negative_weighting,
+        negative_maturity_sec=args.negative_maturity_sec,
+        immature_negative_weight=args.immature_negative_weight,
     )
 
     # ---- NS groups ----
@@ -373,6 +467,9 @@ def main() -> None:
         loss_type=args.loss_type,
         focal_alpha=args.focal_alpha,
         focal_gamma=args.focal_gamma,
+        multi_task_loss=args.multi_task_loss,
+        click_loss_weight=args.click_loss_weight,
+        conversion_loss_weight=args.conversion_loss_weight,
         sparse_lr=args.sparse_lr,
         sparse_weight_decay=args.sparse_weight_decay,
         reinit_sparse_after_epoch=args.reinit_sparse_after_epoch,
