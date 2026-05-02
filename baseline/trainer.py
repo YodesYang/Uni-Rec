@@ -8,6 +8,7 @@ import os
 import glob
 import shutil
 import logging
+import json
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -109,6 +110,16 @@ class PCVRHyFormerRankingTrainer:
         self.eval_every_n_steps: int = eval_every_n_steps
         self.max_train_steps: int = max_train_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.validation_history = []
+        self.best_epoch: Optional[int] = None
+        self.best_global_step: Optional[int] = None
+        self.best_val_auc: Optional[float] = None
+        self.best_val_logloss: Optional[float] = None
+        self.best_checkpoint_dir: Optional[str] = None
+        self.last_epoch: Optional[int] = None
+        self.last_global_step: int = 0
+        self.last_val_auc: Optional[float] = None
+        self.last_val_logloss: Optional[float] = None
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
@@ -119,14 +130,125 @@ class PCVRHyFormerRankingTrainer:
             logging.info(
                 f"Fast proxy enabled: max_train_steps={self.max_train_steps}")
 
-    def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
+    def _record_validation_result(
+        self,
+        epoch: int,
+        total_step: int,
+        val_auc: float,
+        val_logloss: float,
+        previous_best: Optional[float],
+    ) -> None:
+        """Track compact validation history for end-of-run summaries."""
+        is_new_best = (
+            self.early_stopping.best_score is not None
+            and (previous_best is None
+                 or self.early_stopping.best_score != previous_best)
+        )
+        row = {
+            "epoch": int(epoch),
+            "global_step": int(total_step),
+            "val_auc": float(val_auc),
+            "val_logloss": float(val_logloss),
+            "is_best": bool(is_new_best),
+        }
+        self.validation_history.append(row)
+        self.last_epoch = int(epoch)
+        self.last_global_step = int(total_step)
+        self.last_val_auc = float(val_auc)
+        self.last_val_logloss = float(val_logloss)
+        if is_new_best:
+            self.best_epoch = int(epoch)
+            self.best_global_step = int(total_step)
+            self.best_val_auc = float(val_auc)
+            self.best_val_logloss = float(val_logloss)
+            self.best_checkpoint_dir = os.path.dirname(
+                self.early_stopping.checkpoint_path)
+
+    def _write_training_summary(self, stop_reason: str) -> None:
+        """Emit a grep-friendly summary and persist it next to logs/checkpoints."""
+        summary = {
+            "stop_reason": stop_reason,
+            "best_val_auc": self.best_val_auc,
+            "best_val_logloss": self.best_val_logloss,
+            "best_epoch": self.best_epoch,
+            "best_global_step": self.best_global_step,
+            "best_checkpoint_dir": self.best_checkpoint_dir,
+            "last_val_auc": self.last_val_auc,
+            "last_val_logloss": self.last_val_logloss,
+            "last_epoch": self.last_epoch,
+            "last_global_step": self.last_global_step,
+            "early_stopping_counter": self.early_stopping.counter,
+            "early_stopping_patience": self.early_stopping.patience,
+            "validation_history": self.validation_history,
+            "key_train_config": {},
+        }
+        if self.train_config:
+            key_names = (
+                "seq_encoder_type", "valid_split_strategy", "valid_ratio",
+                "train_ratio", "limit_train_rgs", "limit_valid_rgs",
+                "max_train_steps", "d_model", "num_queries",
+                "dropout_rate", "loss_type", "batch_size", "num_workers",
+                "seed",
+            )
+            summary["key_train_config"] = {
+                k: self.train_config.get(k) for k in key_names
+                if k in self.train_config
+            }
+
+        logging.info("[summary] ===== Training Summary =====")
+        logging.info(f"[summary] stop_reason={stop_reason}")
+        logging.info(
+            f"[summary] best_val_AUC={self.best_val_auc} "
+            f"best_val_logloss={self.best_val_logloss} "
+            f"best_epoch={self.best_epoch} "
+            f"best_global_step={self.best_global_step}")
+        logging.info(
+            f"[summary] last_val_AUC={self.last_val_auc} "
+            f"last_val_logloss={self.last_val_logloss} "
+            f"last_epoch={self.last_epoch} "
+            f"last_global_step={self.last_global_step}")
+        logging.info(f"[summary] best_checkpoint_dir={self.best_checkpoint_dir}")
+        if self.validation_history:
+            compact = ", ".join(
+                f"E{r['epoch']}@{r['global_step']}:"
+                f"{r['val_auc']:.6f}"
+                f"{'*' if r['is_best'] else ''}"
+                for r in self.validation_history
+            )
+            logging.info(f"[summary] val_auc_history={compact}")
+        logging.info("[summary] ===== End Training Summary =====")
+
+        out_paths = [os.path.join(self.save_dir, "training_summary.json")]
+        if self.train_config and self.train_config.get("log_dir"):
+            out_paths.append(os.path.join(
+                self.train_config["log_dir"], "training_summary.json"))
+        for path in out_paths:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, indent=2, sort_keys=True)
+                logging.info(f"[summary] wrote {path}")
+            except Exception as e:
+                logging.warning(f"[summary] failed to write {path}: {e}")
+
+    def _build_step_dir_name(
+        self,
+        global_step: int,
+        is_best: bool = False,
+        val_auc: Optional[float] = None,
+    ) -> str:
         """Build a checkpoint sub-directory name such as
-        ``global_step2500.layer=2.head=4.hidden=64[.best_model]``.
+        ``global_step2500.layer=2.head=4.hidden=64[.auc=0.865000][.best_model]``.
         """
         parts = [f"global_step{global_step}"]
         for key in ("layer", "head", "hidden"):
             if key in self.ckpt_params:
                 parts.append(f"{key}={self.ckpt_params[key]}")
+        if is_best and val_auc is not None:
+            # Platform checkpoint names must be <=300 chars and only use
+            # alnum, "_", "-", "=", ".". Fixed precision is readable and
+            # stable enough for selecting the best local-validation ckpt.
+            parts.append(f"auc={val_auc:.6f}")
         name = ".".join(parts)
         if is_best:
             name += ".best_model"
@@ -178,6 +300,7 @@ class PCVRHyFormerRankingTrainer:
         self,
         global_step: int,
         is_best: bool = False,
+        val_auc: Optional[float] = None,
         skip_model_file: bool = False,
     ) -> str:
         """Save ``model.pt`` plus sidecar files under a ``global_step`` sub-dir.
@@ -185,6 +308,7 @@ class PCVRHyFormerRankingTrainer:
         Args:
             global_step: current global step used to name the directory.
             is_best: whether this is a new-best checkpoint.
+            val_auc: optional validation AUC included in best checkpoint names.
             skip_model_file: if True, skip writing ``model.pt`` (because the
                 caller, e.g. EarlyStopping, has already persisted it to the
                 same path). Sidecar files are still (re)written.
@@ -192,7 +316,8 @@ class PCVRHyFormerRankingTrainer:
         Returns:
             The absolute path of the checkpoint directory.
         """
-        dir_name = self._build_step_dir_name(global_step, is_best=is_best)
+        dir_name = self._build_step_dir_name(
+            global_step, is_best=is_best, val_auc=val_auc)
         ckpt_dir = os.path.join(self.save_dir, dir_name)
         os.makedirs(ckpt_dir, exist_ok=True)
         if not skip_model_file:
@@ -270,7 +395,8 @@ class PCVRHyFormerRankingTrainer:
         # save never leaks the unused path into EarlyStopping state.
         best_dir = os.path.join(
             self.save_dir,
-            self._build_step_dir_name(total_step, is_best=True),
+            self._build_step_dir_name(
+                total_step, is_best=True, val_auc=val_auc),
         )
         self.early_stopping.checkpoint_path = os.path.join(best_dir, "model.pt")
 
@@ -291,7 +417,8 @@ class PCVRHyFormerRankingTrainer:
             self.early_stopping.checkpoint_path
         ):
             self._save_step_checkpoint(
-                total_step, is_best=True, skip_model_file=True)
+                total_step, is_best=True, val_auc=val_auc,
+                skip_model_file=True)
 
     def train(self) -> None:
         """Main training loop: iterates over epochs, performs step-level and
@@ -333,11 +460,16 @@ class PCVRHyFormerRankingTrainer:
                         self.writer.add_scalar('AUC/valid', val_auc, total_step)
                         self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
+                    previous_best = self.early_stopping.best_score
                     self._handle_validation_result(total_step, val_auc, val_logloss)
+                    self._record_validation_result(
+                        epoch, total_step, val_auc, val_logloss, previous_best)
                     validated_this_step = True
 
                     if self.early_stopping.early_stop:
                         logging.info(f"Early stopping at step {total_step}")
+                        self._write_training_summary(
+                            f"early_stop_step_{total_step}")
                         return
 
                 if self.max_train_steps > 0 and total_step >= self.max_train_steps:
@@ -360,12 +492,18 @@ class PCVRHyFormerRankingTrainer:
                             self.writer.add_scalar('AUC/valid', val_auc, total_step)
                             self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
+                        previous_best = self.early_stopping.best_score
                         self._handle_validation_result(
                             total_step, val_auc, val_logloss)
+                        self._record_validation_result(
+                            epoch, total_step, val_auc, val_logloss,
+                            previous_best)
 
                     logging.info(
                         f"Stopping training after max_train_steps="
                         f"{self.max_train_steps}")
+                    self._write_training_summary(
+                        f"max_train_steps_{self.max_train_steps}")
                     return
 
             logging.info(
@@ -382,10 +520,14 @@ class PCVRHyFormerRankingTrainer:
                 self.writer.add_scalar('AUC/valid', val_auc, total_step)
                 self.writer.add_scalar('LogLoss/valid', val_logloss, total_step)
 
+            previous_best = self.early_stopping.best_score
             self._handle_validation_result(total_step, val_auc, val_logloss)
+            self._record_validation_result(
+                epoch, total_step, val_auc, val_logloss, previous_best)
 
             if self.early_stopping.early_stop:
                 logging.info(f"Early stopping at epoch {epoch}")
+                self._write_training_summary(f"early_stop_epoch_{epoch}")
                 break
 
             # After the configured epoch, reinitialize high-cardinality sparse
@@ -415,6 +557,8 @@ class PCVRHyFormerRankingTrainer:
                         restored += 1
                 logging.info(f"Rebuilt Adagrad optimizer after epoch {epoch}, "
                              f"restored optimizer state for {restored} low-cardinality params")
+        else:
+            self._write_training_summary("max_epochs_completed")
 
     def _make_model_input(self, device_batch: Dict[str, Any]) -> ModelInput:
         """Construct a ``ModelInput`` NamedTuple from a device_batch dict."""

@@ -24,7 +24,9 @@
 
 **当前状态**：
 - ✅ 代码开关已落地：`--limit_train_rgs`、`--limit_valid_rgs`、`--max_train_steps`，默认 0，不影响 full train
-- ⏳ 待下一次平台 smoke job 验证：建议先用 `--limit_train_rgs 64 --limit_valid_rgs 16 --max_train_steps 500 --num_workers 4` 跑 swiglu 快速链路
+- ✅ 平台 fast proxy smoke job 已验证：`64/16 RG + max_train_steps=500` 在 4 分半内完成，final AUC 0.824108 / LogLoss 0.252679，详见 [`EXP-004`](../40-experiments/EXP-004-fast-proxy-smoke-2026-05-02.md)
+- ✅ 训练结束摘要已落地：`trainer.py` 在 Early Stop / max steps / 正常结束时打印 `[summary]`，并写 `training_summary.json` 到 ckpt 与 log 目录，避免平台上翻长日志 / 曲线找 best AUC
+- ✅ best checkpoint 目录名已追加 local valid AUC：形如 `global_step48060.layer=2.head=4.hidden=64.auc=0.865884.best_model`，保留 `global_step` 前缀与 `.best_model` 后缀，符合平台命名约束
 - ⏳ 待平台结果回流后，把 proxy AUC / LogLoss 与 full train / public score 关联到 EXP 表
 
 **当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，后续新想法默认先过本任务定义的 gating。
@@ -79,6 +81,8 @@
 - ✅ 本地 demo 验证（filename overlap=765s / time overlap=770s，是 demo 数据特性）
 - ⚠️ **本轮 EXP-002 三组训练 jobs 启动于 T8 探针落地之前 → log 里没有 `[T8]` 行** → 必须新一轮 platform job（baseline tip 含探针）才能拿到真实 overlap_sec
 - ⚠️ **EXP-003 第一轮 swiglu+time 结果暂不采信**：用户确认该轮是在旧 swiglu 任务链路上改参数提交，日志缺有效探针证据；已新建 job 重跑
+- ⚠️ **EXP-004 fast proxy 已显示 RG-level split 仍重叠**：`time overlap_sec=302765`，`filename overlap_sec=304064`，说明单靠 Row Group 排序可能无法保证 clean split；需等 full job 复核后启动 T8.5 row-level timestamp cutoff
+- ⚠️ **修复后 full time job 复核同向**：`valid_ratio=0.10 overlap_sec=341068` 已 Early Stop；`valid_ratio=0.05 overlap_sec=341086` 截至 epoch 9 仍在训练。RG-level time split 无法消除 row-level overlap，T8.5 row-level timestamp cutoff 应升为下一轮高优先级工程动作。详见 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md)
 - ⏳ **待新一轮平台 job 验证 overlap_sec 真实值** → 决定是否切换到 `time` 策略
 
 **残留待平台验证**（下一次 platform job 时）：
@@ -103,6 +107,8 @@
 - ✅ 推理路径完全无影响（`is_training=False` 不写入 `_diag_*`）
 - ⚠️ **本轮 EXP-002 三组训练 jobs 启动于 T10 探针落地之前 → log 里没有 `[diag]` 行** → 必须新一轮 platform job 才能拿到 4 张切片表
 - ⚠️ **EXP-003 第一轮 swiglu+time 同样缺 `[diag]` 有效证据**（旧任务链路改参数提交），已新建 job 重跑
+- ✅ **EXP-004 fast proxy 已回流 4 张切片表**：`user_int_nonzero` / `item_int_nonzero` / `seq_total_len` 桶间 AUC 差均远超 0.02，强触发 ADR-003 的 P0-A / P0-B 候选；因只训练 500 step，仍待 full job 复核
+- ✅ **full time job 切片表复核同向**：`label_type=0` 持续为 0，valid 仅含 `label_type=1/2`；`user_int_nonzero`、`item_int_nonzero`、`seq_total_len` 分桶 AUC 差继续明显，P0-A/P0-B 方向成立，P1 multi-task 暂不优先
 - ⏳ **待新一轮平台 job 4 张切片表回流** → 决定 P0 特征工程方向
 
 **待平台 job 验证后再分类决策**（每个分支对应不同的 P0 特征工程方向，**实施方案见 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md)**）：
@@ -126,6 +132,14 @@
 ---
 
 ## Changelog
+
+- **2026-05-02 PDT 14:25（best ckpt 名称追加 AUC）**：确认平台 ckpt 子目录约束为 `global_step` 前缀、≤300 字符、合法字符 `[a-zA-Z0-9_.=-]` 后，将 best checkpoint 命名扩展为 `global_stepN.layer=...head=...hidden=...auc=0.xxxxxx.best_model`。该改动只写入 local valid AUC 元信息，保留 `.best_model` 后缀与旧目录清理逻辑，不涉及 evaluation score / ensemble / 外部数据。
+
+- **2026-05-02 PDT 14:10（训练结束摘要落地）**：`trainer.py` 新增 end-of-run `[summary]` 与 `training_summary.json`，记录 `best_val_AUC`、`best_val_logloss`、`best_epoch`、`best_global_step`、`best_checkpoint_dir`、last val metrics 与 compact AUC history。后续平台训练完成后直接搜 `[summary]` 或看 JSON，避免为了决定 evaluation 额度而翻 TensorBoard 曲线 / 长日志。
+
+- **2026-05-02 PDT 13:50（修复后 full time jobs 回流）**：`swiglu-valid_split_strategy_time valid_ratio=0.10` 已 Early Stop，best local AUC 0.863248 @ step 53004，`overlap_sec=341068`；`swiglu-split_strategy_time-valid_ratio_0.05` 截至 epoch 9 仍在训练，当前 best local AUC 0.865884 @ step 48060，`overlap_sec=341086`。两者与 EXP-004 proxy 一致证明 RG-level time split 仍不 clean，T8.5 row-level timestamp cutoff 升为下一轮高优先级；evaluation 额度应优先等 0.05 任务完成后再投，0.10 暂不急评。
+
+- **2026-05-02 PDT 10:40 / 12:10（EXP-004 fast proxy smoke 回流）**：`swiglu + valid_ratio=0.05 + 64/16 RG + max_train_steps=500` 平台 smoke 对照完成，验证 T11 链路有效；T8 日志显示 RG-level `time overlap_sec=302765`、`filename overlap_sec=304064`，强提示 T8.5 row-level timestamp cutoff；T10 切片表显示 `user_int_nonzero`、`item_int_nonzero`、`seq_total_len` 桶间 AUC 差均远超 0.02，强触发 ADR-003 P0-A/P0-B，但因 proxy 只训练 500 step，需等待 full job 复核后决定是否投 full train / leaderboard。
 
 - **2026-05-01 PDT 19:35（T11 fast proxy 开关落地）**：训练链路新增 `--limit_train_rgs`、`--limit_valid_rgs`、`--max_train_steps`，默认 0 行为不变；fast proxy job 可以在常规 split 后限制 RG 数，并在指定 optimizer step 后立即 final validation + 保存 best_model，用于把 shape / 数据切分 / 初步收敛问题从 10h full train 前置暴露。
 

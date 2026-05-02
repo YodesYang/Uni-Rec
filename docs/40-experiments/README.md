@@ -56,3 +56,4 @@
 | [EXP-001](./EXP-001-baseline-cpu-demo.md) | 本地 CPU baseline 跑通 1k demo（AUC 0.6761/0.6799） | 2026-04-28 | macOS / CPU | baseline 文件 ≡ 官方训练模板，2 epoch 33s 跑通 |
 | [EXP-002](./EXP-002-platform-baseline-job.md) | 平台首个 baseline job（GPU / batch=256 / 1.9M 行 / 198.7M params） | 2026-04-30（晨） | Tencent Angel | fid 集合与 demo 完全一致；总参数 198.7M（demo 160.9M）|
 | [EXP-003](./EXP-003-platform-batch-2026-05-01.md) | 平台批次实验（swiglu-time / d_model=128 / dropout=0.05） | 2026-05-01 | Tencent Angel | d_model=128 明显退步；time split 需新建 job 才能有效验证；dropout=0.05 待评估 |
+| [EXP-004](./EXP-004-fast-proxy-smoke-2026-05-02.md) | fast proxy smoke jobs 验证 T8/T10/T11 链路 | 2026-05-02 | Tencent Angel | proxy 链路有效；time/filename 均有 RG-level overlap；P0-A/P0-B 特征信号强 |

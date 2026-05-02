@@ -67,6 +67,8 @@ baseline/
 **新增功能**（2026-04-30 ADR-002）：
 - `evaluate()` 收集 `_diag_*` 字段 + `_slice_diagnose()` 方法跑 4 张切片表（详见 ADR-002）
 - 2026-05-01 T11：`max_train_steps` 支持达到指定 optimizer step 后立即跑 final validation 并停止；默认 0，不影响 full train。
+- 2026-05-02：训练结束 / Early Stop / fast proxy 停止时自动打印 `[summary]` 摘要，并写出 `training_summary.json` 到 ckpt 与 log 目录，便于平台训练完成后快速读取 best AUC / best step / best ckpt。
+- 2026-05-02：best checkpoint 目录名追加 local valid AUC（如 `global_step48060.layer=2.head=4.hidden=64.auc=0.865884.best_model`）；仍满足平台 `global_step` 前缀、≤300 字符、合法字符约束。
 
 ---
 

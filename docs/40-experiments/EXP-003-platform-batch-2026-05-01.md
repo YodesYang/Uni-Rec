@@ -40,6 +40,32 @@
 | swiglu + d_model=128 | **0.864881** | 15220 | Early Stop @ epoch 7（早期见顶） |
 | swiglu + dropout=0.05 | **0.864563** | 53270 | 训练到 epoch 11，后期缓慢回落 |
 
+### 修复后 time split full jobs（2026-05-02 回流）
+
+| 训练任务 | valid_ratio | 状态 | overlap_sec | Local Best Val AUC | Best Step | 当前结论 |
+|---|---:|---|---:|---:|---:|---|
+| swiglu-valid_split_strategy_time | 0.10 | Completed / Early Stop @ epoch 12 | 341,068 | 0.863248 | 53004 | RG-level time split 仍严重 overlap，local AUC 低于 swiglu filename 基线 |
+| swiglu-split_strategy_time-valid_ratio_0.05 | 0.05 | Training（截至 epoch 9） | 341,086 | **0.865884** | 48060 | 当前 local 最强，但仍需等训练完成后再决定 evaluation |
+
+关键日志：
+
+```text
+# valid_ratio=0.10
+[T8] train ts: [1772238909, 1772588940]
+     valid ts: [1772247872, 1772588990]
+     overlap_sec: 341068
+Epoch 7 Validation | AUC: 0.8632482256979388
+Early stopping at epoch 12
+
+# valid_ratio=0.05（仍在训练）
+[T8] train ts: [1772238909, 1772588958]
+     valid ts: [1772247872, 1772588990]
+     overlap_sec: 341086
+Epoch 6 Validation | AUC: 0.8658836865584829
+Epoch 9 Validation | AUC: 0.8644454326618461
+model earlyStopping counter: 3 / 5
+```
+
 ---
 
 ## Findings（关键发现）
@@ -52,6 +78,15 @@
    - 用户确认该任务是直接在旧 swiglu 任务上改参数提交，非全新 job 链路。
    - 当前缺少 `[T8]` / `[diag]` 关键日志片段，不足以证明 `overlap_sec` 与切片诊断是否生效。
    - 已有新建 job 重跑，等待新日志回收再做结论。
+
+2b. **修复后 RG-level time split 仍不能形成 clean future validation**：
+   - `valid_ratio=0.10` full job：`overlap_sec=341068`。
+   - `valid_ratio=0.05` full job：截至 epoch 9，`overlap_sec=341086`。
+   - 结论与 [EXP-004](./EXP-004-fast-proxy-smoke-2026-05-02.md) proxy 对照一致：Row Group 内部时间跨度太宽，单靠 RG 排序无法消除 row-level overlap；T8.5 row-level timestamp cutoff 应升为下一轮高优先级工程动作。
+
+2c. **valid_ratio=0.05 当前比 0.10 更值得等完成后评估**：
+   - `valid_ratio=0.10` best local AUC 0.863248，低于原 swiglu filename local 0.8650。
+   - `valid_ratio=0.05` 截至 epoch 9 best local AUC 0.865884（step 48060），高于原 swiglu filename local，但尚未 Early Stop，需等待最终 best checkpoint。
 
 3. **dropout=0.05 是当前最值得立刻补评估的候选**：
    - 训练已完成，Local best 0.864563，和基线差距不大。
@@ -83,7 +118,6 @@ bash baseline/run.sh --seq_encoder_type swiglu --dropout_rate 0.05
 ## 待回填
 
 - [ ] transformer re-train 完成后的 best ckpt 评估结果（目标：修复 wrong publish 后回到 ~0.836 或更高）
-- [ ] swiglu+time **新建 job** 的 `[T8] overlap_sec` + `[diag]` 四张切片表
+- [x] swiglu+time **新建 job** 的 `[T8] overlap_sec` + `[diag]` 四张切片表（valid_ratio=0.10 已完成；0.05 仍在训练）
 - [ ] swiglu-dropout=0.05 leaderboard AUC
 - [ ] 若 T8/T10 数据齐全，创建 EXP-004（P0 特征工程首轮）
-
