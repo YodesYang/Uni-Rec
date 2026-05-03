@@ -280,6 +280,7 @@ class PCVRParquetDataset(IterableDataset):
         negative_maturity_sec: int = 86400,
         immature_negative_weight: float = 0.0,
         negative_maturity_end_ts: Optional[int] = None,
+        dense_log1p_fids: frozenset[int] | None = None,
     ) -> None:
         """
         Args:
@@ -329,6 +330,13 @@ class PCVRParquetDataset(IterableDataset):
                 negatives; 0 drops them from the loss.
             negative_maturity_end_ts: max observable timestamp for the training
                 split. Required when mature-negative weighting is enabled.
+            dense_log1p_fids: set of user_dense fids whose raw values are
+                large-magnitude counts/frequencies and should be compressed with
+                ``log1p`` before being fed into the dense projection layer.
+                Defaults to ``{62, 63, 64, 65, 66}`` (EDA confirmed these
+                columns contain values in the 10^3–10^5 range, while other dense
+                columns such as fid=61/87 are pre-normalised embeddings near 0).
+                Pass ``frozenset()`` to disable all scaling.
         """
         super().__init__()
 
@@ -366,6 +374,11 @@ class PCVRParquetDataset(IterableDataset):
         self.negative_maturity_sec = negative_maturity_sec
         self.immature_negative_weight = immature_negative_weight
         self.negative_maturity_end_ts = negative_maturity_end_ts
+        self.dense_log1p_fids: frozenset[int] = (
+            frozenset({62, 63, 64, 65, 66})
+            if dense_log1p_fids is None
+            else dense_log1p_fids
+        )
         if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
             raise ValueError(
                 "history_cvr_time_mode must be 'timestamp_cutoff' or "
@@ -455,7 +468,8 @@ class PCVRParquetDataset(IterableDataset):
         offset = 0
         for fid, dim in self._user_dense_cols:
             ci = self._col_idx.get(f'user_dense_feats_{fid}')
-            self._user_dense_plan.append((ci, dim, offset))
+            do_log1p = fid in self.dense_log1p_fids
+            self._user_dense_plan.append((ci, dim, offset, do_log1p))
             offset += dim
 
         # Sequence column plan: {domain: ([(col_idx, feat_slot, vocab_size), ...], ts_col_idx)}
@@ -848,9 +862,14 @@ class PCVRParquetDataset(IterableDataset):
         # ---- user_dense ----
         user_dense = self._buf_user_dense[:B]
         user_dense[:] = 0
-        for ci, dim, offset in self._user_dense_plan:
+        for ci, dim, offset, do_log1p in self._user_dense_plan:
             col = batch.column(ci)
             padded = self._pad_varlen_float_column(col, dim, B)
+            if do_log1p:
+                # These columns contain raw count/frequency statistics
+                # (magnitude 10^3–10^5). Apply log1p so they share the same
+                # numeric scale as pre-normalised embedding columns (fid 61/87).
+                padded = np.log1p(np.maximum(padded, 0.0))
             user_dense[:, offset:offset + dim] = padded
 
         dense_offset = sum(dim for _, dim in self._user_dense_cols)
@@ -1405,6 +1424,7 @@ def get_pcvr_data(
     enable_mature_negative_weighting: bool = False,
     negative_maturity_sec: int = 86400,
     immature_negative_weight: float = 0.0,
+    dense_log1p_fids: frozenset[int] | None = None,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -1719,6 +1739,7 @@ def get_pcvr_data(
         negative_maturity_sec=negative_maturity_sec,
         immature_negative_weight=immature_negative_weight,
         negative_maturity_end_ts=negative_maturity_end_ts,
+        dense_log1p_fids=dense_log1p_fids,
     )
 
     use_cuda = torch.cuda.is_available()
@@ -1751,6 +1772,7 @@ def get_pcvr_data(
         history_cvr_cutoff_sec=history_cvr_cutoff_sec,
         history_cvr_available_lag_sec=history_cvr_available_lag_sec,
         history_cvr_prior_strength=history_cvr_prior_strength,
+        dense_log1p_fids=dense_log1p_fids,
     )
     valid_loader = DataLoader(
         valid_dataset, batch_size=None,

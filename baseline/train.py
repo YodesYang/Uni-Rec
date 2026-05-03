@@ -248,6 +248,13 @@ def parse_args() -> argparse.Namespace:
                              'by a zero vector at forward time (0 = no skipping; '
                              'all features get an Embedding). Useful for saving GPU '
                              'memory on ultra-high-cardinality features.')
+    parser.add_argument('--dense_log1p_fids', type=str, default='62,63,64,65,66',
+                        help='Comma-separated list of user_dense fids whose raw values '
+                             'are large-magnitude counts/frequencies and should be '
+                             'compressed with log1p before the dense projection layer. '
+                             'EDA confirmed fids 62-66 store raw counts (10^3-10^5) '
+                             'while other dense columns (fid 61/87) are pre-normalised '
+                             'embeddings. Pass "" to disable all scaling.')
     parser.add_argument('--seq_id_threshold', type=int, default=10000,
                         help='Within the sequence tokenizer, features with vocab_size '
                              'exceeding this value are treated as id features and receive '
@@ -386,6 +393,9 @@ def main() -> None:
         enable_mature_negative_weighting=args.enable_mature_negative_weighting,
         negative_maturity_sec=args.negative_maturity_sec,
         immature_negative_weight=args.immature_negative_weight,
+        dense_log1p_fids=frozenset(
+            int(x) for x in args.dense_log1p_fids.split(',') if x.strip()
+        ),
     )
 
     # ---- NS groups ----
