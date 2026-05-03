@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-03（PDT · 新增 T12 时间特征 + T13 seq_c fid47 截断）· 结论：社区情报验证 log1p 有效（EXP-011），剩余高价值未落地情报为 ① ray 的 impression 绝对时间特征（+0.0105 主因候选）② domain_c_seq_47 vocab 截断（当前因 emb_skip_threshold 整个跳过）；两者分别立 T12 / T13，先过 proxy 漏斗。
+**最近一次审视**：2026-05-04（PDT · T12 time-of-day proxy 对照回流）· 结论：timefeat ON AUC **0.839283** / timefeat OFF **0.838475**，Δ+0.000808 AUC / −0.002033 LogLoss，是 log1p 修复收益的 5~6 倍，升为 full train 候选。详见 [`EXP-012`](../40-experiments/EXP-012-timefeat-proxy-2026-05-04.md)。
 
 ---
 
@@ -41,7 +41,7 @@
 
 **当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，后续新想法默认先过本任务定义的 gating。
 
-### T12 `[ ]` Impression 绝对时间特征（P0-D）
+### T12 `[~]` Impression 绝对时间特征（P0-D）
 
 **来源**：社区情报 ray（Academic Track 第 27 名）报告"加时间特征 0.8135 → 0.824"（+0.0105），是其所有优化中最大单点。我们的 P0-B（`enable_seq_stats_features`：序列长度 + ts_range）在 full train 上没有复现类似收益，因此 ray 的"时间特征"指的是**不同的东西**。
 
@@ -53,13 +53,11 @@
 - CLI flag：`--enable_time_of_day_features`，默认 False，opt-in
 
 **分层漏斗**：
-1. `py_compile` + demo smoke
-2. `timefeat-proxy-swiglu-vr005-rg128x32-s1500` 对比 log1p baseline
-3. proxy AUC > +0.002 → 进 full train
+1. `py_compile` + demo smoke ✅
+2. `timefeat-proxy-swiglu-vr005-rg128x32-s1500` 对比 log1p baseline ✅ → AUC +0.000808 / LogLoss −0.002033，详见 [`EXP-012`](../40-experiments/EXP-012-timefeat-proxy-2026-05-04.md)
+3. ⏳ **full train**：`timefeat-full-swiglu-vr005-bs128`，阈值 `>=0.8665` 考虑 evaluation
 
-**启动信号**：P0 分支当前回流中（p0count full train 未完成），T12 可以独立并行启动。
-
-**当前优先级**：高，是剩余未验证情报中预期收益最大的单点。
+**当前优先级**：高，proxy 信号明显，升为 full train 下一轮首选。
 
 ---
 
@@ -190,6 +188,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT（T12 time-of-day proxy 对照回流）**：`timefeat-proxy` best AUC 0.839283 / LogLoss 0.241525；`notimefeat-proxy` best AUC 0.838475 / LogLoss 0.243558。Δ+0.000808 AUC / −0.002033 LogLoss，是 log1p 修复收益的 5~6 倍。hour_sin/cos + dow_sin/cos + is_weekend 5 维圆形编码，FID=900004。T12 状态升为 `[~]`，升为 full train 候选，阈值 >=0.8665 考虑 evaluation。详见 [`EXP-012`](../40-experiments/EXP-012-timefeat-proxy-2026-05-04.md)。
 
 - **2026-05-03 PDT（新增 T12 + T13）**：社区情报深度分析后落地两条新 task。T12：impression 绝对时间特征（小时/星期/是否周末），对应 ray 报告的 +0.0105 主因候选，优先级高；T13：domain_c_seq_47 vocab=278M 因 emb_skip_threshold=1M 被整个跳过，修复方案为 vocab 截断或 hash embedding，优先级中（先做 T12）。
 
