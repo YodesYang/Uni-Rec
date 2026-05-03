@@ -295,6 +295,13 @@ def parse_args() -> argparse.Namespace:
                              'global-info query with a target-item-aware query branch, '
                              'letting the model focus user history on the target ad.')
 
+    parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
+                        help='Recency reweighting: give samples closer to the test period '
+                             'higher training weight via weight=exp(alpha*norm_ts). '
+                             'norm_ts is linearly scaled to [0,1] over the training split. '
+                             '0 = disabled (default); 2~4 = moderate upweighting of '
+                             'recent samples; useful for reducing train/test temporal gap.')
+
     # NS tokenizer variant.
     parser.add_argument('--ns_tokenizer_type', type=str, default='rankmixer',
                         choices=['group', 'rankmixer'],
@@ -414,6 +421,7 @@ def main() -> None:
             int(x) for x in args.dense_log1p_fids.split(',') if x.strip()
         ),
         enable_time_of_day_features=args.enable_time_of_day_features,
+        temporal_weight_alpha=args.temporal_weight_alpha,
     )
 
     # ---- NS groups ----

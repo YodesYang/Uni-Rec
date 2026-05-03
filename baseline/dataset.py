@@ -284,6 +284,9 @@ class PCVRParquetDataset(IterableDataset):
         negative_maturity_end_ts: Optional[int] = None,
         dense_log1p_fids: frozenset[int] | None = None,
         enable_time_of_day_features: bool = False,
+        temporal_weight_alpha: float = 0.0,
+        temporal_weight_ts_min: Optional[int] = None,
+        temporal_weight_ts_max: Optional[int] = None,
     ) -> None:
         """
         Args:
@@ -390,6 +393,9 @@ class PCVRParquetDataset(IterableDataset):
             else dense_log1p_fids
         )
         self.enable_time_of_day_features = enable_time_of_day_features
+        self.temporal_weight_alpha = float(temporal_weight_alpha)
+        self.temporal_weight_ts_min = temporal_weight_ts_min
+        self.temporal_weight_ts_max = temporal_weight_ts_max
         if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
             raise ValueError(
                 "history_cvr_time_mode must be 'timestamp_cutoff' or "
@@ -824,6 +830,25 @@ class PCVRParquetDataset(IterableDataset):
                    < int(self.negative_maturity_sec))
             )
             sample_weight[immature_mask] = float(self.immature_negative_weight)
+        if (self.is_training
+                and self.temporal_weight_alpha > 0.0
+                and self.temporal_weight_ts_min is not None
+                and self.temporal_weight_ts_max is not None):
+            # Recency reweighting: samples closer to the test period get higher
+            # weight. weight_i = exp(alpha * norm_ts_i) where norm_ts_i in [0,1].
+            # alpha=0 → uniform; alpha=3 → latest 1/3 of the range is ~3× more
+            # important than the earliest.
+            ts_range = float(self.temporal_weight_ts_max - self.temporal_weight_ts_min)
+            if ts_range > 0:
+                norm_ts = (timestamps.astype(np.float32) - self.temporal_weight_ts_min) / ts_range
+                norm_ts = np.clip(norm_ts, 0.0, 1.0)
+                tw = np.exp(self.temporal_weight_alpha * norm_ts).astype(np.float32)
+                # Normalize so mean weight ≈ 1 (keeps effective learning rate stable)
+                tw /= tw.mean().clip(min=1e-6)
+                if sample_weight is None:
+                    sample_weight = tw
+                else:
+                    sample_weight = sample_weight * tw
         user_ids = batch.column(self._col_idx['user_id']).to_pylist()
 
         # ---- user_int: write into pre-allocated buffer ----
@@ -1460,6 +1485,7 @@ def get_pcvr_data(
     immature_negative_weight: float = 0.0,
     dense_log1p_fids: frozenset[int] | None = None,
     enable_time_of_day_features: bool = False,
+    temporal_weight_alpha: float = 0.0,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -1714,6 +1740,7 @@ def get_pcvr_data(
             f"{len(valid_rgs)} valid ({valid_rows} pre-filter rows)")
 
     negative_maturity_end_ts = None
+    train_ts_range: Optional[Tuple[int, int]] = None
     if enable_mature_negative_weighting:
         if train_timestamp_max is not None:
             negative_maturity_end_ts = int(train_timestamp_max)
@@ -1729,6 +1756,18 @@ def get_pcvr_data(
             f"observation_end_ts={negative_maturity_end_ts}, "
             f"negative_maturity_sec={negative_maturity_sec}, "
             f"immature_negative_weight={immature_negative_weight}")
+
+    if temporal_weight_alpha > 0.0 and train_ts_range is None:
+        train_ts_range = _row_groups_ts_range(train_rgs)
+        if train_ts_range is None:
+            logging.warning(
+                "[temporal_weight] could not determine training timestamp "
+                "range; temporal weighting disabled")
+            temporal_weight_alpha = 0.0
+        else:
+            logging.info(
+                f"[temporal_weight] alpha={temporal_weight_alpha}, "
+                f"ts_range=[{train_ts_range[0]}, {train_ts_range[1]}]")
 
     if enable_history_cvr_features:
         if not history_cvr_cache_path:
@@ -1776,8 +1815,10 @@ def get_pcvr_data(
         negative_maturity_end_ts=negative_maturity_end_ts,
         dense_log1p_fids=dense_log1p_fids,
         enable_time_of_day_features=enable_time_of_day_features,
+        temporal_weight_alpha=temporal_weight_alpha,
+        temporal_weight_ts_min=int(train_ts_range[0]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
+        temporal_weight_ts_max=int(train_ts_range[1]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
     )
-
     use_cuda = torch.cuda.is_available()
     _train_kw = {}
     if num_workers > 0:
