@@ -283,6 +283,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--onetrans_top_k', type=int, default=50,
                         help='Number of most-recent tokens kept per domain before '
                              'the unified OneTrans attention (default 50)')
+    parser.add_argument('--seq_hash_vocab', type=int, default=0,
+                        help='T13: when > 0, sequence features with vocab > '
+                             'emb_skip_threshold use a hash embedding of this size '
+                             'instead of a zero vector. Values are mapped via '
+                             'value %% seq_hash_vocab before embedding lookup. '
+                             '0 = disabled (default).')
 
     # NS tokenizer variant.
     parser.add_argument('--ns_tokenizer_type', type=str, default='rankmixer',
@@ -457,6 +463,7 @@ def main() -> None:
         "item_ns_tokens": args.item_ns_tokens,
         "use_onetrans": args.use_onetrans,
         "onetrans_top_k": args.onetrans_top_k,
+        "seq_hash_vocab": args.seq_hash_vocab,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

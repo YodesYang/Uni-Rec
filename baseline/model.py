@@ -1673,6 +1673,9 @@ class PCVRHyFormer(nn.Module):
         # OneTrans unified attention (replaces HyFormer query-decoding blocks)
         use_onetrans: bool = False,
         onetrans_top_k: int = 50,
+        # T13: hash embedding for sequence features with vocab > emb_skip_threshold
+        # (0 = disabled, use zero vector for skipped features as before)
+        seq_hash_vocab: int = 0,
     ) -> None:
         super().__init__()
 
@@ -1690,6 +1693,7 @@ class PCVRHyFormer(nn.Module):
         self.ns_tokenizer_type = ns_tokenizer_type
         self.use_onetrans = use_onetrans
         self.onetrans_top_k = onetrans_top_k
+        self.seq_hash_vocab = seq_hash_vocab
 
         # ================== NS Tokens Construction ==================
 
@@ -1778,17 +1782,33 @@ class PCVRHyFormer(nn.Module):
         self.seq_id_emb_dropout = nn.Dropout(dropout_rate * 2)
 
         def _make_seq_embs(vocab_sizes):
-            """Create embedding list, returning None for features skipped via
-            emb_skip_threshold or with no vocab info (vs<=0)."""
+            """Create embedding list for sequence domain features.
+
+            Features with vocab_size <= 0 → None (zero vector).
+            Features with vocab_size > emb_skip_threshold → None unless
+            seq_hash_vocab > 0, in which case a hash embedding of size
+            seq_hash_vocab is created and values are hashed modulo
+            seq_hash_vocab at forward time (T13 fix for domain_c_seq_47).
+            """
             embs_raw = []
+            hash_flags = []
             for vs in vocab_sizes:
-                skip = int(vs) <= 0 or (emb_skip_threshold > 0 and int(vs) > emb_skip_threshold)
-                if skip:
+                if int(vs) <= 0:
                     embs_raw.append(None)
+                    hash_flags.append(False)
+                elif emb_skip_threshold > 0 and int(vs) > emb_skip_threshold:
+                    if seq_hash_vocab > 0:
+                        # Hash embedding: recover high-vocab item IDs via modulo
+                        embs_raw.append(nn.Embedding(
+                            int(seq_hash_vocab) + 1, emb_dim, padding_idx=0))
+                        hash_flags.append(True)
+                    else:
+                        embs_raw.append(None)
+                        hash_flags.append(False)
                 else:
                     embs_raw.append(nn.Embedding(int(vs) + 1, emb_dim, padding_idx=0))
+                    hash_flags.append(False)
             module_list = nn.ModuleList([e for e in embs_raw if e is not None])
-            # Map from position index to real index in module_list (-1 if skipped)
             index_map = []
             real_idx = 0
             for e in embs_raw:
@@ -1798,21 +1818,23 @@ class PCVRHyFormer(nn.Module):
                 else:
                     index_map.append(-1)
             is_id = [int(vs) > seq_id_threshold for vs in vocab_sizes]
-            return module_list, index_map, is_id
+            return module_list, index_map, is_id, hash_flags
 
         # ================== Dynamic Sequence Embeddings ==================
         self._seq_embs = nn.ModuleDict()
         self._seq_emb_index = {}    # domain -> index_map
         self._seq_is_id = {}        # domain -> is_id list
+        self._seq_hash_flags = {}   # domain -> hash_flags (True = modulo hash)
         self._seq_vocab_sizes = {}  # domain -> vocab_sizes list
         self._seq_proj = nn.ModuleDict()
 
         for domain in self.seq_domains:
             vs = seq_vocab_sizes[domain]
-            embs, idx_map, is_id = _make_seq_embs(vs)
+            embs, idx_map, is_id, hash_flags = _make_seq_embs(vs)
             self._seq_embs[domain] = embs
             self._seq_emb_index[domain] = idx_map
             self._seq_is_id[domain] = is_id
+            self._seq_hash_flags[domain] = hash_flags
             self._seq_vocab_sizes[domain] = vs
             self._seq_proj[domain] = nn.Sequential(
                 nn.Linear(len(vs) * emb_dim, d_model),
@@ -2028,6 +2050,7 @@ class PCVRHyFormer(nn.Module):
         is_id: List[bool],
         emb_index: List[int],
         time_bucket_ids: torch.Tensor,
+        hash_flags: Optional[List[bool]] = None,
     ) -> torch.Tensor:
         """Embeds a sequence domain by concatenating sideinfo embeddings and projecting to d_model."""
         B, S, L = seq.shape
@@ -2035,18 +2058,23 @@ class PCVRHyFormer(nn.Module):
         for i in range(S):
             real_idx = emb_index[i] if i < len(emb_index) else -1
             if real_idx == -1:
-                # Feature skipped by emb_skip_threshold: output zero vector
                 emb_list.append(seq.new_zeros(B, L, self.emb_dim, dtype=torch.float))
             else:
                 emb = sideinfo_embs[real_idx]
-                e = emb(seq[:, i, :])  # (B, L, emb_dim)
+                vals = seq[:, i, :]  # (B, L)
+                # Hash embedding: map high-vocab item IDs via modulo
+                if hash_flags is not None and i < len(hash_flags) and hash_flags[i]:
+                    # Non-zero values get hashed; zero (padding) stays 0
+                    nonzero = vals != 0
+                    vals = vals.clone()
+                    vals[nonzero] = (vals[nonzero] % self.seq_hash_vocab).clamp(min=1)
+                e = emb(vals)  # (B, L, emb_dim)
                 if is_id[i] and self.training:
                     e = self.seq_id_emb_dropout(e)
                 emb_list.append(e)
         cat_emb = torch.cat(emb_list, dim=-1)  # (B, L, S*emb_dim)
         token_emb = F.gelu(proj(cat_emb))  # (B, L, D)
 
-        # Add time bucket embedding (all-zero ids produce zero vectors via padding_idx=0)
         if self.num_time_buckets > 0:
             token_emb = token_emb + self.time_embedding(time_bucket_ids)
 
@@ -2210,7 +2238,8 @@ class PCVRHyFormer(nn.Module):
                 inputs.seq_data[domain],
                 self._seq_embs[domain], self._seq_proj[domain],
                 self._seq_is_id[domain], self._seq_emb_index[domain],
-                inputs.seq_time_buckets[domain])
+                inputs.seq_time_buckets[domain],
+                hash_flags=self._seq_hash_flags.get(domain))
             seq_tokens_list.append(tokens)
             mask = self._make_padding_mask(
                 inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])

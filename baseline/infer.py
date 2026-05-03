@@ -257,6 +257,7 @@ def main() -> None:
         "item_ns_tokens": int(cfg.get("item_ns_tokens", 0)),
         "use_onetrans": bool(cfg.get("use_onetrans", False)),
         "onetrans_top_k": int(cfg.get("onetrans_top_k", 50)),
+        "seq_hash_vocab": int(cfg.get("seq_hash_vocab", 0)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
