@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-03（PDT · P0 路线收口 + OneTrans 全量回流）· 结论：P0-C full 0.865097 / MNW full best 0.864357，均低于 no-P0 reference 0.865884，P0 特征工程路线正式关闭；OneTrans v2 full 14 epoch best 0.848712（无 NS conditioner，停止）；OneTrans v3 full E10 best 0.859408（有 NS conditioner，仍在运行），比 v2 高 +0.010，NS conditioner 是关键。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)、[`EXP-013`](../40-experiments/EXP-013-onetrans-full-train-2026-05-03.md)。
+**最近一次审视**：2026-05-04（PDT · ICQ proxy 负向回流）· 结论：ICQ（item-conditioned query）proxy AUC **0.837866**，低于 timefeat-only 对照 **0.839283**，Δ−0.001417，不推进 full train；代码保留（`--item_conditioned_query` 默认 OFF）。当前主线等 `timefeat-full-swiglu-vr005-bs128` 结果。详见 [`EXP-014`](../40-experiments/EXP-014-icq-proxy-2026-05-04.md)。
 
 ---
 
