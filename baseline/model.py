@@ -1222,7 +1222,141 @@ class OneTransMixedFFN(nn.Module):
         return s_out, ns_out
 
 
+class OneTransNSConditioner(nn.Module):
+    """Sequence-conditioned initialization for OneTrans NS tokens.
+
+    Before the unified attention starts, each NS token receives an additive
+    update from the mean-pooled domain sequence representations. This gives
+    NS tokens initial sequence context analogous to HyFormer's
+    MultiSeqQueryGenerator, preventing cold-start of NS → S attention.
+
+    Each NS token has an independent conditioning FFN (mixed-parameterization
+    consistent with OneTrans design).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_ns: int,
+        num_sequences: int,
+        hidden_mult: int = 2,
+    ) -> None:
+        super().__init__()
+        self.num_ns = num_ns
+        seq_dim = num_sequences * d_model
+        # Pre-LN on the concatenated sequence context
+        self.seq_norm = nn.LayerNorm(seq_dim)
+        # Per-NS-token independent conditioning FFN
+        self.conditioners = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(seq_dim, d_model * hidden_mult),
+                nn.SiLU(),
+                nn.Linear(d_model * hidden_mult, d_model),
+                nn.LayerNorm(d_model),
+            )
+            for _ in range(num_ns)
+        ])
+
+    def forward(
+        self,
+        ns_tokens: torch.Tensor,
+        compressed_s_list: list,
+        compressed_mask_list: list,
+    ) -> torch.Tensor:
+        """Add sequence-conditioned delta to each NS token.
+
+        Args:
+            ns_tokens: (B, M, D)
+            compressed_s_list: list of (B, K, D), one per domain.
+            compressed_mask_list: list of (B, K) bool, True = padding.
+
+        Returns:
+            ns_tokens updated: (B, M, D)
+        """
+        # Masked mean-pool each domain's compressed S tokens → (B, D) per domain
+        domain_means = []
+        for s_i, mask_i in zip(compressed_s_list, compressed_mask_list):
+            valid = (~mask_i).float().unsqueeze(-1)      # (B, K, 1)
+            s_mean = (s_i * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+            domain_means.append(s_mean)
+
+        seq_ctx = torch.cat(domain_means, dim=-1)        # (B, num_seq * D)
+        seq_ctx = self.seq_norm(seq_ctx)
+
+        # Per-NS-token update
+        updates = [self.conditioners[j](seq_ctx).unsqueeze(1)
+                   for j in range(self.num_ns)]
+        delta = torch.cat(updates, dim=1)                # (B, M, D)
+
+        return ns_tokens + delta
+
+
 class OneTransBlock(nn.Module):
+    """Single OneTrans layer (Pre-LN).
+
+    Layout: [compressed_S_tokens | NS_tokens]
+    - Mixed-param attention (bidirectional S, NS sees all S + causal NS)
+    - Mixed-param FFN (shared for S, independent per NS)
+    - Residual connections + LayerNorm
+
+    The sequence compression (top-K selection per domain) is handled
+    externally by ``_gather_onetrans_s_tokens`` in ``PCVRHyFormer``.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_ns: int,
+        hidden_mult: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.norm_attn_s = nn.LayerNorm(d_model)
+        self.norm_attn_ns = nn.LayerNorm(d_model)
+        self.attn = OneTransMixedAttn(d_model, num_heads, num_ns, dropout)
+
+        self.norm_ffn_s = nn.LayerNorm(d_model)
+        self.norm_ffn_ns = nn.LayerNorm(d_model)
+        self.ffn = OneTransMixedFFN(d_model, num_ns, hidden_mult, dropout)
+
+    def forward(
+        self,
+        s_tokens: torch.Tensor,
+        ns_tokens: torch.Tensor,
+        s_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply one OneTrans layer with Pre-LN and residuals.
+
+        Args:
+            s_tokens: (B, L, D) concatenated sequence tokens from all domains.
+            ns_tokens: (B, M, D) NS tokens (user + item).
+            s_padding_mask: (B, L) bool, True = padding.
+
+        Returns:
+            s_tokens: (B, L, D) updated
+            ns_tokens: (B, M, D) updated
+        """
+        # Pre-LN attention
+        s_normed = self.norm_attn_s(s_tokens)
+        ns_normed = self.norm_attn_ns(ns_tokens)
+        s_attn, ns_attn = self.attn(s_normed, ns_normed, s_padding_mask)
+
+        s_tokens = s_tokens + s_attn
+        ns_tokens = ns_tokens + ns_attn
+
+        # Pre-LN FFN
+        s_normed = self.norm_ffn_s(s_tokens)
+        ns_normed = self.norm_ffn_ns(ns_tokens)
+        s_ffn, ns_ffn = self.ffn(s_normed, ns_normed)
+
+        s_tokens = s_tokens + s_ffn
+        ns_tokens = ns_tokens + ns_ffn
+
+        return s_tokens, ns_tokens
+
+
+
     """Single OneTrans layer (Pre-LN).
 
     Layout: [compressed_S_tokens | NS_tokens]
@@ -1739,6 +1873,14 @@ class PCVRHyFormer(nn.Module):
                 )
                 for _ in range(num_hyformer_blocks)
             ])
+            # NS-token sequence conditioner: gives NS tokens initial sequence
+            # context before the first unified attention (prevents cold-start)
+            self.ot_ns_conditioner = OneTransNSConditioner(
+                d_model=d_model,
+                num_ns=self.num_ns,
+                num_sequences=self.num_sequences,
+                hidden_mult=2,
+            )
             # Output: NS tokens flattened → project to d_model
             self.output_proj = nn.Sequential(
                 nn.Linear(self.num_ns * d_model, d_model),
@@ -1984,6 +2126,9 @@ class PCVRHyFormer(nn.Module):
         s_mask = torch.cat(compressed_masks, dim=1)         # (B, K*S) True=pad
 
         # Stack OneTrans blocks
+        # Condition NS tokens on sequence context before the first block
+        ns_tokens = self.ot_ns_conditioner(ns_tokens, compressed_s, compressed_masks)
+
         for block in self.onetrans_blocks:
             s_tokens, ns_tokens = block(s_tokens, ns_tokens, s_mask)
 
