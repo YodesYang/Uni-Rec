@@ -14,6 +14,7 @@ baseline/
 ├── model.py             # PCVRHyFormer 主模型（HyFormer 风格）
 ├── trainer.py           # PCVRHyFormerRankingTrainer
 ├── train.py             # 训练入口
+├── infer.py             # evaluation 入口（P0 synthetic dense 特征需上传）
 ├── ns_groups.json       # NS 分组配置（GroupNSTokenizer 才需要）
 ├── infer_schema.py      # 自动生成 schema.json 工具
 ├── utils.py             # logging / EarlyStopping / set_seed / sigmoid_focal_loss
@@ -35,6 +36,8 @@ baseline/
 - `_convert_batch()` 末尾在 `is_training=True` 分支加 4 个 `_diag_*` 字段（详见 ADR-002）
 - 2026-05-02 修复 `time` split 只排序日志、不影响 dataset 实际 RG 列表的问题：`PCVRParquetDataset` 支持显式 `row_groups`，`get_pcvr_data` 直接传入排序后的 train/valid RG 列表。
 - 2026-05-01 T11：`get_pcvr_data(limit_train_rgs, limit_valid_rgs)` 支持 fast proxy 数据切片；默认 0，不影响 full train。
+- 2026-05-02 T8.5/P0-A/P0-B：新增行级 timestamp cutoff 与两类 opt-in dense features（缺失计数、序列长度/时间跨度）；三个开关默认关闭，训练时写入 `train_config.json`。
+- 2026-05-02：synthetic dense 特征使用 `log1p` 缩放，避免 raw count / timestamp range 量级直接冲击 dense projection。
 
 ---
 
@@ -85,6 +88,21 @@ baseline/
 - `--limit_train_rgs N`：常规切分后只取靠近 valid cut 的最后 N 个 train RG
 - `--limit_valid_rgs N`：常规切分后只取前 N 个 valid RG
 - `--max_train_steps N`：训练 N 个 optimizer step 后跑一次 final validation 并退出
+
+**新增 CLI flag**（T8.5 / ADR-003 P0）：
+- `--enable_row_time_cutoff`：按候选 RG 的行级 timestamp 分位点做 clean train/valid cutoff
+- `--enable_count_features`：追加 user/item 非零 int 特征数到 user dense
+- `--enable_seq_stats_features`：追加每个序列 domain 的长度与 timestamp range 到 user dense
+- 未设置 `TRAIN_TF_EVENTS_PATH` 时，TensorBoard event 默认写到 `<log_dir>/tb`
+
+---
+
+## `infer.py` — evaluation 入口
+
+- 按 `MODEL_OUTPUT_PATH` 自动寻找包含 `model.pt` / `train_config.json` / `schema.json` 的 checkpoint 目录，优先选择 `*.best_model`
+- 从 `train_config.json` 恢复模型超参与 P0 feature flags，并用同一版 `PCVRParquetDataset` 重建 inference 特征
+- 输出 `EVAL_RESULT_PATH/predictions.json`，格式为 `{"predictions": {user_id: probability}}`
+- **重要**：开启 `--enable_count_features` 或 `--enable_seq_stats_features` 的模型，evaluation 时不要只依赖平台默认 infer；需上传 `infer.py` + 同版 `dataset.py` / `model.py`，保证 synthetic dense 特征训练/推理一致
 
 ---
 

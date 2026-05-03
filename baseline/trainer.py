@@ -526,6 +526,33 @@ class PCVRHyFormerRankingTrainer:
                             epoch, total_step, val_auc, val_logloss,
                             previous_best)
 
+                    # Trigger sparse reinit once at proxy end so that proxy
+                    # embedding dynamics match epoch-boundary full training.
+                    # Without this, proxy runs never experience the cold-restart
+                    # that fires at every epoch end in full training, making
+                    # proxy→full signal extrapolation unreliable.
+                    if epoch >= self.reinit_sparse_after_epoch and self.sparse_optimizer is not None:
+                        old_state: Dict[int, Any] = {}
+                        for group in self.sparse_optimizer.param_groups:
+                            for p in group['params']:
+                                if p.data_ptr() in self.sparse_optimizer.state:
+                                    old_state[p.data_ptr()] = self.sparse_optimizer.state[p]
+                        reinit_ptrs = self.model.reinit_high_cardinality_params(self.reinit_cardinality_threshold)
+                        sparse_params = self.model.get_sparse_params()
+                        self.sparse_optimizer = torch.optim.Adagrad(
+                            sparse_params, lr=self.sparse_lr,
+                            weight_decay=self.sparse_weight_decay)
+                        restored = 0
+                        for p in sparse_params:
+                            if p.data_ptr() not in reinit_ptrs and p.data_ptr() in old_state:
+                                self.sparse_optimizer.state[p] = old_state[p.data_ptr()]
+                                restored += 1
+                        logging.info(
+                            f"[proxy-reinit] Triggered sparse reinit at "
+                            f"max_train_steps={self.max_train_steps} "
+                            f"(mirrors full-train epoch-end reinit); "
+                            f"restored {restored} low-cardinality optimizer states")
+
                     logging.info(
                         f"Stopping training after max_train_steps="
                         f"{self.max_train_steps}")

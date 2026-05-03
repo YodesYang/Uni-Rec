@@ -31,7 +31,7 @@ TAAC 2026 Industrial Track 给出一个**单标签二分类点击转化率（PCV
 
 1. **同构 backbone + 编码器可插拔**：用 HyFormer 风格的 Query Token 抽取，把序列编码器抽象成一个可替换组件 → 一次实验切换 SwiGLU / Transformer / LONGER 三种 encoder
 2. **稀疏-稠密分离优化**：Embedding 走 Adagrad（稀疏更新），dense 走 AdamW；高基数 Embedding 在每 epoch 末做 cold-restart（KuaiShou MultiEpoch trick）
-3. **平台兼容性优先**：所有改动严格保留 `train_config.json` + `schema.json` 的 sidecar 写出 → 平台默认 `infer.py` 能动态反序列化模型构建（实测验证，§4.2）
+3. **平台兼容性优先**：所有改动严格保留 `train_config.json` + `schema.json` 的 sidecar 写出；纯模型超参可用平台默认 `infer.py` 动态反序列化，数据侧特征工程则上传同版 inference bundle（§4.2）
 4. **最小变更红线**：所有改动只改现有 baseline 文件（`baseline/dataset.py / model.py / trainer.py`），不新建 test 文件，不引入新依赖
 
 ---
@@ -207,7 +207,7 @@ LONGER:      E1 0.8589 → E2 0.8612 → E3 0.8622 → E4 0.8625 → E5 0.8624 �
 
 ### 4.2 平台默认 `infer.py` 兼容性（T7 验证）
 
-**结论**：平台 Evaluation 页预置的 `infer.py`（15.6K）**完全动态构建模型**，无需自定义上传。
+**结论**：平台 Evaluation 页预置的 `infer.py`（15.6K）**完全动态构建模型**；对仅改变模型超参 / encoder 的 checkpoint，无需自定义上传。
 
 实测铁证（来自 inference log）：
 
@@ -217,7 +217,9 @@ INFO - Building PCVRHyFormer with cfg: {... seq_encoder_type=swiglu, ns_tokenize
 INFO - Using schema: .../best_model/schema.json
 ```
 
-三组配置各异的 encoder + rankmixer NS tokenizer 全部 Eval Success，确认默认 infer.py 走 `train_config.json` 反序列化模型构建。**实践含义**：参赛队伍只要保证模型类签名（`PCVRHyFormer.__init__`）稳定，就可以自由切换超参，无需上传任何脚本。
+三组配置各异的 encoder + rankmixer NS tokenizer 全部 Eval Success，确认默认 infer.py 走 `train_config.json` 反序列化模型构建。**实践含义**：参赛队伍只要保证模型类签名（`PCVRHyFormer.__init__`）稳定，就可以自由切换纯模型超参。
+
+**边界**（2026-05-02 补充）：P0-A/P0-B synthetic dense features 改变了数据侧特征生成逻辑，evaluation 必须上传同版 `infer.py` / `dataset.py` / `model.py`，不能假设平台默认 infer 会生成这些 in-memory features。
 
 ### 4.3 评估配额管理
 
@@ -226,7 +228,7 @@ INFO - Using schema: .../best_model/schema.json
 | 评估提交 / 天 | **4** | 榜单重置补偿前为 3；Failed/Stopped 不计入 |
 | Resource quota / 队 | **4** | train + inference 共享，串行 |
 | Inference 单次时长 | ≤ **30 min** | 超时强制 kill |
-| 上传脚本总大小 | ≤ 100 MB | 本方案上传脚本为 0（用平台默认 infer.py） |
+| 上传脚本总大小 | ≤ 100 MB | 纯超参模型上传脚本为 0；P0-A/B 特征模型需上传同版 `infer.py` / `dataset.py` / `model.py` |
 
 **经验**：把每次评估视为「投资决策」，提交前先做本地 sanity check（schema / train_config 一致性 + ckpt 大小 + best_model 子目录命名规范），避免 4 配额浪费在格式问题上。
 
@@ -274,7 +276,7 @@ INFO - Using schema: .../best_model/schema.json
 - [x] 数据：平台 `/data_ams/industrial_training_data` + `EVAL_DATA_PATH`
 - [x] 训练命令：`bash baseline/run.sh --seq_encoder_type {swiglu, transformer, longer}`
 - [x] Seed：`--seed 42`
-- [x] Checkpoint 自含 `schema.json` + `train_config.json`，可平台默认 infer.py 直接评估
+- [x] Checkpoint 自含 `schema.json` + `train_config.json`；纯超参模型可平台默认 infer.py 直接评估，P0-A/B 特征模型需自定义 inference bundle
 - [ ] Final hyperparameters：当前以 SwiGLU + 默认共享配置为基线，**TODO** 等 T8 后给出最终生产配置
 
 ---

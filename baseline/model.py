@@ -981,6 +981,301 @@ class MultiSeqHyFormerBlock(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# OneTrans: Mixed-Parameterization Unified Attention Block
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class OneTransMixedAttn(nn.Module):
+    """Mixed-Parameterization Multi-Head Attention for OneTrans.
+
+    Sequence layout: [S_token_0 ... S_token_{L-1} | NS_token_0 ... NS_token_{M-1}]
+
+    Attention mask (True = can attend):
+    - S_i  → S_0..S_i (causal), S cannot see NS
+    - NS_j → all S (full), NS_0..NS_j (causal within NS)
+
+    Mixed parameterization:
+    - S positions: shared W_Q^s, W_K^s, W_V^s, W_O^s
+    - Each NS_j:   independent W_Q^j, W_K^j, W_V^j, W_O^j
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_ns: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.num_ns = num_ns
+        self.dropout = dropout
+
+        # Shared projections for S-tokens
+        self.W_Q_s = nn.Linear(d_model, d_model, bias=False)
+        self.W_K_s = nn.Linear(d_model, d_model, bias=False)
+        self.W_V_s = nn.Linear(d_model, d_model, bias=False)
+        self.W_O_s = nn.Linear(d_model, d_model)
+
+        # Per-NS-token independent projections
+        self.W_Q_ns = nn.ModuleList(
+            [nn.Linear(d_model, d_model, bias=False) for _ in range(num_ns)])
+        self.W_K_ns = nn.ModuleList(
+            [nn.Linear(d_model, d_model, bias=False) for _ in range(num_ns)])
+        self.W_V_ns = nn.ModuleList(
+            [nn.Linear(d_model, d_model, bias=False) for _ in range(num_ns)])
+        self.W_O_ns = nn.ModuleList(
+            [nn.Linear(d_model, d_model) for _ in range(num_ns)])
+
+        # Gating for S output (same pattern as RoPEMultiheadAttention)
+        self.W_g_s = nn.Linear(d_model, d_model)
+        nn.init.zeros_(self.W_g_s.weight)
+        nn.init.constant_(self.W_g_s.bias, 1.0)
+
+    def _project_ns(
+        self,
+        ns: torch.Tensor,
+        proj_list: nn.ModuleList,
+    ) -> torch.Tensor:
+        """Apply per-token linear to each NS token independently."""
+        # ns: (B, M, D) → (B, M, D)
+        parts = [proj_list[j](ns[:, j, :]).unsqueeze(1) for j in range(self.num_ns)]
+        return torch.cat(parts, dim=1)  # (B, M, D)
+
+    @staticmethod
+    def _build_causal_mixed_mask(
+        L: int,
+        M: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build a bool mask (L+M, L+M) where True = allowed to attend.
+
+        Pattern:
+          [causal_LxL   |  zeros_LxM  ]
+          [ones_MxL     | causal_MxM  ]
+        """
+        total = L + M
+        # Start from a lower-triangular (causal) mask
+        mask = torch.tril(torch.ones(total, total, dtype=torch.bool, device=device))
+        # Override: NS tokens can attend to ALL S tokens (not just causal S)
+        if M > 0 and L > 0:
+            mask[L:, :L] = True
+        return mask  # (L+M, L+M)
+
+    def forward(
+        self,
+        s_tokens: torch.Tensor,
+        ns_tokens: torch.Tensor,
+        s_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Mixed-param attention over the unified [S | NS] sequence.
+
+        Args:
+            s_tokens: (B, L, D)  – all domain sequence tokens, concatenated.
+            ns_tokens: (B, M, D) – NS tokens.
+            s_padding_mask: (B, L) bool, True = padding (masked out).
+
+        Returns:
+            s_out: (B, L, D)
+            ns_out: (B, M, D)
+        """
+        B, L, D = s_tokens.shape
+        M = self.num_ns
+
+        # ---- QKV projections ----
+        Q_s = self.W_Q_s(s_tokens)            # (B, L, D)
+        K_s = self.W_K_s(s_tokens)
+        V_s = self.W_V_s(s_tokens)
+
+        Q_ns = self._project_ns(ns_tokens, self.W_Q_ns)   # (B, M, D)
+        K_ns = self._project_ns(ns_tokens, self.W_K_ns)
+        V_ns = self._project_ns(ns_tokens, self.W_V_ns)
+
+        # Unified sequences
+        Q = torch.cat([Q_s, Q_ns], dim=1)     # (B, L+M, D)
+        K = torch.cat([K_s, K_ns], dim=1)
+        V = torch.cat([V_s, V_ns], dim=1)
+
+        # ---- Reshape for multi-head ----
+        def _to_heads(x: torch.Tensor) -> torch.Tensor:
+            Bx, Lx, _ = x.shape
+            return x.view(Bx, Lx, self.num_heads, self.head_dim).transpose(1, 2)
+
+        Q = _to_heads(Q)  # (B, H, L+M, head_dim)
+        K = _to_heads(K)
+        V = _to_heads(V)
+
+        # ---- Attention mask ----
+        causal_mixed = self._build_causal_mixed_mask(L, M, s_tokens.device)
+        # Expand to (B, 1, L+M, L+M)
+        attn_mask = causal_mixed.unsqueeze(0).unsqueeze(0)
+
+        # Incorporate S padding: padded S positions cannot be attended to.
+        if s_padding_mask is not None:
+            # s_padding_mask: (B, L), True = pad → should NOT be attended to
+            # Convert to (B, 1, 1, L+M): False where allowed
+            pad_ext = torch.zeros(
+                B, 1, 1, L + M, dtype=torch.bool, device=s_tokens.device)
+            pad_ext[:, :, :, :L] = s_padding_mask.unsqueeze(1).unsqueeze(2)
+            # Combined: allowed = causal_mixed AND NOT padded
+            attn_mask = attn_mask & (~pad_ext)
+
+        dp = self.dropout if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            Q, K, V, attn_mask=attn_mask, dropout_p=dp)
+        out = torch.nan_to_num(out, nan=0.0)
+        # (B, H, L+M, head_dim) → (B, L+M, D)
+        out = out.transpose(1, 2).contiguous().view(B, L + M, D)
+
+        # ---- Split back + mixed output projection ----
+        out_s_raw = out[:, :L, :]   # (B, L, D)
+        out_ns_raw = out[:, L:, :]  # (B, M, D)
+
+        # S output: shared W_O_s with gating
+        G = torch.sigmoid(self.W_g_s(s_tokens))
+        s_out = self.W_O_s(out_s_raw) * G  # (B, L, D)
+
+        # NS output: per-token W_O_ns
+        ns_parts = [
+            self.W_O_ns[j](out_ns_raw[:, j, :]).unsqueeze(1) for j in range(M)
+        ]
+        ns_out = torch.cat(ns_parts, dim=1)  # (B, M, D)
+
+        return s_out, ns_out
+
+
+class OneTransMixedFFN(nn.Module):
+    """Mixed-Parameterization Feed-Forward Network.
+
+    S-tokens: shared W1, W2.
+    Each NS_j: independent W1_j, W2_j.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_ns: int,
+        hidden_mult: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        hidden = d_model * hidden_mult
+        self.num_ns = num_ns
+
+        # Shared FFN for S tokens
+        self.ffn_s = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, d_model),
+        )
+
+        # Per-NS-token independent FFN
+        self.ffn_ns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, d_model),
+            )
+            for _ in range(num_ns)
+        ])
+
+    def forward(
+        self,
+        s_tokens: torch.Tensor,
+        ns_tokens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply mixed FFN independently to S and NS tokens.
+
+        Args:
+            s_tokens: (B, L, D)
+            ns_tokens: (B, M, D)
+
+        Returns:
+            s_out: (B, L, D)
+            ns_out: (B, M, D)
+        """
+        s_out = self.ffn_s(s_tokens)
+
+        ns_parts = [
+            self.ffn_ns[j](ns_tokens[:, j, :]).unsqueeze(1)
+            for j in range(self.num_ns)
+        ]
+        ns_out = torch.cat(ns_parts, dim=1)  # (B, M, D)
+
+        return s_out, ns_out
+
+
+class OneTransBlock(nn.Module):
+    """Single OneTrans layer (Pre-LN).
+
+    Layout: [compressed_S_tokens | NS_tokens]
+    - Mixed-param attention (causal S, NS sees all S + causal NS)
+    - Mixed-param FFN (shared for S, independent per NS)
+    - Residual connections + LayerNorm
+
+    The sequence compression (top-K selection per domain) is handled
+    externally by ``_gather_onetrans_s_tokens`` in ``PCVRHyFormer``.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_ns: int,
+        hidden_mult: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.norm_attn_s = nn.LayerNorm(d_model)
+        self.norm_attn_ns = nn.LayerNorm(d_model)
+        self.attn = OneTransMixedAttn(d_model, num_heads, num_ns, dropout)
+
+        self.norm_ffn_s = nn.LayerNorm(d_model)
+        self.norm_ffn_ns = nn.LayerNorm(d_model)
+        self.ffn = OneTransMixedFFN(d_model, num_ns, hidden_mult, dropout)
+
+    def forward(
+        self,
+        s_tokens: torch.Tensor,
+        ns_tokens: torch.Tensor,
+        s_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply one OneTrans layer with Pre-LN and residuals.
+
+        Args:
+            s_tokens: (B, L, D) concatenated sequence tokens from all domains.
+            ns_tokens: (B, M, D) NS tokens (user + item).
+            s_padding_mask: (B, L) bool, True = padding.
+
+        Returns:
+            s_tokens: (B, L, D) updated
+            ns_tokens: (B, M, D) updated
+        """
+        # Pre-LN attention
+        s_normed = self.norm_attn_s(s_tokens)
+        ns_normed = self.norm_attn_ns(ns_tokens)
+        s_attn, ns_attn = self.attn(s_normed, ns_normed, s_padding_mask)
+
+        s_tokens = s_tokens + s_attn
+        ns_tokens = ns_tokens + ns_attn
+
+        # Pre-LN FFN
+        s_normed = self.norm_ffn_s(s_tokens)
+        ns_normed = self.norm_ffn_ns(ns_tokens)
+        s_ffn, ns_ffn = self.ffn(s_normed, ns_normed)
+
+        s_tokens = s_tokens + s_ffn
+        ns_tokens = ns_tokens + ns_ffn
+
+        return s_tokens, ns_tokens
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PCVRHyFormer Main Model
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1229,6 +1524,9 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        # OneTrans unified attention (replaces HyFormer query-decoding blocks)
+        use_onetrans: bool = False,
+        onetrans_top_k: int = 50,
     ) -> None:
         super().__init__()
 
@@ -1244,6 +1542,8 @@ class PCVRHyFormer(nn.Module):
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
+        self.use_onetrans = use_onetrans
+        self.onetrans_top_k = onetrans_top_k
 
         # ================== NS Tokens Construction ==================
 
@@ -1377,46 +1677,71 @@ class PCVRHyFormer(nn.Module):
         if num_time_buckets > 0:
             self.time_embedding = nn.Embedding(num_time_buckets, d_model, padding_idx=0)
 
-        # ================== HyFormer Components ==================
-        # MultiSeqQueryGenerator
-        self.query_generator = MultiSeqQueryGenerator(
-            d_model=d_model,
-            num_ns=self.num_ns,
-            num_queries=num_queries,
-            num_sequences=self.num_sequences,
-            hidden_mult=hidden_mult,
-        )
-
-        # MultiSeqHyFormerBlock stack
-        self.blocks = nn.ModuleList([
-            MultiSeqHyFormerBlock(
+        # ================== HyFormer OR OneTrans Components ==================
+        if not use_onetrans:
+            # ---- Classic HyFormer path ----
+            self.query_generator = MultiSeqQueryGenerator(
                 d_model=d_model,
-                num_heads=num_heads,
-                num_queries=num_queries,
                 num_ns=self.num_ns,
+                num_queries=num_queries,
                 num_sequences=self.num_sequences,
-                seq_encoder_type=seq_encoder_type,
                 hidden_mult=hidden_mult,
-                dropout=dropout_rate,
-                top_k=seq_top_k,
-                causal=seq_causal,
-                rank_mixer_mode=rank_mixer_mode,
             )
-            for _ in range(num_hyformer_blocks)
-        ])
+            self.blocks = nn.ModuleList([
+                MultiSeqHyFormerBlock(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    num_queries=num_queries,
+                    num_ns=self.num_ns,
+                    num_sequences=self.num_sequences,
+                    seq_encoder_type=seq_encoder_type,
+                    hidden_mult=hidden_mult,
+                    dropout=dropout_rate,
+                    top_k=seq_top_k,
+                    causal=seq_causal,
+                    rank_mixer_mode=rank_mixer_mode,
+                )
+                for _ in range(num_hyformer_blocks)
+            ])
+            # Output: concat Q tokens from all domains → project to d_model
+            self.output_proj = nn.Sequential(
+                nn.Linear(num_queries * self.num_sequences * d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
+        else:
+            # ---- OneTrans path ----
+            # Per-domain lightweight SwiGLU encoder (processes sequences before
+            # top-K compression; shared across OneTrans blocks for efficiency)
+            self.ot_seq_encoders = nn.ModuleDict({
+                domain: SwiGLUEncoder(d_model, hidden_mult, dropout_rate)
+                for domain in self.seq_domains
+            })
+            # Stack of OneTrans blocks
+            self.onetrans_blocks = nn.ModuleList([
+                OneTransBlock(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    num_ns=self.num_ns,
+                    hidden_mult=hidden_mult,
+                    dropout=dropout_rate,
+                )
+                for _ in range(num_hyformer_blocks)
+            ])
+            # Output: NS tokens flattened → project to d_model
+            self.output_proj = nn.Sequential(
+                nn.Linear(self.num_ns * d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
+            # No query_generator or HyFormer blocks needed
+            self.query_generator = None
+            self.blocks = nn.ModuleList()
 
-        # ================== RoPE ==================
-        if use_rope:
+        # ================== RoPE (HyFormer path only) ==================
+        if use_rope and not use_onetrans:
             head_dim = d_model // num_heads
             self.rotary_emb = RotaryEmbedding(dim=head_dim, base=rope_base)
         else:
             self.rotary_emb = None
-
-        # Output projection
-        self.output_proj = nn.Sequential(
-            nn.Linear(num_queries * self.num_sequences * d_model, d_model),
-            nn.LayerNorm(d_model),
-        )
 
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
@@ -1581,6 +1906,81 @@ class PCVRHyFormer(nn.Module):
         idx = torch.arange(max_len, device=device).unsqueeze(0)  # (1, max_len)
         return idx >= seq_len.unsqueeze(1)  # (B, max_len)
 
+    def _gather_onetrans_topk(
+        self,
+        seq_tokens: torch.Tensor,
+        padding_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Take the last top_k valid tokens per sample (like LongerEncoder).
+
+        Args:
+            seq_tokens: (B, L, D)
+            padding_mask: (B, L) True = padding
+
+        Returns:
+            topk_tokens: (B, K, D)
+            topk_mask: (B, K) True = padding
+        """
+        B, L, D = seq_tokens.shape
+        K = min(self.onetrans_top_k, L)
+        valid_len = (~padding_mask).sum(dim=1)  # (B,)
+        actual_k = valid_len.clamp(max=K)
+        start_pos = (valid_len - actual_k).clamp(min=0)
+
+        device = seq_tokens.device
+        offsets = torch.arange(K, device=device).unsqueeze(0).expand(B, -1)
+        indices = (start_pos.unsqueeze(1) + offsets).clamp(0, L - 1)
+        indices_exp = indices.unsqueeze(-1).expand(-1, -1, D)
+        topk_tokens = torch.gather(seq_tokens, 1, indices_exp)  # (B, K, D)
+
+        pos_idx = torch.arange(K, device=device).unsqueeze(0)
+        topk_mask = pos_idx >= actual_k.unsqueeze(1)  # (B, K) True = pad
+        topk_tokens = topk_tokens * (~topk_mask).unsqueeze(-1).float()
+        return topk_tokens, topk_mask
+
+    def _run_onetrans_blocks(
+        self,
+        seq_tokens_list: list,
+        seq_masks_list: list,
+        ns_tokens: torch.Tensor,
+        apply_dropout: bool = True,
+    ) -> torch.Tensor:
+        """OneTrans forward path.
+
+        1. Per-domain lightweight SwiGLU encoding.
+        2. Top-K compression per domain.
+        3. Concatenate all domains into one S-token sequence.
+        4. Stack of OneTransBlock layers.
+        5. Flatten NS tokens → output_proj → d_model.
+        """
+        if apply_dropout:
+            ns_tokens = self.emb_dropout(ns_tokens)
+            seq_tokens_list = [self.emb_dropout(s) for s in seq_tokens_list]
+
+        # Per-domain SwiGLU encoding (within-domain local context)
+        compressed_s = []
+        compressed_masks = []
+        for i, domain in enumerate(self.seq_domains):
+            enc_out, mask_out = self.ot_seq_encoders[domain](
+                seq_tokens_list[i], seq_masks_list[i])
+            topk_tok, topk_mask = self._gather_onetrans_topk(enc_out, mask_out)
+            compressed_s.append(topk_tok)
+            compressed_masks.append(topk_mask)
+
+        # Concatenate all domains into unified S sequence
+        s_tokens = torch.cat(compressed_s, dim=1)          # (B, K*S, D)
+        s_mask = torch.cat(compressed_masks, dim=1)         # (B, K*S) True=pad
+
+        # Stack OneTrans blocks
+        for block in self.onetrans_blocks:
+            s_tokens, ns_tokens = block(s_tokens, ns_tokens, s_mask)
+
+        # Output: NS tokens (final representations) → project to d_model
+        B = ns_tokens.shape[0]
+        ns_flat = ns_tokens.view(B, -1)          # (B, M*D)
+        output = self.output_proj(ns_flat)        # (B, D)
+        return output
+
     def _run_multi_seq_blocks(
         self,
         q_tokens_list: list,
@@ -1589,7 +1989,7 @@ class PCVRHyFormer(nn.Module):
         seq_masks_list: list,
         apply_dropout: bool = True
     ) -> torch.Tensor:
-        """Runs the multi-sequence block stack with dropout and output projection."""
+        """Runs the HyFormer multi-sequence block stack."""
         if apply_dropout:
             q_tokens_list = [self.emb_dropout(q) for q in q_tokens_list]
             ns_tokens = self.emb_dropout(ns_tokens)
@@ -1601,7 +2001,6 @@ class PCVRHyFormer(nn.Module):
         curr_masks = seq_masks_list
 
         for block in self.blocks:
-            # Precompute RoPE cos/sin for each sequence
             rope_cos_list = None
             rope_sin_list = None
             if self.rotary_emb is not None:
@@ -1623,32 +2022,30 @@ class PCVRHyFormer(nn.Module):
                 rope_sin_list=rope_sin_list,
             )
 
-        # Output: concatenate all sequences' Q tokens then project via MLP
         B = curr_qs[0].shape[0]
-        all_q = torch.cat(curr_qs, dim=1)  # (B, Nq*S, D)
-        output = all_q.view(B, -1)  # (B, Nq*S*D)
-        output = self.output_proj(output)  # (B, D)
-
+        all_q = torch.cat(curr_qs, dim=1)
+        output = all_q.view(B, -1)
+        output = self.output_proj(output)
         return output
 
-    def forward(self, inputs: ModelInput) -> torch.Tensor:
-        """Runs the forward pass of the PCVRHyFormer model."""
-        # 1. NS tokens: grouped projection
-        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)   # (B, num_user_groups, D)
-        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
-
+    def _build_ns_tokens(self, inputs: ModelInput) -> torch.Tensor:
+        """Build NS token tensor from user/item int and dense features."""
+        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
+        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
         ns_parts = [user_ns]
         if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)  # (B, 1, D)
-            ns_parts.append(user_dense_tok)
+            ns_parts.append(
+                F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
         ns_parts.append(item_ns)
         if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)
-            ns_parts.append(item_dense_tok)
+            ns_parts.append(
+                F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1))
+        return torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
 
-        ns_tokens = torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
-
-        # 2. Embed each sequence domain (dynamic)
+    def _build_seq_tokens(
+        self, inputs: ModelInput
+    ) -> Tuple[list, list]:
+        """Embed all sequence domains, return (tokens_list, masks_list)."""
         seq_tokens_list = []
         seq_masks_list = []
         for domain in self.seq_domains:
@@ -1658,57 +2055,45 @@ class PCVRHyFormer(nn.Module):
                 self._seq_is_id[domain], self._seq_emb_index[domain],
                 inputs.seq_time_buckets[domain])
             seq_tokens_list.append(tokens)
-            mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
+            mask = self._make_padding_mask(
+                inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
             seq_masks_list.append(mask)
+        return seq_tokens_list, seq_masks_list
 
-        # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
+    def forward(self, inputs: ModelInput) -> torch.Tensor:
+        """Runs the forward pass (HyFormer or OneTrans depending on use_onetrans)."""
+        ns_tokens = self._build_ns_tokens(inputs)
+        seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
 
-        # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-            apply_dropout=self.training
-        )
+        if self.use_onetrans:
+            output = self._run_onetrans_blocks(
+                seq_tokens_list, seq_masks_list, ns_tokens,
+                apply_dropout=self.training)
+        else:
+            q_tokens_list = self.query_generator(
+                ns_tokens, seq_tokens_list, seq_masks_list)
+            output = self._run_multi_seq_blocks(
+                q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+                apply_dropout=self.training)
 
-        # 5. Classifier
-        logits = self.clsfier(output)  # (B, action_num)
+        logits = self.clsfier(output)
         return logits
 
     def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Runs inference without dropout, returning both logits and embeddings."""
-        # Reuses forward logic but without dropout
-        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
-        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
+        """Runs inference without dropout, returning (logits, embedding)."""
+        ns_tokens = self._build_ns_tokens(inputs)
+        seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
 
-        ns_parts = [user_ns]
-        if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)
-            ns_parts.append(user_dense_tok)
-        ns_parts.append(item_ns)
-        if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
-            ns_parts.append(item_dense_tok)
-
-        ns_tokens = torch.cat(ns_parts, dim=1)
-
-        seq_tokens_list = []
-        seq_masks_list = []
-        for domain in self.seq_domains:
-            tokens = self._embed_seq_domain(
-                inputs.seq_data[domain],
-                self._seq_embs[domain], self._seq_proj[domain],
-                self._seq_is_id[domain], self._seq_emb_index[domain],
-                inputs.seq_time_buckets[domain])
-            seq_tokens_list.append(tokens)
-            mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
-            seq_masks_list.append(mask)
-
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
-
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-            apply_dropout=False
-        )
+        if self.use_onetrans:
+            output = self._run_onetrans_blocks(
+                seq_tokens_list, seq_masks_list, ns_tokens,
+                apply_dropout=False)
+        else:
+            q_tokens_list = self.query_generator(
+                ns_tokens, seq_tokens_list, seq_masks_list)
+            output = self._run_multi_seq_blocks(
+                q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+                apply_dropout=False)
 
         logits = self.clsfier(output)
         return logits, output

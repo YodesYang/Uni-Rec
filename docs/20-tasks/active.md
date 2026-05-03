@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-01（PDT 19:15 · time split 修复后实验纪律调整）· 结论：冲前五目标下，`swiglu` 仍是主线骨干，`d_model=128` 路线确认低 ROI（leaderboard 0.836944，较基线 0.84381 退步 -0.0069）；`swiglu+time` 必须以 2026-05-01 修复 `PCVRParquetDataset(row_groups=...)` 后重新上传的 job 为准，修复前 time job 不再作为路线结论依据；`swiglu+dropout=0.05` 训练完成待评估；transformer re-train 仍在跑。当前 Top5 路径：① 回收 transformer-retrain + dropout + 修复后 swiglu-time 线上分；② 建立 fast proxy 训练开关，避免每个想法默认等待 10h full train；③ 优先推进 T8.5 row-level timestamp cutoff，再按 ADR-003 做 P0 特征工程。
+**最近一次审视**：2026-05-02（PDT · sparse reinit proxy 对照回流）· 结论：`noreinit-proxy-swiglu-vr005-rg128x32-e4` 关闭 sparse reinit 后快速崩盘，best AUC **0.837562** @ epoch 1，last AUC **0.619751**；默认 reinit 对照 best AUC **0.845306** @ epoch 3。no-reinit 不是解法，不启动 no-reinit full train，也不提交这两个 proxy evaluation。
 
 ---
 
@@ -21,13 +21,22 @@
 2. 建立固定 proxy 流程：静态检查 → 小样本 smoke → 1 epoch / limited RG → 2~3 epoch 半程确认 → full train
 3. 每个平台 job 记录 commit、job name、关键 args、valid AUC / LogLoss、public score、结论，建立 valid→leaderboard 映射
 4. 后续 T8.5 / P0 特征工程先过 proxy，再投 10h full train
+5. 每次给用户一个平台运行建议时，必须同时给可复制的 Job Name，格式优先用 `<theme>-<scope>-<model>-vr<ratio>-rg<train>x<valid>-s<steps>`。
 
 **当前状态**：
 - ✅ 代码开关已落地：`--limit_train_rgs`、`--limit_valid_rgs`、`--max_train_steps`，默认 0，不影响 full train
 - ✅ 平台 fast proxy smoke job 已验证：`64/16 RG + max_train_steps=500` 在 4 分半内完成，final AUC 0.824108 / LogLoss 0.252679，详见 [`EXP-004`](../40-experiments/EXP-004-fast-proxy-smoke-2026-05-02.md)
 - ✅ 训练结束摘要已落地：`trainer.py` 在 Early Stop / max steps / 正常结束时打印 `[summary]`，并写 `training_summary.json` 到 ckpt 与 log 目录，避免平台上翻长日志 / 曲线找 best AUC
 - ✅ best checkpoint 目录名已追加 local valid AUC：形如 `global_step48060.layer=2.head=4.hidden=64.auc=0.865884.best_model`，保留 `global_step` 前缀与 `.best_model` 后缀，符合平台命名约束
-- ⏳ 待平台结果回流后，把 proxy AUC / LogLoss 与 full train / public score 关联到 EXP 表
+- ✅ T8.5 + P0-A/B 本地 smoke 通过：2 step demo train + 自定义 `infer.py` 产出 1000 条 predictions，详见 [`EXP-005`](../40-experiments/EXP-005-mainline-t8p0-local-smoke-2026-05-02.md)
+- ✅ T8.5 + P0-A/B 平台 fast proxy 已回流：`t8p0-proxy-swiglu-vr005-rg64x16-s500` 跑通，但 local AUC 0.819652 / LogLoss 0.291509，需拆分归因，详见 [`EXP-006`](../40-experiments/EXP-006-mainline-t8p0-platform-proxy-2026-05-02.md)
+- ✅ 归因 proxy 已回流：P0-only 正向，T8.5-only 是组合下降主因；下一步优先 P0-only larger proxy / full train，详见 [`EXP-007`](../40-experiments/EXP-007-t8p0-attribution-proxies-2026-05-02.md)
+- ✅ P0 larger proxy 全部回流：P0-B seq-stats-only 当前最强，P0-A count-only 也强，P0-only 组合未叠加；短期 full train 优先 P0-B，其次 P0-A，详见 [`EXP-008`](../40-experiments/EXP-008-p0-larger-proxy-first-returns-2026-05-02.md)
+- ⏳ P0 full train 首轮回流：`p0seq` completed，best local AUC 0.865128；`p0only` completed，best local AUC 0.865100；`p0count` partial log 到 epoch 8，best local AUC 0.865044；三者均未超过 no-P0 time reference 0.865884，详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)
+- ✅ 运行建议纪律补充：后续所有平台任务建议必须附带 Job Name，避免日志 / ckpt 回收时难以对应实验。
+- ⚠️ 平台并行能力修正：当前可以提交 3-4 个 training job，但 2026-05-02 晚出现同卡多进程 / 单次 20.49GiB allocation OOM；后续只把轻量 64/16 proxy 打包并行。128/32 larger proxy 与 full train 默认 `--batch_size 128`，且最多 1-2 个重 job 并行。
+- ⏳ 待 P0-A full train 最终 `[summary]` 回流后，决定 P0 分支是否整体收口；阈值暂定 `best local AUC >= 0.8665` 才考虑 evaluation，`>= 0.8685` 才强推。已完成/当前回流的 `p0seq` / `p0only` / `p0count` 都不建议 evaluation。
+- ✅ sparse reinit 对照已回流：no-reinit proxy 快速崩盘（best 0.837562 / last 0.619751），default reinit 更稳（best 0.845306）；关闭 no-reinit full train 路线，详见 [`EXP-010`](../40-experiments/EXP-010-sparse-reinit-proxy-control-2026-05-02.md)。
 
 **当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，后续新想法默认先过本任务定义的 gating。
 
@@ -82,14 +91,15 @@
 - ⚠️ **本轮 EXP-002 三组训练 jobs 启动于 T8 探针落地之前 → log 里没有 `[T8]` 行** → 必须新一轮 platform job（baseline tip 含探针）才能拿到真实 overlap_sec
 - ⚠️ **EXP-003 第一轮 swiglu+time 结果暂不采信**：用户确认该轮是在旧 swiglu 任务链路上改参数提交，日志缺有效探针证据；已新建 job 重跑
 - ⚠️ **EXP-004 fast proxy 已显示 RG-level split 仍重叠**：`time overlap_sec=302765`，`filename overlap_sec=304064`，说明单靠 Row Group 排序可能无法保证 clean split；需等 full job 复核后启动 T8.5 row-level timestamp cutoff
-- ⚠️ **修复后 full time job 复核同向**：`valid_ratio=0.10 overlap_sec=341068` 已 Early Stop；`valid_ratio=0.05 overlap_sec=341086` 截至 epoch 9 仍在训练。RG-level time split 无法消除 row-level overlap，T8.5 row-level timestamp cutoff 应升为下一轮高优先级工程动作。详见 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md)
-- ⏳ **待新一轮平台 job 验证 overlap_sec 真实值** → 决定是否切换到 `time` 策略
+- ⚠️ **修复后 full time job 复核同向**：`valid_ratio=0.10 overlap_sec=341068` 已 Early Stop；`valid_ratio=0.05 overlap_sec=341086` 且 leaderboard AUC 0.844059。RG-level time split 无法消除 row-level overlap，线上仅微升，T8.5 row-level timestamp cutoff 应升为下一轮高优先级工程动作。详见 [`EXP-003`](../40-experiments/EXP-003-platform-batch-2026-05-01.md)
+- ✅ **T8.5 代码本地 smoke 通过**：行级 cutoff 后 demo `candidate_rows=600 / train_rows=480 / valid_rows=120`，详见 [`EXP-005`](../40-experiments/EXP-005-mainline-t8p0-local-smoke-2026-05-02.md)
+- ✅ **T8.5 + P0-A/B 平台 fast proxy 已跑通但不达升级阈值**：row-level cutoff 后 valid rows=8,414，AUC 0.819652 / LogLoss 0.291509，详见 [`EXP-006`](../40-experiments/EXP-006-mainline-t8p0-platform-proxy-2026-05-02.md)
+- ✅ **拆分归因 proxy 已完成**：T8.5-only AUC 0.821174 / LogLoss 0.289528，是组合下降主因；T8.5 当前保留为诊断，不作为 leaderboard full train 主线，详见 [`EXP-007`](../40-experiments/EXP-007-t8p0-attribution-proxies-2026-05-02.md)
 
-**残留待平台验证**（下一次 platform job 时）：
-1. 默认参数（`filename`）跑一次 → 看 `[T8] train ts: ... valid ts: ... overlap_sec: N` 这一行
-2. 若 `overlap_sec > 0` → 加 `--valid_split_strategy time` 再跑一次，看 overlap_sec 是否 ≤ 0
-3. 若 `time` 模式仍 > 0 → 升级 T8.5（行级切，改在 `PCVRParquetDataset._convert_batch` 里按 row 的 `timestamp` 与 cutoff 比较、丢早样本）
-4. **新增**：把 time 模式的 Local Val AUC 也提交一次 leaderboard 评估（消耗 1 配额），验证「缩小 train/eval gap 后是否同时缩小 train/test gap」 → 若 gap 缩到 ≤ 0.015 是 T6 报告核心数据点
+**当前 platform 验证项**：
+1. 等 `p0count-full-swiglu-vr005-bs128` 最终 `[summary]` 回流。
+2. 不评估当前 P0 full 分支：`p0seq` / `p0only` / `p0count` best local AUC 0.865128 / 0.865100 / 0.865044，均未超过 no-P0 time reference 0.865884。
+3. 后续若 P0-B / P0-A 进入 evaluation，必须上传同版 `infer.py` / `dataset.py` / `model.py`，不要只依赖平台默认 infer。
 
 **待自验证的两条社区线索**（仅留 trace，不动当前实现）：
 1. **训练集 timestamp 严重不均衡**：社区一截图示 train 跨 02-28~03-04 共 5 天，**03-03 单日 1.31M / 总 2.10M ≈ 63%**，其它天 3~25%。若属实 → "取最后 10%" 实际几乎全是 03-04 末段；按 timestamp 排序后用更小切片（如 5%）或许更接近真实 future 边缘。
@@ -109,7 +119,11 @@
 - ⚠️ **EXP-003 第一轮 swiglu+time 同样缺 `[diag]` 有效证据**（旧任务链路改参数提交），已新建 job 重跑
 - ✅ **EXP-004 fast proxy 已回流 4 张切片表**：`user_int_nonzero` / `item_int_nonzero` / `seq_total_len` 桶间 AUC 差均远超 0.02，强触发 ADR-003 的 P0-A / P0-B 候选；因只训练 500 step，仍待 full job 复核
 - ✅ **full time job 切片表复核同向**：`label_type=0` 持续为 0，valid 仅含 `label_type=1/2`；`user_int_nonzero`、`item_int_nonzero`、`seq_total_len` 分桶 AUC 差继续明显，P0-A/P0-B 方向成立，P1 multi-task 暂不优先
-- ⏳ **待新一轮平台 job 4 张切片表回流** → 决定 P0 特征工程方向
+- ✅ **P0-A/P0-B 代码本地 smoke 通过**：缺失计数 + 序列长度/时间跨度作为 opt-in synthetic dense features，使用 `log1p` 缩放；自定义 `infer.py` 确认训练/推理 shape 一致，详见 [`EXP-005`](../40-experiments/EXP-005-mainline-t8p0-local-smoke-2026-05-02.md)
+- ✅ **P0-A/B 与 T8.5 组合平台 proxy 跑通但暂不升级**：AUC 0.819652 / LogLoss 0.291509，切片差异仍明显，需 P0-only proxy 判断特征本身收益，详见 [`EXP-006`](../40-experiments/EXP-006-mainline-t8p0-platform-proxy-2026-05-02.md)
+- ✅ **P0-only proxy 正向**：AUC 0.826286 / LogLoss 0.251651，较 EXP-004 time proxy AUC +0.002178 且 LogLoss -0.001028；P0-A/B 升为短期 leaderboard 主线，详见 [`EXP-007`](../40-experiments/EXP-007-t8p0-attribution-proxies-2026-05-02.md)
+- ✅ **P0-B seq-stats-only larger proxy 当前最强**：AUC 0.836734 / LogLoss 0.242303，略优于 P0-A count-only 0.836497 / 0.243201，二者均明显优于 P0-only 组合；短期 full train 优先 P0-B，其次 P0-A，详见 [`EXP-008`](../40-experiments/EXP-008-p0-larger-proxy-first-returns-2026-05-02.md)
+- ⏳ **P0 full train 首轮回流中**：`p0seq` completed，best local AUC 0.865128 / LogLoss 0.225103；`p0only` completed，best local AUC 0.865100 / LogLoss 0.224833；`p0count` partial log 到 epoch 8，best local AUC 0.865044 / LogLoss 0.225021；三者均未超过 no-P0 time reference，详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)
 
 **待平台 job 验证后再分类决策**（每个分支对应不同的 P0 特征工程方向，**实施方案见 [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md)**）：
 
@@ -132,6 +146,28 @@
 ---
 
 ## Changelog
+
+- **2026-05-02 PDT（sparse reinit proxy 对照回流）**：`noreinit-proxy-swiglu-vr005-rg128x32-e4` 与 `reinit-proxy-swiglu-vr005-rg128x32-e4` 完成。no-reinit (`reinit_sparse_after_epoch=999`) best AUC 0.837562 @ epoch 1 后一路跌到 0.619751；default reinit best AUC 0.845306 @ epoch 3。结论：关闭 no-reinit full train 路线，不 evaluation 这两个 proxy。详见 [`EXP-010`](../40-experiments/EXP-010-sparse-reinit-proxy-control-2026-05-02.md)。
+
+- **2026-05-02 PDT（P0-count full train partial 回流）**：`p0count-full-swiglu-vr005-bs128` 日志回收到 epoch 8，真实 `batch_size=128`，`enable_count_features=True`、`enable_seq_stats_features=False`，best local AUC 0.865044 / LogLoss 0.225021 @ epoch 6 step 95634，epoch 7/8 回落。结论：低于 no-P0 time reference 0.865884，除非后续意外跳到 `>=0.8665`，不建议 evaluation。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)。
+
+- **2026-05-02 PDT（P0-only full train 完整回流）**：`p0only-full-swiglu-vr005` 已完成，日志真实 `batch_size=256`，`enable_count_features=True`、`enable_seq_stats_features=True`，best local AUC 0.865100 / LogLoss 0.224833 @ epoch 7 step 56014，Early Stop 于 epoch 12。结论：低于 no-P0 time reference 0.865884，不建议 evaluation；P0 组合 full train 未复现 larger proxy 正向外推。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)。
+
+- **2026-05-02 PDT（P0 full train 首轮回流）**：`p0seq-full-swiglu-vr005-bs128` 已完成，但日志真实 `batch_size=256`，best local AUC 0.865128 / LogLoss 0.225103 @ epoch 6，低于 no-P0 `swiglu + time + valid_ratio=0.05` reference 0.865884；`p0count` 和 `p0only` 仍在训练，用户报告当前 best 分别约 0.865044 / 0.865100。结论：暂不 evaluation，等剩余两组完整回流后再决策。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)。
+
+- **2026-05-02 PDT（P0 larger proxy 全部回流）**：`p0only-proxy-swiglu-vr005-rg128x32-s1500`、`p0seq-proxy-swiglu-vr005-rg128x32-s1500`、`p0count-proxy-swiglu-vr005-rg128x32-s1500` 均完成。P0-B seq-stats-only AUC 0.836734 / LogLoss 0.242303 最强；P0-A count-only AUC 0.836497 / LogLoss 0.243201 也很强；P0-only 组合 best AUC 0.831841 / LogLoss 0.244238，没有叠加收益。结论：短期 full train 优先 P0-B，其次 P0-A，组合暂缓。详见 [`EXP-008`](../40-experiments/EXP-008-p0-larger-proxy-first-returns-2026-05-02.md)。
+
+- **2026-05-02 PDT（归因 proxy 回流）**：`p0only-proxy-swiglu-vr005-rg64x16-s500` 与 `t85only-proxy-swiglu-vr005-rg64x16-s500` 完成。P0-only 在相同 RG-level time valid 上 AUC 0.826286 / LogLoss 0.251651，优于 EXP-004 time proxy；T8.5-only AUC 0.821174 / LogLoss 0.289528，接近 EXP-006 组合下降。结论：P0-A/B 是当前正向主线，T8.5 当前保留为诊断，不直接 full train。详见 [`EXP-007`](../40-experiments/EXP-007-t8p0-attribution-proxies-2026-05-02.md)。
+
+- **2026-05-02 PDT（平台并行能力补充）**：用户确认当前一次可并行 3-4 个 training job。后续平台建议不再默认单 job 串行，而是优先打包为 3-4 个互补 proxy：主线 larger proxy + P0-A/P0-B ablation + 必要的 full/half confirmation。
+
+- **2026-05-02 PDT（并行 OOM 反馈）**：用户反馈两个任务出现 CUDA OOM：单次尝试分配 20.49GiB，而 GPU total 19.12GiB，日志同时列出多个 GPU 进程。修正并行策略：轻量 proxy 可并行，larger proxy / full train 默认降 `batch_size=128`，并减少重 job 并发，避免平台同卡复用或峰值显存超限。
+
+- **2026-05-02 PDT（主线平台 proxy 回流）**：`t8p0-proxy-swiglu-vr005-rg64x16-s500` 确认平台跑到最新版代码：`max_train_steps=500`、`limit_train_rgs=64`、`limit_valid_rgs=16`、`enable_row_time_cutoff=True`、`enable_count_features=True`、`enable_seq_stats_features=True` 全部生效；T8.5 cutoff 后 `candidate_rows=168253 / train_rows=159839 / valid_rows=8414`，best local AUC 0.819652 / LogLoss 0.291509。结论：链路通过，但组合 proxy 低于 EXP-004 原 time proxy，暂不 full train，下一步做 T8.5-only 与 P0-only 拆分归因。详见 [`EXP-006`](../40-experiments/EXP-006-mainline-t8p0-platform-proxy-2026-05-02.md)。
+
+- **2026-05-02 PDT（主线本地 smoke 完成）**：T8.5 row-level timestamp cutoff + ADR-003 P0-A/P0-B synthetic dense features 已落地并通过 demo smoke。验证项：`py_compile` PASS；2-step train smoke PASS；T8.5 cutoff 过滤出 `train_rows=480 / valid_rows=120`；best ckpt 写出 AUC 命名与 `training_summary.json`；新增 `baseline/infer.py` 并成功输出 1000 条 demo predictions。重要约束：开启 P0-A/B 后 evaluation 需上传同版 `infer.py` / `dataset.py` / `model.py`，不能假设平台默认 infer 会生成 synthetic dense features。详见 [`EXP-005`](../40-experiments/EXP-005-mainline-t8p0-local-smoke-2026-05-02.md)。
+
+- **2026-05-02 PDT（修复后 time/0.05 线上回收）**：`swiglu-split_strategy_time-valid_ratio_0.05` leaderboard AUC 0.844059，较旧 swiglu 基线 0.84381 微升 +0.000249；当日 leaderboard 最优 0.85035，仍差 0.006291，当前排名约 190+。结论：time split/valid_ratio 调参不是破局点；RG-level split 的 3.5~4 天 overlap 已在 proxy/full jobs 中复现，下一步主线切到 T8.5 row-level timestamp cutoff + ADR-003 P0-A/P0-B 特征工程。
 
 - **2026-05-02 PDT 14:25（best ckpt 名称追加 AUC）**：确认平台 ckpt 子目录约束为 `global_step` 前缀、≤300 字符、合法字符 `[a-zA-Z0-9_.=-]` 后，将 best checkpoint 命名扩展为 `global_stepN.layer=...head=...hidden=...auc=0.xxxxxx.best_model`。该改动只写入 local valid AUC 元信息，保留 `.best_model` 后缀与旧目录清理逻辑，不涉及 evaluation score / ensemble / 外部数据。
 

@@ -261,6 +261,16 @@ def parse_args() -> argparse.Namespace:
                         help='Path to the NS-groups JSON file. If it does not exist, '
                              'each feature is placed in its own singleton group.')
 
+    parser.add_argument('--use_onetrans', action='store_true', default=False,
+                        help='Replace HyFormer query-decoding blocks with OneTrans '
+                             'Mixed-Parameterization unified attention. When enabled, '
+                             'seq_encoder_type is used for the per-domain lightweight '
+                             'SwiGLU pre-encoder; the num_queries and rank_mixer_mode '
+                             'flags are ignored.')
+    parser.add_argument('--onetrans_top_k', type=int, default=50,
+                        help='Number of most-recent tokens kept per domain before '
+                             'the unified OneTrans attention (default 50)')
+
     # NS tokenizer variant.
     parser.add_argument('--ns_tokenizer_type', type=str, default='rankmixer',
                         choices=['group', 'rankmixer'],
@@ -428,6 +438,8 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_onetrans": args.use_onetrans,
+        "onetrans_top_k": args.onetrans_top_k,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
