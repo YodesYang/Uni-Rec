@@ -1,12 +1,12 @@
 # EXP-009 · P0 full train 首轮回流
 
 > **Date**: 2026-05-02 PDT
-> **Status**: In Progress
+> **Status**: Completed（全部 P0 方向已收口，路线关闭）
 > **Related Tasks**: [T10](../20-tasks/active.md), [T11](../20-tasks/active.md)
 > **Related ADR**: [ADR-003](../30-decisions/ADR-003-feature-engineering-plan.md)
 > **Platform**: Tencent Angel
 > **Commit**: efbf595 + uncommitted P0 platform snapshot
-> **Job Names**: `p0seq-full-swiglu-vr005-bs128`, `p0count-full-swiglu-vr005-bs128`, `p0only-full-swiglu-vr005`
+> **Job Names**: `p0seq-full-swiglu-vr005-bs128`, `p0count-full-swiglu-vr005-bs128`, `p0only-full-swiglu-vr005`, `p0c-full-swiglu-vr005-bs128`, `p0bp0c-full-swiglu-vr005-bs128`, `mnw-full-swiglu-vr005-bs128`
 
 ## Setup
 
@@ -163,10 +163,32 @@ current best_checkpoint_dir=.../global_step95634.layer=2.head=4.hidden=64.auc=0.
 5. **`p0count` 是真实 bs128，但目前也没有转化为 local gain**：partial log 到 epoch 8，best 仍是 epoch 6 的 0.865044，之后连续两轮回落；若最终不超过 0.8665，当前不建议消耗 evaluation。
 6. **full train 每个 epoch 后都会重置 sparse embedding**：日志反复出现 `Re-initialized 96 high-cardinality Embeddings (vocab>0), kept 1`，而 fast proxy 在 `max_train_steps` 下常常不跨 epoch；这可能是 proxy -> full 外推失真的一个高优先级排查点。
 
-## Next
+## 第二轮回流（2026-05-03）
 
-1. 等 `p0count-full-swiglu-vr005-bs128` 训练完成后回收最终 `[summary]`。
-2. 若 `p0count` 最终仍在 0.8651 附近，不提交 evaluation；保留当前线上 best `swiglu + time + valid_ratio=0.05`。
+| Job | 关键配置 | Best AUC | Best Epoch | Early Stop | vs reference | 评估建议 |
+|---|---|---|---|---|---|---|
+| `p0c-full-swiglu-vr005-bs128` | P0-C history CVR | **0.865097** | E4 @ step 63756 | E9 | -0.000787 | ❌ 不评估 |
+| `p0bp0c-full-swiglu-vr005-bs128` | P0-B + P0-C | 未跑完（已停） | — | — | — | ❌ 已停 |
+| `mnw-full-swiglu-vr005-bs128` | MNW immature_weight=0.5 | **0.864357** | E11 | E13+ | -0.001527 | ❌ 不评估 |
+
+**P0-C 收敛曲线**（E1→E9 Early Stop）：
+```
+E1: 0.8624 → E2: 0.8636 → E3: 0.8643 → E4: 0.8651* → E5: 0.8647 → E6: 0.8650 → E7: 0.8642 → E8: 0.8643 → E9: 0.8635 → ES
+```
+
+## P0 路线总收口
+
+所有 P0 特征工程全量训练结果：
+
+| 特征 | Best AUC | vs reference | 评估 |
+|---|---|---|---|
+| P0-B（seq-stats） | 0.865128 | -0.000756 | ❌ |
+| P0-A+B（组合） | 0.865100 | -0.000784 | ❌ |
+| P0-A（count） | 0.865044 | -0.000840 | ❌ |
+| **P0-C（history CVR）** | **0.865097** | -0.000787 | ❌ |
+| MNW（延迟反馈降权） | 0.864357 | -0.001527 | ❌ |
+
+**结论（2026-05-03）**：所有 P0 特征全量训练均无法超过 no-P0 reference 0.865884，差值系统性聚集在 -0.0007~-0.0015，当前 HyFormer 架构对这类 dense 特征信号已饱和。**P0 特征工程路线正式关闭，不再消耗任何训练 / 评估额度。**
 3. 若 `p0count` 后续跳到 `>=0.8665`，可作为弱候选；`>=0.8685` 才是强 evaluation 候选。
 4. sparse embedding no-reinit 已由 [EXP-010](./EXP-010-sparse-reinit-proxy-control-2026-05-02.md) 验证为负向，不启动 no-reinit full train；后续不继续扩 P0 组合分支。
 

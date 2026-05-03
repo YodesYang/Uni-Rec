@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04（PDT · T12 time-of-day proxy 对照回流）· 结论：timefeat ON AUC **0.839283** / timefeat OFF **0.838475**，Δ+0.000808 AUC / −0.002033 LogLoss，是 log1p 修复收益的 5~6 倍，升为 full train 候选。详见 [`EXP-012`](../40-experiments/EXP-012-timefeat-proxy-2026-05-04.md)。
+**最近一次审视**：2026-05-03（PDT · P0 路线收口 + OneTrans 全量回流）· 结论：P0-C full 0.865097 / MNW full best 0.864357，均低于 no-P0 reference 0.865884，P0 特征工程路线正式关闭；OneTrans v2 full 14 epoch best 0.848712（无 NS conditioner，停止）；OneTrans v3 full E10 best 0.859408（有 NS conditioner，仍在运行），比 v2 高 +0.010，NS conditioner 是关键。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)、[`EXP-013`](../40-experiments/EXP-013-onetrans-full-train-2026-05-03.md)。
 
 ---
 
@@ -188,6 +188,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-03 PDT（P0 路线收口 + OneTrans 全量回流）**：P0-C full best AUC 0.865097（E4，Early Stop E9），MNW full best AUC 0.864357（E11，仍在跑），均低于 no-P0 reference 0.865884。P0-A/B/C/组合 + MNW 共 6 轮全量训练全部失败，差值 -0.0007~-0.0015，P0 特征工程路线正式关闭。OneTrans v2 full（无 NS conditioner）14 epoch best 0.848712，停止；OneTrans v3 full（有 NS conditioner）E10 best 0.859408，仍在运行，NS conditioner 使 full train 提升 +0.010。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)、[`EXP-013`](../40-experiments/EXP-013-onetrans-full-train-2026-05-03.md)。
 
 - **2026-05-04 PDT（T12 time-of-day proxy 对照回流）**：`timefeat-proxy` best AUC 0.839283 / LogLoss 0.241525；`notimefeat-proxy` best AUC 0.838475 / LogLoss 0.243558。Δ+0.000808 AUC / −0.002033 LogLoss，是 log1p 修复收益的 5~6 倍。hour_sin/cos + dow_sin/cos + is_weekend 5 维圆形编码，FID=900004。T12 状态升为 `[~]`，升为 full train 候选，阈值 >=0.8665 考虑 evaluation。详见 [`EXP-012`](../40-experiments/EXP-012-timefeat-proxy-2026-05-04.md)。
 
