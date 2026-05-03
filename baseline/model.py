@@ -1054,15 +1054,27 @@ class OneTransMixedAttn(nn.Module):
         """Build a bool mask (L+M, L+M) where True = allowed to attend.
 
         Pattern:
-          [causal_LxL   |  zeros_LxM  ]
+          [ones_LxL     |  zeros_LxM  ]
           [ones_MxL     | causal_MxM  ]
+
+        S tokens use BIDIRECTIONAL attention among themselves (all S can
+        see all other S). Cross-domain causality would be arbitrary because
+        S tokens from different domains are concatenated in alphabet order,
+        not temporal order. NS tokens attend to all S tokens and causally
+        to previous NS tokens.
         """
         total = L + M
-        # Start from a lower-triangular (causal) mask
-        mask = torch.tril(torch.ones(total, total, dtype=torch.bool, device=device))
-        # Override: NS tokens can attend to ALL S tokens (not just causal S)
+        mask = torch.zeros(total, total, dtype=torch.bool, device=device)
+        # S-S block: bidirectional (every S sees every S)
+        if L > 0:
+            mask[:L, :L] = True
+        # NS-S block: every NS sees all S
         if M > 0 and L > 0:
             mask[L:, :L] = True
+        # NS-NS block: causal (NS_j sees NS_0 ... NS_j)
+        if M > 0:
+            mask[L:, L:] = torch.tril(
+                torch.ones(M, M, dtype=torch.bool, device=device))
         return mask  # (L+M, L+M)
 
     def forward(
