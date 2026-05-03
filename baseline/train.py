@@ -255,6 +255,12 @@ def parse_args() -> argparse.Namespace:
                              'EDA confirmed fids 62-66 store raw counts (10^3-10^5) '
                              'while other dense columns (fid 61/87) are pre-normalised '
                              'embeddings. Pass "" to disable all scaling.')
+    parser.add_argument('--enable_time_of_day_features', action='store_true', default=False,
+                        help='Append 5 synthetic dense features derived from the impression '
+                             'timestamp: hour_sin, hour_cos (hour-of-day circular encoding), '
+                             'dow_sin, dow_cos (day-of-week circular encoding), is_weekend. '
+                             'Captures diurnal and weekly purchase-intent periodicity absent '
+                             'from existing sequence features. (T12)')
     parser.add_argument('--seq_id_threshold', type=int, default=10000,
                         help='Within the sequence tokenizer, features with vocab_size '
                              'exceeding this value are treated as id features and receive '
@@ -396,6 +402,7 @@ def main() -> None:
         dense_log1p_fids=frozenset(
             int(x) for x in args.dense_log1p_fids.split(',') if x.strip()
         ),
+        enable_time_of_day_features=args.enable_time_of_day_features,
     )
 
     # ---- NS groups ----

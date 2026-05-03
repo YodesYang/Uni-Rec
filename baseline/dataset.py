@@ -137,6 +137,8 @@ NUM_TIME_BUCKETS = len(BUCKET_BOUNDARIES) + 1
 COUNT_FEATURE_FID = 900001
 SEQ_STATS_FEATURE_FID = 900002
 HISTORY_CVR_FEATURE_FID = 900003
+TIME_OF_DAY_FEATURE_FID = 900004  # impression hour/dow/weekend (5 dims)
+TIME_OF_DAY_FEATURE_DIM = 5       # hour_sin, hour_cos, dow_sin, dow_cos, is_weekend
 
 
 class HistoryCVRStore:
@@ -281,6 +283,7 @@ class PCVRParquetDataset(IterableDataset):
         immature_negative_weight: float = 0.0,
         negative_maturity_end_ts: Optional[int] = None,
         dense_log1p_fids: frozenset[int] | None = None,
+        enable_time_of_day_features: bool = False,
     ) -> None:
         """
         Args:
@@ -337,6 +340,13 @@ class PCVRParquetDataset(IterableDataset):
                 columns contain values in the 10^3–10^5 range, while other dense
                 columns such as fid=61/87 are pre-normalised embeddings near 0).
                 Pass ``frozenset()`` to disable all scaling.
+            enable_time_of_day_features: if True, append 5 synthetic dense
+                features derived from the impression ``timestamp``:
+                ``hour_sin``, ``hour_cos`` (hour-of-day in [0,23] → circular
+                encoding), ``dow_sin``, ``dow_cos`` (day-of-week in [0,6] →
+                circular encoding), and ``is_weekend`` (1 if Sat/Sun else 0).
+                These capture diurnal and weekly periodicity in user purchase
+                intent that is absent from the existing sequence features.
         """
         super().__init__()
 
@@ -379,6 +389,7 @@ class PCVRParquetDataset(IterableDataset):
             if dense_log1p_fids is None
             else dense_log1p_fids
         )
+        self.enable_time_of_day_features = enable_time_of_day_features
         if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
             raise ValueError(
                 "history_cvr_time_mode must be 'timestamp_cutoff' or "
@@ -493,6 +504,7 @@ class PCVRParquetDataset(IterableDataset):
             f"timestamp_min={timestamp_min}, timestamp_max={timestamp_max}, "
             f"count_features={enable_count_features}, "
             f"seq_stats_features={enable_seq_stats_features}, "
+            f"time_of_day_features={enable_time_of_day_features}, "
             f"history_cvr_features={enable_history_cvr_features}, "
             f"history_cvr_time_mode={history_cvr_time_mode}, "
             f"mature_negative_weighting={enable_mature_negative_weighting}")
@@ -527,6 +539,8 @@ class PCVRParquetDataset(IterableDataset):
             self.user_dense_schema.add(COUNT_FEATURE_FID, 2)
         if self.enable_seq_stats_features:
             self.user_dense_schema.add(SEQ_STATS_FEATURE_FID, 2 * len(raw['seq']))
+        if self.enable_time_of_day_features:
+            self.user_dense_schema.add(TIME_OF_DAY_FEATURE_FID, TIME_OF_DAY_FEATURE_DIM)
         self._history_item_offsets: List[Tuple[int, int]] = []
         if self.enable_history_cvr_features:
             if self._history_store is None:
@@ -1018,6 +1032,26 @@ class PCVRParquetDataset(IterableDataset):
             dense_offset += dim
             result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
 
+        if self.enable_time_of_day_features:
+            # Circular encoding of hour-of-day and day-of-week captures
+            # diurnal / weekly periodicity without ordinal discontinuities.
+            # Timestamps are Unix seconds (UTC); Beijing time = UTC+8, but
+            # since the shift is a fixed offset it does not affect periodicity
+            # — the model learns phase from data regardless.
+            ts_float = timestamps.astype(np.float64)
+            hours = ((ts_float // 3600) % 24).astype(np.float32)
+            # Day-of-week: days since Unix epoch (1970-01-01 was Thursday=3)
+            day_idx = ((ts_float // 86400).astype(np.int64) + 3) % 7
+            dow = day_idx.astype(np.float32)
+            tod = user_dense[:, dense_offset:dense_offset + TIME_OF_DAY_FEATURE_DIM]
+            tod[:, 0] = np.sin(2.0 * np.pi * hours / 24.0)
+            tod[:, 1] = np.cos(2.0 * np.pi * hours / 24.0)
+            tod[:, 2] = np.sin(2.0 * np.pi * dow / 7.0)
+            tod[:, 3] = np.cos(2.0 * np.pi * dow / 7.0)
+            tod[:, 4] = ((dow >= 5).astype(np.float32))  # Sat=5, Sun=6
+            dense_offset += TIME_OF_DAY_FEATURE_DIM
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
         # ---- Slice-diagnostic side-channel (training/valid only) ----
         # These underscore-prefixed fields are NOT read by trainer's
         # _make_model_input, so the training forward pass is unaffected.
@@ -1425,6 +1459,7 @@ def get_pcvr_data(
     negative_maturity_sec: int = 86400,
     immature_negative_weight: float = 0.0,
     dense_log1p_fids: frozenset[int] | None = None,
+    enable_time_of_day_features: bool = False,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -1740,6 +1775,7 @@ def get_pcvr_data(
         immature_negative_weight=immature_negative_weight,
         negative_maturity_end_ts=negative_maturity_end_ts,
         dense_log1p_fids=dense_log1p_fids,
+        enable_time_of_day_features=enable_time_of_day_features,
     )
 
     use_cuda = torch.cuda.is_available()
@@ -1773,6 +1809,7 @@ def get_pcvr_data(
         history_cvr_available_lag_sec=history_cvr_available_lag_sec,
         history_cvr_prior_strength=history_cvr_prior_strength,
         dense_log1p_fids=dense_log1p_fids,
+        enable_time_of_day_features=enable_time_of_day_features,
     )
     valid_loader = DataLoader(
         valid_dataset, batch_size=None,
