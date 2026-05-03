@@ -289,6 +289,11 @@ def parse_args() -> argparse.Namespace:
                              'instead of a zero vector. Values are mapped via '
                              'value %% seq_hash_vocab before embedding lookup. '
                              '0 = disabled (default).')
+    parser.add_argument('--item_conditioned_query', action='store_true', default=False,
+                        help='Enable item-conditioned query generation (DIN-style). '
+                             'Each sequence domain learns a gate that blends the standard '
+                             'global-info query with a target-item-aware query branch, '
+                             'letting the model focus user history on the target ad.')
 
     # NS tokenizer variant.
     parser.add_argument('--ns_tokenizer_type', type=str, default='rankmixer',
@@ -464,6 +469,7 @@ def main() -> None:
         "use_onetrans": args.use_onetrans,
         "onetrans_top_k": args.onetrans_top_k,
         "seq_hash_vocab": args.seq_hash_vocab,
+        "item_conditioned_query": args.item_conditioned_query,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

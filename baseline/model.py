@@ -419,6 +419,15 @@ class MultiSeqQueryGenerator(nn.Module):
     For each sequence i:
         GlobalInfo_i = Concat(F1..FM, MeanPool(Seq_i))
         Q_i = [FFN_{i,1}(GlobalInfo_i), ..., FFN_{i,N}(GlobalInfo_i)]
+
+    When ``item_conditioned=True``, a per-sequence learned gate blends the
+    standard global-info query with an item-aware branch:
+        item_repr   = mean(item_ns_tokens)        # (B, D)
+        gate_i      = σ(W_gate_i · [global_info_i, item_repr])  # (B, D)
+        q_{i,j}     = (1 - gate_i) ⊙ FFN_{i,j}(global_info_i)
+                    +       gate_i  ⊙ FFN_item_{i,j}(item_repr)
+    This lets each domain independently learn how much the target item
+    should steer its queries (DIN-style target-item awareness).
     """
 
     def __init__(
@@ -427,12 +436,16 @@ class MultiSeqQueryGenerator(nn.Module):
         num_ns: int,
         num_queries: int,
         num_sequences: int,
-        hidden_mult: int = 4
+        hidden_mult: int = 4,
+        item_conditioned: bool = False,
+        num_item_ns: int = 0,
     ) -> None:
         super().__init__()
         self.num_queries = num_queries
         self.num_sequences = num_sequences
         self.d_model = d_model
+        self.item_conditioned = item_conditioned
+        self.num_item_ns = num_item_ns
 
         global_info_dim = (num_ns + 1) * d_model
 
@@ -452,6 +465,29 @@ class MultiSeqQueryGenerator(nn.Module):
             ])
             for _ in range(num_sequences)
         ])
+
+        if item_conditioned and num_item_ns > 0:
+            # Item-aware branch: per-sequence, per-query FFN conditioned on item_repr
+            self.item_query_ffns_per_seq = nn.ModuleList([
+                nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(d_model, d_model * hidden_mult),
+                        nn.SiLU(),
+                        nn.Linear(d_model * hidden_mult, d_model),
+                        nn.LayerNorm(d_model),
+                    )
+                    for _ in range(num_queries)
+                ])
+                for _ in range(num_sequences)
+            ])
+            # Per-sequence gate: [global_info, item_repr] → D-dim blend weight
+            self.item_gates = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(global_info_dim + d_model, d_model),
+                    nn.Sigmoid(),
+                )
+                for _ in range(num_sequences)
+            ])
 
     def forward(
         self,
@@ -473,6 +509,12 @@ class MultiSeqQueryGenerator(nn.Module):
         B = ns_tokens.shape[0]
         ns_flat = ns_tokens.view(B, -1)  # (B, M*D)
 
+        # Extract item representation for item-conditioned branch.
+        # item_ns tokens are the last num_item_ns tokens in ns_tokens.
+        item_repr: Optional[torch.Tensor] = None
+        if self.item_conditioned and self.num_item_ns > 0:
+            item_repr = ns_tokens[:, -self.num_item_ns:, :].mean(dim=1)  # (B, D)
+
         q_tokens_list = []
         for i in range(self.num_sequences):
             # MeanPool(Seq_i)
@@ -486,8 +528,22 @@ class MultiSeqQueryGenerator(nn.Module):
             global_info = torch.cat([ns_flat, seq_pooled], dim=-1)  # (B, (M+1)*D)
             global_info = self.global_info_norm(global_info)
 
-            # Generate N query tokens
-            queries = [ffn(global_info) for ffn in self.query_ffns_per_seq[i]]
+            # Base queries from global info
+            base_queries = [ffn(global_info) for ffn in self.query_ffns_per_seq[i]]
+
+            if item_repr is not None:
+                # Item-aware branch: gate blends base query with item-conditioned query
+                gate = self.item_gates[i](
+                    torch.cat([global_info, item_repr], dim=-1))  # (B, D)
+                item_queries = [
+                    ffn(item_repr) for ffn in self.item_query_ffns_per_seq[i]]
+                queries = [
+                    (1.0 - gate) * bq + gate * iq
+                    for bq, iq in zip(base_queries, item_queries)
+                ]
+            else:
+                queries = base_queries
+
             q_tokens = torch.stack(queries, dim=1)  # (B, Nq, D)
             q_tokens_list.append(q_tokens)
 
@@ -1676,6 +1732,8 @@ class PCVRHyFormer(nn.Module):
         # T13: hash embedding for sequence features with vocab > emb_skip_threshold
         # (0 = disabled, use zero vector for skipped features as before)
         seq_hash_vocab: int = 0,
+        # Item-conditioned query generation (DIN-style target-item awareness)
+        item_conditioned_query: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1854,6 +1912,8 @@ class PCVRHyFormer(nn.Module):
                 num_queries=num_queries,
                 num_sequences=self.num_sequences,
                 hidden_mult=hidden_mult,
+                item_conditioned=item_conditioned_query,
+                num_item_ns=num_item_ns,
             )
             self.blocks = nn.ModuleList([
                 MultiSeqHyFormerBlock(
