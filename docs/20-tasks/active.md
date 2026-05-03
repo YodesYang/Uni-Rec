@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-03（PDT · dense log1p 修复对照回流）· 结论：`log1p-proxy` best AUC **0.838475** / `nolog1p-proxy` **0.838330**，log1p ON 方向正确（+0.000145 AUC / -0.000323 LogLoss）；修复已默认生效，等叠加 P0 后再验收，不单独消耗 evaluation 额度。详见 [`EXP-011`](../40-experiments/EXP-011-dense-log1p-proxy-2026-05-03.md)。
+**最近一次审视**：2026-05-03（PDT · 新增 T12 时间特征 + T13 seq_c fid47 截断）· 结论：社区情报验证 log1p 有效（EXP-011），剩余高价值未落地情报为 ① ray 的 impression 绝对时间特征（+0.0105 主因候选）② domain_c_seq_47 vocab 截断（当前因 emb_skip_threshold 整个跳过）；两者分别立 T12 / T13，先过 proxy 漏斗。
 
 ---
 
@@ -40,6 +40,49 @@
 - ✅ **dense log1p 修复对照已回流**：`user_dense_feats_62~66` 为原始计数统计量（10^3~10^5），与 fid=61/87 的预归一化 embedding（10^-1）尺度差 4~5 个量级；log1p 修复后 proxy best AUC +0.000145 / LogLoss -0.000323，方向正确；`dense_log1p_fids=62,63,64,65,66` 已设为默认，详见 [`EXP-011`](../40-experiments/EXP-011-dense-log1p-proxy-2026-05-03.md)。
 
 **当前优先级**：高。T8.5 与 P0 特征都可能需要多轮验证，后续新想法默认先过本任务定义的 gating。
+
+### T12 `[ ]` Impression 绝对时间特征（P0-D）
+
+**来源**：社区情报 ray（Academic Track 第 27 名）报告"加时间特征 0.8135 → 0.824"（+0.0105），是其所有优化中最大单点。我们的 P0-B（`enable_seq_stats_features`：序列长度 + ts_range）在 full train 上没有复现类似收益，因此 ray 的"时间特征"指的是**不同的东西**。
+
+**假设**：impression 请求时刻的绝对时间编码——小时（0~23）、星期几（0~6）、是否周末——是广告 CVR 的强信号（不同时段用户购买意愿差异大），而我们当前完全没有这类特征。
+
+**实施方案**：
+- 从 `timestamp` 列提取：`hour_of_day`（0~23，周期编码 sin/cos）、`day_of_week`（0~6，周期编码）、`is_weekend`（0/1）
+- 作为新的 synthetic dense feature，接入 `user_dense` 通道（或单独一个 token）
+- CLI flag：`--enable_time_of_day_features`，默认 False，opt-in
+
+**分层漏斗**：
+1. `py_compile` + demo smoke
+2. `timefeat-proxy-swiglu-vr005-rg128x32-s1500` 对比 log1p baseline
+3. proxy AUC > +0.002 → 进 full train
+
+**启动信号**：P0 分支当前回流中（p0count full train 未完成），T12 可以独立并行启动。
+
+**当前优先级**：高，是剩余未验证情报中预期收益最大的单点。
+
+---
+
+### T13 `[ ]` domain_c_seq_47 vocab 截断（高基数 item ID 处理）
+
+**来源**：社区情报 Stochastic 陷阱三："domain_c_seq_47 的 item ID 量级与顶层 item_id 相同（0~278M）"；我们的 schema 确认 vocab=278677640。
+
+**当前状态（bug）**：`run.sh` 里 `--emb_skip_threshold 1000000`，fid=47 的 vocab=278M 超过阈值 → **整个特征输出全零向量**，等于完全丢弃了 domain_c 序列里的主 item ID 信号。
+
+**修复方案**：两条路：
+- **方案 A（截断）**：在 `dataset.py` 的 `_convert_batch` 里，对 vocab 超大的 item ID 特征，将值限制在 `[0, clip_threshold]`，超出归 UNK（0），这样可以保留高频 ID，同时 embedding table 大小可控
+- **方案 B（hash embedding）**：在模型侧对超大 vocab 的特征做 hash 取模，映射到固定大小的 embedding table（例如取模到 1M），损失少量 collision，但保留了所有 ID 的可学习表示
+
+方案 A 代码改动小，先实验；方案 B 保留为后备。
+
+**注意**：改动涉及 `emb_skip_threshold` 逻辑和 seq embedding 初始化，需要仔细核查 OOB clip 逻辑，避免 index 越界。
+
+**分层漏斗**：
+1. 本地 smoke 验证 embedding table 大小和显存
+2. proxy 对比（128/32 RG）
+3. proxy 正向 → full train
+
+**当前优先级**：中。修复代价不低，且 domain_c fid=47 是 item ID 而非行为类别，信号密度取决于数据分布；先做 T12，再启动 T13。
 
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
@@ -147,6 +190,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-03 PDT（新增 T12 + T13）**：社区情报深度分析后落地两条新 task。T12：impression 绝对时间特征（小时/星期/是否周末），对应 ray 报告的 +0.0105 主因候选，优先级高；T13：domain_c_seq_47 vocab=278M 因 emb_skip_threshold=1M 被整个跳过，修复方案为 vocab 截断或 hash embedding，优先级中（先做 T12）。
 
 - **2026-05-03 PDT（dense log1p 修复对照回流）**：`log1p-proxy-swiglu-vr005-rg128x32-s1500`（log1p ON）best AUC 0.838475 / LogLoss 0.243558；`nolog1p-proxy-swiglu-vr005-rg128x32-s1500`（log1p OFF）best AUC 0.838330 / LogLoss 0.243881。EDA 确认 user_dense_feats_62~66 是原始计数统计量（万级），与 fid=61/87 的预归一化 embedding（小浮点）尺度差 4~5 个量级；log1p 修复方向正确，`dense_log1p_fids="62,63,64,65,66"` 已设为 CLI 默认值，后续所有训练自动生效。详见 [`EXP-011`](../40-experiments/EXP-011-dense-log1p-proxy-2026-05-03.md)。
 
