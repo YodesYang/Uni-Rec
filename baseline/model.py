@@ -412,6 +412,85 @@ class RankMixerBlock(nn.Module):
         return Q_boost
 
 
+class TargetItemSeqInjector(nn.Module):
+    """Inject target-item representation into each sequence token (ADR-004).
+
+    Makes the per-sequence encoder target-aware by adding a per-sequence
+    projection of the target item representation to every seq token, before
+    the sequence encoder runs. This is orthogonal to the item-conditioned
+    query branch in :class:`MultiSeqQueryGenerator` (which acts on the query
+    side): injection here modifies the encoder's key/value input so the
+    encoder itself can perform target-specific matching.
+
+    Mode ``'additive'`` (default):
+        target_repr = mean(item_ns_tokens)            # (B, D)
+        target_proj_i = LinearPerSeq_i(target_repr)   # (B, D)
+        seq_tokens_i' = seq_tokens_i + α_i * target_proj_i.unsqueeze(1)
+
+    α_i is a learned per-sequence scalar initialised to ``alpha_init``
+    (default 0.0). With α=0 the injector is a functional no-op, so training
+    starts equivalent to the baseline and the optimiser decides the strength
+    of each domain's injection. This is the safest path to enable target-
+    aware conditioning without breaking a well-trained baseline.
+
+    Padding tokens still receive the injection at the token level, but the
+    downstream seq encoder masks them out via ``seq_padding_masks`` so they
+    contribute neither to pooling nor to attention output.
+
+    Mode ``'off'``: the module short-circuits (identity) and has no params.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_sequences: int,
+        mode: str = 'off',
+        alpha_init: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.num_sequences = num_sequences
+        self.mode = mode
+        if mode == 'off':
+            return
+        if mode != 'additive':
+            raise ValueError(
+                f"Unsupported target_item_seq_injection mode: {mode!r}. "
+                f"Accepted: 'off', 'additive'.")
+        self.target_proj_per_seq = nn.ModuleList([
+            nn.Linear(d_model, d_model) for _ in range(num_sequences)
+        ])
+        # Per-sequence learnable scalar; init=0 → starts as a no-op so the
+        # optimiser decides how much each domain should attend to target.
+        self.alpha = nn.Parameter(
+            torch.full((num_sequences,), float(alpha_init)))
+
+    def forward(
+        self,
+        seq_tokens_list: list,
+        item_repr: torch.Tensor,
+    ) -> list:
+        """Add α_i * W_i(item_repr) to each token of sequence i.
+
+        Args:
+            seq_tokens_list: List of (B, L_i, D) tensors, length S.
+            item_repr: (B, D) target-item representation (mean of item NS
+                tokens, same source as ICQ).
+
+        Returns:
+            New list of (B, L_i, D) tensors with target injected. Input list
+            is not mutated.
+        """
+        if self.mode == 'off':
+            return seq_tokens_list
+        out = []
+        for i in range(self.num_sequences):
+            # (B, D) → (B, 1, D), broadcast-add across sequence length
+            proj = self.target_proj_per_seq[i](item_repr).unsqueeze(1)
+            out.append(seq_tokens_list[i] + self.alpha[i] * proj)
+        return out
+
+
 class MultiSeqQueryGenerator(nn.Module):
     """Multi-sequence query generation module.
 
@@ -1734,6 +1813,11 @@ class PCVRHyFormer(nn.Module):
         seq_hash_vocab: int = 0,
         # Item-conditioned query generation (DIN-style target-item awareness)
         item_conditioned_query: bool = False,
+        # ADR-004 · Target-item hard interaction injected into seq tokens
+        # (seq-token level target-item conditioning, orthogonal to ICQ which
+        # is query-side). Default 'off' keeps behaviour identical to baseline.
+        target_item_seq_injection: str = 'off',
+        target_inject_alpha_init: float = 0.0,
         # Dense bypass: project dense features directly to the classifier input,
         # bypassing NS-token dilution in HyFormer blocks. When enabled the dense
         # token is removed from ns_tokens and the classifier input dimension is
@@ -1758,6 +1842,8 @@ class PCVRHyFormer(nn.Module):
         self.use_onetrans = use_onetrans
         self.onetrans_top_k = onetrans_top_k
         self.seq_hash_vocab = seq_hash_vocab
+        self.target_item_seq_injection = target_item_seq_injection
+        self.target_inject_alpha_init = target_inject_alpha_init
 
         # ================== NS Tokens Construction ==================
 
@@ -1808,6 +1894,11 @@ class PCVRHyFormer(nn.Module):
             num_item_ns = item_ns_tokens
         else:
             raise ValueError(f"Unknown ns_tokenizer_type: {ns_tokenizer_type}")
+
+        # Save for downstream modules that need to slice item NS tokens out
+        # of the concatenated ns_tokens tensor (e.g. ICQ, target injector).
+        self.num_item_ns = num_item_ns
+        self.num_user_ns = num_user_ns
 
         # User dense feature projection (if available)
         self.has_user_dense = user_dense_dim > 0
@@ -1927,6 +2018,16 @@ class PCVRHyFormer(nn.Module):
             self.time_embedding = nn.Embedding(num_time_buckets, d_model, padding_idx=0)
 
         # ================== HyFormer OR OneTrans Components ==================
+        # Target-item seq injector (ADR-004) — applied to seq_tokens_list
+        # BEFORE the HyFormer / OneTrans path, so it benefits both. When
+        # target_item_seq_injection='off' this is a zero-param identity.
+        self.target_item_seq_injector = TargetItemSeqInjector(
+            d_model=d_model,
+            num_sequences=self.num_sequences,
+            mode=target_item_seq_injection,
+            alpha_init=target_inject_alpha_init,
+        )
+
         if not use_onetrans:
             # ---- Classic HyFormer path ----
             self.query_generator = MultiSeqQueryGenerator(
@@ -2351,10 +2452,35 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
         return seq_tokens_list, seq_masks_list
 
+    def _maybe_inject_target_into_seq(
+        self,
+        ns_tokens: torch.Tensor,
+        seq_tokens_list: list,
+    ) -> list:
+        """Inject target-item representation into each seq token (ADR-004).
+
+        No-op (identity) when ``target_item_seq_injection='off'`` or when
+        there are no item NS tokens. Reuses the same target representation
+        source as ICQ: mean of the item NS tokens. Slices by an explicit
+        offset (num_user_ns + has_user_dense) rather than assuming item NS
+        sits at the end of ns_tokens, so the logic is robust to any future
+        item_dense addition.
+        """
+        if self.target_item_seq_injector.mode == 'off':
+            return seq_tokens_list
+        if self.num_item_ns <= 0:
+            return seq_tokens_list
+        item_ns_start = self.num_user_ns + (1 if self.has_user_dense else 0)
+        item_ns_end = item_ns_start + self.num_item_ns
+        item_repr = ns_tokens[:, item_ns_start:item_ns_end, :].mean(dim=1)
+        return self.target_item_seq_injector(seq_tokens_list, item_repr)
+
     def forward(self, inputs: ModelInput) -> torch.Tensor:
         """Runs the forward pass (HyFormer or OneTrans depending on use_onetrans)."""
         ns_tokens = self._build_ns_tokens(inputs)
         seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
+        seq_tokens_list = self._maybe_inject_target_into_seq(
+            ns_tokens, seq_tokens_list)
 
         if self.use_onetrans:
             output = self._run_onetrans_blocks(
@@ -2377,6 +2503,8 @@ class PCVRHyFormer(nn.Module):
         """Runs inference without dropout, returning (logits, embedding)."""
         ns_tokens = self._build_ns_tokens(inputs)
         seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
+        seq_tokens_list = self._maybe_inject_target_into_seq(
+            ns_tokens, seq_tokens_list)
 
         if self.use_onetrans:
             output = self._run_onetrans_blocks(

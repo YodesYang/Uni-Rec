@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04 晚（PDT · 四路 full-train epoch 数据回流 + 归因修正）· 结论：① `t13tf-full` E4 best 0.868495（LB 0.844956）仍是当前主线;② `t13only-full` E7 best **0.866571**（hash500k 单独 Δ+0.000687，原 EXP-018 E4 快照判 −0.001057 错误，hash500k 其实是**正向**）;③ `t13-hash2m-timefeat-full` E9 best 0.868483，相对 hash500k 几乎持平（Δ−0.000012），"可控碰撞 = 隐式正则化"假说成立,2M 桶无增益;④ `t13tf-loss-full` E5 实际 best AUC 0.868932 被 LogLoss-select E8 ckpt（AUC 0.868571）覆盖,**静默丢失 AUC 最优 ckpt** → 铁律 "EarlyStopping 必须 AUC-select"。已入 team-memory 2 条铁律（hash vocab size / AUC-select）。距 SOTA 0.85060 仍差 ~0.006，下一优先级：`icq-t13tf-full` 等结果 + target-item 硬交互（见新 ADR 草稿）。evaluation 额度**严格 4 次/天**，当前仅 `icq-t13tf-full` 值得上榜验证（阈值 ≥ 0.870）。
+**最近一次审视**：2026-05-04 晚 2（PDT · T16 代码落地 + 三路 full-train 收口）· 结论：① `t13tf-loss-full` E9 best local AUC 0.868989（目前所有 full-train 最高）已决定消耗 1 个 evaluation slot（LogLoss-select 副产物碰巧 E9 既 LogLoss 最低又 AUC 高,可用；Publish 前走三步检查清单）；② `t13-hash2m-timefeat-full` + `t13only-full` 已停止（信息增益耗尽,释放 training quota）；③ `icq-t13tf-full` 继续保留（今晚无法完成,明日回流）；④ **T16（ADR-004）方案 A Additive 已落地**: TargetItemSeqInjector 类 + CLI 参数 + train_config 落盘 + infer 兼容,~120 行代码,S1 本地 smoke 全部通过（10 step train + 1000 predictions + 可复现性验证 + 注入生效验证）,明日启动平台 fast proxy 验证。⑤ 评估配额修正: **24h 滚动窗口 4 次,PDT 21:00 重置,PDT 24:00 榜单刷新**（已入 team-memory）。
 
 ---
 
@@ -95,6 +95,34 @@
 5. 方案 A（vocab 截断）尚未实验，作为备选
 
 **当前优先级**：低-中。方案 B hash500k 已作为 `t13tf-full` 一部分上线并贡献约 +0.0007 local AUC；不再继续加桶数（2M 已验证无增益）。后续可考虑组合：hash500k + **AUC-select** EarlyStopping + 更长训练（看 t13only 能否在 E10+ 继续上涨）。方案 A 暂不优先——要和 target-item 硬交互等更高潜力方向竞争 quota。
+
+### T16 `[~]` Target-Item 硬交互注入序列侧（ADR-004 方案 A · Additive）
+
+**决策推理外移至 [ADR-004](../30-decisions/ADR-004-target-item-seq-conditioning.md)**。本节只记任务状态与 next action。
+
+**背景一句话**：MultiSeqHyFormer 的 seq encoder 当前是 **target-agnostic** 的（target 只通过 query 端进入 via ICQ）。在 key/value 侧也显式注入 target-item 表征 → 从根源上让 encoder 变 target-aware, 是当前理论上**破局 SOTA 可能性最高的单点改造**。
+
+**已完成**：
+- ✅ **S1 本地 smoke 通过**（2026-05-04 晚）: `TargetItemSeqInjector` 类 + CLI 参数 + train_config 落盘 + infer 兼容, ~120 行代码, demo 10 step train + 1000 predictions + 可复现性验证全部 OK
+- ✅ ADR-004 Draft → Accepted
+
+**待验证**（ADR-004 §Verification 表 S2~S5）:
+
+| 阶段 | 环境 | 期望信号 | 决策阈值 |
+|---|---|---|---|
+| S2 fast proxy | 128/32 RG + 1500 steps | 相对 t13tf-only proxy 基线 AUC 不退超过 0.002 | 退 <0.002 继续 S3; 退 >0.002 **也进** S3(ICQ "大参数假负向"规律) |
+| S3 half-train | 2~3 epoch 全 RG | E3 best AUC ≥ t13tf E3 best + 0.0002 | 达标进 S4 |
+| S4 full train | 10 epoch + batch 128 | best AUC ≥ 0.869 | 达标进 S5 |
+| S5 leaderboard | 1 evaluation slot | LB ≥ 0.845 | 达标 commit 方案 A |
+
+**下一步**：
+1. 明日启动平台 fast proxy job: `t16-target-add-a01-proxy-swiglu-vr005-rg128x32-s1500`（参数 `--target_item_seq_injection additive --target_inject_alpha_init 0.1`）
+2. 保留 `icq-t13tf-full` 回流数据作为 "ICQ only" 基线对照
+3. 若 S2 proxy 通过, S3 half-train 作 `t16-target-add-a01-halftrain-...`
+
+**当前优先级**：**最高**。距 SOTA 还差约 0.006 LB, ADR-003 的 P0-A/B/C 全部失效后, T16 是破局可能性最大的剩余单点方向。evaluation 额度策略: 先不占用任何 evaluation slot, 等 full train 回流后再决定。
+
+---
 
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
@@ -202,6 +230,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT 晚 2（T16 代码落地 + 平台 job 收口 + 评估额度修正）**：① T16（ADR-004 方案 A Additive）代码落地: `baseline/model.py` 新增 `TargetItemSeqInjector` 类（`off` / `additive` 两模式,α init=0 为 identity safe 起点）,`PCVRHyFormer.forward` / `predict` 前注入, train.py 加 `--target_item_seq_injection` + `--target_inject_alpha_init`, infer.py 同步读, 共 ~120 行代码; S1 本地 smoke 全部通过（demo 10 step train + 1000 predictions + 可复现性 + 注入生效）。② ADR-004 Draft → Accepted, 索引更新。③ 平台 `t13tf-loss-full` E9 升到 0.868989（目前所有 full-train 最高）,决定消耗 1 个 evaluation slot（Publish 前走三步检查,确认 ckpt 是 E9 AUC 0.868989 那次）;`t13-hash2m-timefeat-full` + `t13only-full` 停止释放 training quota; `icq-t13tf-full` 保留继续跑。④ **评估配额事实修正**: team-memory 原写"4 次/天", 实际为 **24h 滚动窗口 4 次,PDT 21:00 重置,PDT 24:00 榜单刷新** —— 今日 4 slot 到 PDT 21:00 前都未消耗, 仍可用。
 
 - **2026-05-04 PDT 晚（四路 full-train epoch 回流 + EXP-018 归因修正）**：用户同步 `t13-hash2m-timefeat-full` E9 0.868483 / `t13only-full` E7 **0.866571** / `t13tf-loss-full` E5 实际 best 0.868932 被 E8 0.868571 覆盖 / `icq-t13tf-full` 刚起第一个 epoch。触发三项修正：① EXP-018 初版 E4 快照判 hash500k 单独 Δ−0.001057 有害 → E7 修正为 Δ+0.000687 正向,hash500k 与 timefeat **几乎独立可加**（原 "+0.001752 强交互" 是 E4 快照假象）;② 2M 桶 full train 相对 500k 几乎持平,"可控碰撞 = 隐式正则化" 假说成立;③ LogLoss-select EarlyStopping 静默丢弃 AUC 最优 ckpt（E5 0.868932 被 overwrite）。team-memory 补 2 条铁律（hash vocab size / AUC-select）,T13 升 `[~]` 并标记方案 B hash500k 已为 t13tf-full 正式组件。当前仅 `icq-t13tf-full` 值得等结果；若 ≥ 0.870 消耗一个 evaluation 配额。evaluation 额度修正：**严格 4 次/天，不可累积不可弹性**。
 

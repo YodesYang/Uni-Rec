@@ -6,14 +6,14 @@ alwaysApply: true
 ## 比赛流程与数据
 
 - 2026-04-30 16:00 AOE：Industrial Track 因 test 数据集 bug 重置榜单，所有历史分数作废；官方修复后会更新数据集，需重新下载并比对版本（建议比对 hash / 文件时间）
-- 当前配额：每队 **4 quota**，每日提交评估 **4 次**（提交策略可更激进，建议建立实验追踪表避免浪费配额）
+- **评估配额（2026-05-04 晚澄清）**：每队 **4 quota**，评估为**24h 滚动窗口最多 4 次有效提交**（Failed / Stopped 不计入）。实测重置时间 ≈ **PDT 21:00**（每日额度重回 4）；官方榜单刷新时间 ≈ **PDT 24:00 = 00:00 次日**（≈ 北京时间次日 15:00）。实际操作含义: ① 不是"日历日 4 次"而是滚动窗口,如果今日已用 3 次,明日 24h 之前只能再用 1 次;② "今天 PDT 21 点前没用完的额度**不会丢**",会 roll 到下个 24h 窗口里继续可用;③ "Evaluation Success ≠ 已上榜", 需等 PDT 24:00 榜单刷新。建议建立实验追踪表避免浪费配额。
 - 重要假设：官方原文仅明确提及 test dataset 有问题，但措辞含 "update the dataset"，重新下载时务必同时核对 train 数据是否也变更
-- Leaderboard 有 Delayed Feedback 机制（防止过拟合公榜）：Round 1 部分提交结果会被故意延迟显示；按官方答复，每天 16:00 AOE 前完成的评估在 19:00 AOE 同日更新榜单（≈ 北京时间次日 15:00），所以「Evaluation Success ≠ 已上榜」，**不要等不到分数就以为 infer 失败**
 - **Ensemble 红线**（`docs/00-context/competition.md` line 77 官方禁令 + 4/3 官方 Q&A 例外）：❌ multi-seed / multi-encoder prediction averaging、stacking、blending、TTA 全部禁止；✅ MoE / Sparse-MoE 端到端联合训练**不算** ensemble；✅ multi-task multi-head（同 forward pass）不算；✅ hyperparameter search 取最强单 ckpt publish 不算；⚠️ SWA（Stochastic Weight Averaging）属灰色地带 → 用之前**必须**到赛事群发问澄清，不要假设
 
 ## 推理与评估管线
 
 - 平台默认 `infer.py`（Evaluation 页 15.6K）**完全动态读取 ckpt 目录里的 `train_config.json` 和 `schema.json` 来构建模型** —— 训练时只要把 train_config 落到 best_model 子目录、模型类签名稳定，就能直接用平台默认 infer.py，不需要自定义上传（2026-04-30 用 transformer / swiglu / longer 三种 encoder + rankmixer NS tokenizer + user_ns_tokens=5/item_ns_tokens=2/num_queries=2 全部 Eval Success 验证）
+- **⚠️ 新增 `PCVRHyFormer.__init__` kwarg 后平台兼容性**（2026-05-04 T16 教训）: 当本仓库代码引入**新的** model kwarg（如 `item_conditioned_query`, `target_item_seq_injection`, `target_inject_alpha_init`）后,平台默认 infer.py 的 `cfg.get()` fallback 是否会 pass 该 kwarg 取决于其版本。**安全策略**: 任何新增 kwarg 首次平台 evaluation 时,**都必须勾选"上传自定义 infer.py"**,不要赌平台默认 infer.py 识别。只有在**明确验证过**平台默认 infer.py 兼容的 kwarg 才能省略上传（如当前已验证 seq_encoder_type / ns_tokenizer_type / user_ns_tokens / item_ns_tokens / num_queries）
 - 推理时长基线（基于 1.9M train + 523k test，单 GPU 19GB，batch=256）：transformer ≈ 514s / longer ≈ 203s / swiglu ≈ 82s，全部远低于 30min 硬上限；编码器选型对推理时长影响 6 倍以上
 - 推理需输出 `predictions.json`，user_id 必须**全量覆盖测试集**（社区有题报「Missing 310000 user_ids」直接掉分）；本届 baseline 已覆盖 523244 条
 - baseline `trainer.py::_save_step_checkpoint` 已自动把 `schema.json` + `train_config.json` + `ns_groups.json` 复制到每个 `*.best_model/` 目录 → 无需额外手工同步

@@ -300,6 +300,20 @@ def parse_args() -> argparse.Namespace:
                              'global-info query with a target-item-aware query branch, '
                              'letting the model focus user history on the target ad.')
 
+    parser.add_argument('--target_item_seq_injection', type=str, default='off',
+                        choices=['off', 'additive'],
+                        help='ADR-004: inject target-item representation into every '
+                             'sequence token BEFORE the seq encoder, making the encoder '
+                             'target-aware (orthogonal to item_conditioned_query, which '
+                             'is query-side). "additive" adds alpha_i * Linear_i(item_repr) '
+                             'to each token of sequence i. With alpha_init=0 (default), '
+                             'training starts equivalent to baseline.')
+    parser.add_argument('--target_inject_alpha_init', type=float, default=0.0,
+                        help='Initial value of the per-sequence scalar alpha_i used to '
+                             'gate target-item injection strength. 0.0 means the injector '
+                             'starts as an identity; optimizer decides how much each '
+                             'domain attends to target over training.')
+
     parser.add_argument('--enable_dense_bypass', action='store_true', default=False,
                         help='Dense bypass: project dense features directly to the '
                              'classifier input instead of (or in addition to) the NS '
@@ -498,6 +512,8 @@ def main() -> None:
         "onetrans_top_k": args.onetrans_top_k,
         "seq_hash_vocab": args.seq_hash_vocab,
         "item_conditioned_query": args.item_conditioned_query,
+        "target_item_seq_injection": args.target_item_seq_injection,
+        "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
     }
 

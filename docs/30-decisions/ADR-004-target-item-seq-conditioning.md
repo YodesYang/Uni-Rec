@@ -1,9 +1,9 @@
 # ADR-004 · Target-Item 硬交互注入序列侧（seq-token 级 target-item conditioning）
 
-> **Status**: Draft（设计草案，待用户审阅 + half-train 验证后升 Accepted）
+> **Status**: Accepted（2026-05-04 晚 · S1 本地 smoke 通过后升 Accepted）
 > **Date**: 2026-05-04
-> **Related Tasks**: 待开 T16（本 ADR 接受后由 active.md 创建）
-> **Related Experiments**: 待 EXP-020（proxy 或 half-train 验证）
+> **Related Tasks**: T16（见 active.md）
+> **Related Experiments**: 待 EXP-020（fast proxy / half-train 验证）
 > **Supersedes / Extends**: 扩展 EXP-019 ICQ 方案（query 侧 item conditioning）
 
 ---
@@ -124,10 +124,18 @@ for each sequence token t_j in seq_i:
 
 ## Verification（如何验证决策正确）
 
-### 已验证（静态分析 / 本地推演）
+### 已验证（静态分析 / 本地推演 / S1 smoke · 2026-05-04 晚）
 - 参数量估算已完成,方案 A 增量 16k 远小于现有 MultiSeqQueryGenerator（~500k）。
 - 位置分析已完成: `PCVRHyFormer.forward` 的 seq_encoders 调用路径允许 non-invasive 插入。
 - 与 ICQ 的正交性在代码层面成立（query 侧 vs key/value 侧）,可独立启用。
+- **S1 本地 smoke 通过**（demo_1000 + 10 step train + infer）:
+    - `py_compile` 5 文件全部通过;ReadLints 无错误
+    - `train.py` + `--target_item_seq_injection additive --target_inject_alpha_init 0.1` 正常完成训练,最终 Early Summary / best_model / training_summary.json 正常写出
+    - `train_config.json` 正确包含 `target_item_seq_injection: "additive"` + `target_inject_alpha_init: 0.1`
+    - `infer.py` 动态读取 train_config 重建模型成功,输出 1000 predictions from 2000 rows,score 分布 0.27~0.66（mean 0.44）,无崩坏
+    - **可复现性验证**:同 seed 下 `additive α=0` 两次跑结果 bit-identical（loss 0.376609776701246 完全一致）
+    - **注入生效验证**:`additive α=0.1` 相对 `additive α=0.0` 10 step 后 loss 略有差异（0.37673 vs 0.37661）, AUC 0.963 vs 0.958,说明注入机制真正参与 forward 计算
+    - **与 off 基线轻微不一致**: `off` 模式与 `additive α=0` 结果不 bit-identical（源于 4 个 `Linear(D,D)` init 消耗 torch RNG 流）。Forward 仍是数学 identity, 生产上直接用 `additive α=0` 作为起点, 无需回退 off。
 
 ### 待验证（proxy → half-train → full train 漏斗）
 
@@ -146,18 +154,30 @@ for each sequence token t_j in seq_i:
 
 ---
 
-## 附: 代码改动预估（仅作设计参考,不在本 ADR 落地）
+## 附: 实际代码改动（2026-05-04 晚落地）
 
 - `baseline/model.py`:
-    - `MultiSeqQueryGenerator` 上方新增 `TargetItemSeqInjector` 类 (~40 行, 方案 A)
-    - `PCVRHyFormer.__init__`: 实例化 injector (+5 行)
-    - `PCVRHyFormer.forward`: 在 seq_encoders 调用前插入 injection (+8 行)
-    - 新增 CLI 参数: `--target_item_seq_injection {off, additive, gating, co_action}` 默认 `off`
-    - 新增参数: `--target_inject_alpha_init 0.1`
+    - 新增 `TargetItemSeqInjector` 类（~85 行, 含文档）—— 支持 `off` / `additive` 两种 mode,`off` 是零参 identity
+    - `PCVRHyFormer.__init__`: 新增参数 `target_item_seq_injection` + `target_inject_alpha_init`, 保存 `num_user_ns` / `num_item_ns` 到 self, 实例化 `self.target_item_seq_injector`
+    - `PCVRHyFormer.forward` / `predict`: 在 `_build_seq_tokens` 后、路径分叉前调用 `_maybe_inject_target_into_seq`
+    - 新增 helper `_maybe_inject_target_into_seq`: 从 ns_tokens 按**显式 offset** 切出 item_ns 段（不依赖"末尾"假设,未来安全）,mean pooling 后传给 injector
 - `baseline/train.py`:
-    - CLI 参数注册 (+5 行)
-    - `train_config.json` 落盘字段新增 (+2 行)
-- 总计: **~60 行代码改动**,全部在 `baseline/` 下,无 dataset.py / infer.py 改动（infer 路径自动通过 train_config.json 还原）。
+    - CLI 参数注册（`--target_item_seq_injection {off,additive}`, `--target_inject_alpha_init float`）
+    - `model_args` dict 加入新字段,自动落盘到 `train_config.json`
+- `baseline/infer.py`:
+    - `model_args` dict 同步从 `cfg.get()` 读取新字段, 默认值 `off` / `0.0`
+- **总计 ~120 行代码改动**(略超 ADR-004 原估计 60 行,主要是 injector 类的文档注释 + 两处 helper)。所有改动都在 `baseline/` 下, `dataset.py` / `trainer.py` 零改动。
+
+### 平台 evaluation 兼容性注意事项
+
+- **开启 `additive` 时,evaluation 必须上传本仓库自定义 `infer.py`**:平台默认 infer.py 不一定认识 `target_item_seq_injection` kwarg,可能 pass 到 `PCVRHyFormer.__init__` 时报 unexpected kwarg 错误;我们的 infer.py 已显式读取该字段
+- 如果只用 `off` 模式 fallback:平台默认 infer.py 在 `cfg.get()` 模式下会取不到该字段 → 走 `PCVRHyFormer` 默认 `off` → **可能仍然兼容**,但**不要赌**,第一次 evaluation 时务必用自定义 infer.py。已落 team-memory 铁律。
+
+---
+
+## 附: 初版代码改动预估（保留作对比）
+
+原 ADR Draft 预估 ~60 行,实际 ~120 行(主要偏差来自 injector 类的文档注释和 `_maybe_inject_target_into_seq` helper 的安全性检查,核心逻辑仍然 ~30 行)。
 
 ---
 
