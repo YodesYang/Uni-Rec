@@ -1825,15 +1825,19 @@ class PCVRHyFormer(nn.Module):
                 nn.LayerNorm(d_model),
             )
 
-        # Total NS token count: in bypass mode dense features are NOT added as
-        # NS tokens, so their slot is excluded from num_ns.
-        self.num_ns = (num_user_ns + (0 if (self.has_user_dense and enable_dense_bypass) else (1 if self.has_user_dense else 0))
+        # Total NS token count: bypass mode keeps the dense NS token so that
+        # the rank_mixer T-divisibility constraint (d_model % T == 0) is
+        # preserved. The bypass projection adds a SECOND, undiluted path for
+        # the dense features directly into the classifier — they flow through
+        # both the NS-token path and the bypass path simultaneously.
+        self.num_ns = (num_user_ns + (1 if self.has_user_dense else 0)
                        + num_item_ns + (1 if self.has_item_dense else 0))
 
-        # Dense bypass projections: used instead of (or in addition to) the
-        # NS-token path when enable_dense_bypass=True. The projected vectors are
-        # concatenated directly to the output of output_proj, bypassing all
-        # HyFormer blocks, so the classifier sees them at full strength.
+        # Dense bypass projections: an extra projection added ALONGSIDE the
+        # NS-token path when enable_dense_bypass=True. The projected vector is
+        # concatenated directly to the output of output_proj before the
+        # classifier, giving the dense features a full-strength signal path
+        # independent of the HyFormer block dilution.
         self.has_dense_bypass = enable_dense_bypass and self.has_user_dense
         if self.has_dense_bypass:
             self.user_dense_bypass_proj = nn.Sequential(
@@ -2299,14 +2303,16 @@ class PCVRHyFormer(nn.Module):
     def _build_ns_tokens(self, inputs: ModelInput) -> torch.Tensor:
         """Build NS token tensor from user/item int and dense features.
 
-        When ``enable_dense_bypass`` is True, user dense features are NOT
-        included as an NS token here; they are instead injected directly into
-        the classifier input via ``_apply_dense_bypass``.
+        When ``enable_dense_bypass`` is True, user dense features are included
+        here as a normal NS token (preserving rank_mixer T-divisibility) AND
+        also projected via ``_apply_dense_bypass`` directly to the classifier
+        input. The two paths are complementary: NS gives contextual integration
+        through HyFormer, bypass gives a full-strength undiluted signal.
         """
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
         ns_parts = [user_ns]
-        if self.has_user_dense and not self.enable_dense_bypass:
+        if self.has_user_dense:
             ns_parts.append(
                 F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
         ns_parts.append(item_ns)
