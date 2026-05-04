@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04（PDT · ICQ half-train 回流 → 推进 full train）· 结论：`icq-t13tf-halftrain-swiglu-vr005-bs128` E4 best AUC 0.868619，vs t13tf EXP-018 E4 0.868495，Δ+0.000124；训练曲线全程单调上升，无早停，预计 full train 累积增益更大。ICQ 再次验证"大参数分支 proxy 假负向"规律（与 hash500k 一致）。决策：推进 `icq-t13tf-full-swiglu-vr005-bs128`（10 epoch），evaluation 阈值 ≥ 0.870。详见 [`EXP-019`](../40-experiments/EXP-019-icq-halftrain-2026-05-04.md)。
+**最近一次审视**：2026-05-04 晚（PDT · 四路 full-train epoch 数据回流 + 归因修正）· 结论：① `t13tf-full` E4 best 0.868495（LB 0.844956）仍是当前主线;② `t13only-full` E7 best **0.866571**（hash500k 单独 Δ+0.000687，原 EXP-018 E4 快照判 −0.001057 错误，hash500k 其实是**正向**）;③ `t13-hash2m-timefeat-full` E9 best 0.868483，相对 hash500k 几乎持平（Δ−0.000012），"可控碰撞 = 隐式正则化"假说成立,2M 桶无增益;④ `t13tf-loss-full` E5 实际 best AUC 0.868932 被 LogLoss-select E8 ckpt（AUC 0.868571）覆盖,**静默丢失 AUC 最优 ckpt** → 铁律 "EarlyStopping 必须 AUC-select"。已入 team-memory 2 条铁律（hash vocab size / AUC-select）。距 SOTA 0.85060 仍差 ~0.006，下一优先级：`icq-t13tf-full` 等结果 + target-item 硬交互（见新 ADR 草稿）。evaluation 额度**严格 4 次/天**，当前仅 `icq-t13tf-full` 值得上榜验证（阈值 ≥ 0.870）。
 
 ---
 
@@ -77,7 +77,7 @@
 
 ---
 
-### T13 `[ ]` domain_c_seq_47 vocab 截断（高基数 item ID 处理）
+### T13 `[~]` domain_c_seq_47 vocab 截断（高基数 item ID 处理）
 
 **来源**：社区情报 Stochastic 陷阱三："domain_c_seq_47 的 item ID 量级与顶层 item_id 相同（0~278M）"；我们的 schema 确认 vocab=278677640。
 
@@ -87,14 +87,14 @@
 - **方案 A（截断）**：在 `dataset.py` 的 `_convert_batch` 里，对 vocab 超大的 item ID 特征，将值限制在 `[0, clip_threshold]`，超出归 UNK（0），这样可以保留高频 ID，同时 embedding table 大小可控
 - **方案 B（hash embedding）**：在模型侧对超大 vocab 的特征做 hash 取模，映射到固定大小的 embedding table（例如取模到 1M），损失少量 collision，但保留了所有 ID 的可学习表示
 
-方案 A 代码改动小，先实验；方案 B **已验证失效**（见下）。
-
 **分层漏斗**：
 1. 本地 smoke 验证 embedding table 大小和显存
-2. ✅（方案 B）`t13-hash500k-timefeat-proxy-swiglu-vr005-rg128x32-s1500` proxy 回流：AUC 0.837684，**低于** timefeat-only 对照 0.839285，Δ−0.001601 → 方案 B **负向，放弃**。详见 [`EXP-015`](../40-experiments/EXP-015-t13-hash-proxy-2026-05-04.md)
-3. 方案 A（vocab 截断）尚未实验，作为备选
+2. ⚠️ （方案 B）proxy 阶段：`t13-hash500k-timefeat-proxy-swiglu-vr005-rg128x32-s1500` AUC 0.837684 vs timefeat-only 0.839285，Δ−0.001601 → proxy 负向。详见 [`EXP-015`](../40-experiments/EXP-015-t13-hash-proxy-2026-05-04.md)
+3. ✅ **（方案 B · hash500k）full train 翻正**：`t13tf-full-swiglu-vr005-bs128` best local AUC 0.868495（E4），leaderboard 0.844956，vs no-P0 time baseline +0.000897 LB。`t13only-full` E7 best AUC 0.866571（hash500k 单独 Δ+0.000687 vs baseline 0.865884）。hash500k 与 timefeat **几乎是独立可加的**（初版 E4 快照误判"+0.001752 强交互"）。详见 [`EXP-018`](../40-experiments/EXP-018-t13tf-full-train-2026-05-04.md)
+4. ⚠️ **（方案 B · hash2m）full train 无显著优势**：`t13-hash2m-timefeat-full-swiglu-vr005-bs128` E9 best 0.868483，几乎持平 hash500k E4 的 0.868495（Δ−0.000012），proxy 显示 2M 低碰撞优势**未能在 full train 兑现**。假说：本项目数据规模下「可控碰撞 = 隐式正则化」，已入 team-memory 铁律
+5. 方案 A（vocab 截断）尚未实验，作为备选
 
-**当前优先级**：低。方案 B 已失败；方案 A 需代价估算后与其他候选竞争额度。不占用当前 full train 资源。
+**当前优先级**：低-中。方案 B hash500k 已作为 `t13tf-full` 一部分上线并贡献约 +0.0007 local AUC；不再继续加桶数（2M 已验证无增益）。后续可考虑组合：hash500k + **AUC-select** EarlyStopping + 更长训练（看 t13only 能否在 E10+ 继续上涨）。方案 A 暂不优先——要和 target-item 硬交互等更高潜力方向竞争 quota。
 
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
@@ -202,6 +202,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT 晚（四路 full-train epoch 回流 + EXP-018 归因修正）**：用户同步 `t13-hash2m-timefeat-full` E9 0.868483 / `t13only-full` E7 **0.866571** / `t13tf-loss-full` E5 实际 best 0.868932 被 E8 0.868571 覆盖 / `icq-t13tf-full` 刚起第一个 epoch。触发三项修正：① EXP-018 初版 E4 快照判 hash500k 单独 Δ−0.001057 有害 → E7 修正为 Δ+0.000687 正向,hash500k 与 timefeat **几乎独立可加**（原 "+0.001752 强交互" 是 E4 快照假象）;② 2M 桶 full train 相对 500k 几乎持平,"可控碰撞 = 隐式正则化" 假说成立;③ LogLoss-select EarlyStopping 静默丢弃 AUC 最优 ckpt（E5 0.868932 被 overwrite）。team-memory 补 2 条铁律（hash vocab size / AUC-select）,T13 升 `[~]` 并标记方案 B hash500k 已为 t13tf-full 正式组件。当前仅 `icq-t13tf-full` 值得等结果；若 ≥ 0.870 消耗一个 evaluation 配额。evaluation 额度修正：**严格 4 次/天，不可累积不可弹性**。
 
 - **2026-05-04 PDT（ICQ half-train 回流 → 推进 full train）**：`icq-t13tf-halftrain-swiglu-vr005-bs128` E4 best AUC 0.868619 / LogLoss 0.223356，vs t13tf（EXP-018 E4）0.868495，Δ+0.000124；训练曲线全程单调上升，无早停迹象。ICQ proxy（Δ−0.001417）→ half-train 正向，再次验证"大参数分支 proxy 假负向"规律。决策：推进 `icq-t13tf-full-swiglu-vr005-bs128`（10 epoch），evaluation 阈值 ≥ 0.870，不评估 half-train E4。详见 [`EXP-019`](../40-experiments/EXP-019-icq-halftrain-2026-05-04.md)。
 

@@ -60,3 +60,4 @@
 | [ADR-001](./ADR-001-time-aware-valid-split.md) | 验证集按 Row Group 时间序切分（vs 行级切分） | Accepted | 2026-04-30 | T8 |
 | [ADR-002](./ADR-002-slice-diagnostics.md) | valid 集 4 维切片诊断（默认开，无 CLI 开关） | Accepted | 2026-04-30 | T10 |
 | [ADR-003](./ADR-003-feature-engineering-plan.md) | 特征工程作为 P0 路径（4 类候选 + 防泄露 + 实施时序） | Accepted | 2026-05-01 | 待 T11~T14 |
+| [ADR-004](./ADR-004-target-item-seq-conditioning.md) | Target-Item 硬交互注入序列侧（seq-token 级 target-item conditioning） | **Draft** | 2026-05-04 | 待 T16 |

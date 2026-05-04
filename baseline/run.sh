@@ -3,6 +3,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ---- Active config: RankMixer NS tokenizer (no ns_groups.json required) ----
+# NOTE: 不要显式加 --early_stop_metric logloss（会静默丢弃 AUC 最高 ckpt）
+# 走 train.py 默认值 'auc'，比赛指标就是 AUC。详见 team-memory "铁律"。
 python3 -u "${SCRIPT_DIR}/train.py" \
     --ns_tokenizer_type rankmixer \
     --user_ns_tokens 5 \
