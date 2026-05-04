@@ -159,6 +159,24 @@ A 作为 **fallback**（如果 B 发现 dev 训出来和 holdout gap 稳定很�
 
 **S2 Local Sanity 暂缓**：demo 只有 1~2 个 valid RG，换 seed 也不会带来有意义的 dev/holdout 分布差异。直接跳 S3（full data fast proxy）。
 
+### S3 Platform Fast Proxy 实测（2026-05-04 晚 · EXP-021）
+
+**Job**：`t17-holdout-s3-t13tf-proxy-swiglu-vr005-ho005-rg128x32-s1500`（t13tf 纯基线 + `--holdout_ratio 0.05`，其他等同 EXP-015/018 proxy）
+
+| 指标 | dev（valid_loader） | holdout（holdout_loader） | gap = dev − holdout |
+|---|---|---|---|
+| AUC | 0.839843 | 0.839957 | **−0.000114** |
+| LogLoss | 0.242461 | 0.241341 | +0.001120 |
+
+**结果落在"近零 gap"档**（`−0.003 ~ 0.003`）：方案 B 在 proxy 尺度上**既未证实、也未证伪**。
+
+**三点机制解释**（完整分析见 [EXP-021](../40-experiments/EXP-021-t17-holdout-proxy-2026-05-04.md)）：
+1. proxy 只 1500 steps ≈ 1 epoch 的 1/14，模型未进入过拟合区，dev/holdout 本就不该分叉；EXP-018 那 0.021~0.030 gap 是 E5 后的过拟合产物
+2. 5% + 5% 的内部切分时间跨度相对 train→test 真实跳跃（至少周级）太小，信号被稀释
+3. dev/holdout 在 proxy 阶段的 LogLoss 方向一致（holdout 还略好），说明本阶段是同质分布区
+
+**结论**：ADR-005 维持 **Proposed**。判决证据必须来自 **S4 half-train**（2~3 epoch full-data），而不是 proxy。S4 搭车策略：下一个 half-train 默认加 `--holdout_ratio 0.05`，零 quota 成本收集判决数据。
+
 ---
 
 ## 决策权重（待评估后填 Accept）

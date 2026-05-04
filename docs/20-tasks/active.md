@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04 晚 4（PDT · T17 代码落地 · ADR-005 S0/S1 验证通过）· 结论：① **T16 proxy job** 已启动（`t16-target-add-a01-proxy-swiglu-vr005-rg128x32-s1500`），等待回流；② **T17 代码落地完成**：dataset.py `holdout_ratio` + trainer.py `holdout_loader` + `evaluate_holdout()` + train.py `--holdout_ratio` CLI，约 150 行；③ **S0/S1 本地验证全过**：`py_compile` exit 0 + demo smoke 三路切分正确 + backward-compat 零开销 + guard `ValueError` 路径准确；④ ADR-005 保持 Proposed 状态，等 S3 平台 proxy 回流后再 Accept；⑤ 下一步提交 `t17-holdout-s3-proxy` job（T16 回流后）；⑥ **今日 evaluation quota**：已用 1（t13tf-loss-full），剩 3。
+**最近一次审视**：2026-05-04 晚 5（PDT · T17 S3 proxy 回流 · T16 half-train 进行中）· 结论：① **T17 S3 proxy 完成**（job `t17-holdout-s3-t13tf-proxy...s1500`）：dev AUC 0.839843 / holdout AUC 0.839957 / **gap = −0.000114**（近零），落在"无法证实也无法证伪"档；② **gap≈0 机制明确**：proxy 仅 1500 steps ≈ E1 的 1/14，未进入过拟合区（EXP-018 那 0.023 gap 是 E5 后产物），5%+5% 切分时间跨度小于 train→test 真实跳跃；③ **ADR-005 维持 Proposed**，S4 是真正判决点；④ **S4 搭车策略**（零 training quota 成本）：下一个 half-train 默认加 `--holdout_ratio 0.05`，观察 E1~E3 每 epoch 四指标 `(dev/holdout × AUC/LogLoss)` 轨迹；⑤ **T16 half-train 进行中**（另一会话推荐并启动）；⑥ **今日 evaluation quota**：已用 1（t13tf-loss-full），剩 3；⑦ **training quota**：已用 2（T16 proxy + T17 S3 proxy），1 个被 T16 half-train 占用。
 
 ---
 
@@ -143,15 +143,18 @@
 - ✅ trainer.py LogLoss rebound guard 落地（与 T17 并行的短期止损措施）
 - ✅ **代码落地完成**（dataset.py `holdout_ratio` 切分 + trainer.py `holdout_loader` + `evaluate_holdout()` + train.py `--holdout_ratio` CLI · backward-compat 保持）
 - ✅ **S0/S1 本地验证通过**（`py_compile` + demo smoke 3 条路径：enabled 三路切分正确、backward-compat 零开销、guard 报错路径工作）
+- ✅ **S3 platform proxy 完成**（EXP-021）：dev=0.839843 / holdout=0.839957 / gap=−0.000114（近零），落在"无法证实也无法证伪"档；机制明确（proxy 尺度未进入过拟合区 + 切分时间跨度太小），ADR-005 维持 Proposed
 
-**下一步**：
-1. **S3 platform fast proxy**（等 T16 proxy 回流后提交）：在 full data 上跑 `--holdout_ratio 0.05 --limit_train_rgs 128 --limit_valid_rgs 32 --max_train_steps 1500`，对比 `dev AUC` vs `holdout AUC` 的 gap；目标 gap > 0.005 证明 holdout 能暴露 valid→LB 差异
-2. **S4 half train**（2~3 epoch 全数据）：看每 epoch 的 dev/holdout AUC & LogLoss 四指标轨迹，观察 holdout AUC 是否更贴近 LB 历史 0.844~0.845
-3. **S5 full train + LB**：若 S4 通过，用 1 次 evaluation quota 验证 holdout AUC ≈ LB AUC
+**下一步（S4 搭车策略，零 training quota 成本）**：
+1. **下一个 half-train（2~3 epoch 全数据）默认加 `--holdout_ratio 0.05`**，无论是 T16 seed-2 复现还是新实验，都零成本附带采集 S4 数据
+2. 观察 E1~E3 每 epoch 的 `(dev_auc, holdout_auc, dev_logloss, holdout_logloss)` 四指标轨迹：
+   - **如果**中后期出现 `dev_auc 继续涨 + holdout_auc 滞涨/下降` 或 dev LogLoss 提前 holdout 反弹 → Accept，方案 B 可作 LB 代理
+   - **如果** E1~E3 全程 gap < 0.003 → Reject 方案 B，切到方案 C（留时间空窗）
+3. S5：若 S4 Accept，用 1 次 evaluation quota 做 LB 校准
 
-**当前优先级**：高（与 T16 并行推进）。解决 gap 问题的 ROI 可能比任何单点模型改动更高——因为它**解锁了所有后续实验的决策信号可信度**。
+**当前优先级**：中（S4 搭车实现，等 T16 half-train 回流）。ADR-005 的判决权已从独立 job 转移到"下一次 half-train 附带"，节省 1 个 training quota。
 
-**何时 Accept ADR-005**：S3 回流数据证明 holdout AUC 对 LB 的预测能力强于 dev AUC 后。
+**何时 Accept ADR-005**：S4 half-train 数据显示 dev/holdout 在过拟合区分叉（gap > 0.005）且方向与 EXP-018 LB gap 一致后。
 
 ---
 
@@ -261,6 +264,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT 晚 5（T17 S3 proxy 回流 · ADR-005 暂缓判决 · S4 搭车策略）**：`t17-holdout-s3-t13tf-proxy` 跑完，dev AUC 0.839843 / holdout AUC 0.839957 / **gap = −0.000114**（近零）。按 S3 事先判据落在"无法证实也无法证伪"档。三点机制解释写入 EXP-021：① proxy 仅 1500 steps ≈ E1 的 1/14 未进过拟合区（EXP-018 的 0.023 gap 是 E5 后产物），dev/holdout 本就不该分叉；② 5%+5% 内部切分时间跨度远小于 train→test 真实跳跃（至少周级），信号稀释；③ proxy 阶段 dev/holdout LogLoss 方向一致说明同质分布区。**ADR-005 维持 Proposed**，判决权移到 S4。**S4 搭车策略**（节省 1 training quota）：下一个 half-train 默认加 `--holdout_ratio 0.05`，观察 E1~E3 四指标轨迹；若中后期出现 `dev AUC 继续涨 + holdout 滞涨` 或 dev LogLoss 提前反弹 → Accept；若 E1~E3 全程 gap<0.003 → Reject 方案 B 切方案 C。新增 EXP-021 完整记录 proxy 配置/结果/机制/S4 判据。
 
 - **2026-05-04 PDT 晚 4（T17 代码落地 · ADR-005 S0/S1 验证通过）**：按 ADR-005 方案 B 落地 dev+holdout 双 valid 框架。① `baseline/dataset.py` `get_pcvr_data` 新增 `holdout_ratio` 参数，time-split 下切分顺序改为 `[train][dev (valid_ratio)][holdout (holdout_ratio)]` 三路 disjoint；返回值从 3 元组扩展到 4 元组 `(train_loader, valid_loader, holdout_loader, train_dataset)`。② `baseline/trainer.py` `__init__` 加 `holdout_loader: Optional[DataLoader]` 参数；`evaluate()` 重构为 `_evaluate_on_loader(loader, split_tag, run_slice_diag)` 的薄壳，新增 `evaluate_holdout()` 方法在每次 validation 后被 `_record_validation_result` 调用；holdout 指标**只记日志 + 写进 `validation_history[i]['holdout_auc/logloss']`，不参与 best_model / EarlyStopping / LogLoss guard**。③ `baseline/train.py` 加 `--holdout_ratio` CLI（默认 0.0 保 backward-compat），unpack 新 4 元组并传 `holdout_loader` 给 trainer。④ Guard 设计：`holdout_ratio>0` 必须配 `valid_split_strategy='time'`（早期 ValueError），且与 `enable_row_time_cutoff` 互斥。⑤ **S0/S1 本地验证全过**：`py_compile` exit 0；demo smoke 实测 10 RG → 8 train/1 valid/2 holdout 正确分配，日志流出 `[ADR-005] Epoch 1 step 5 holdout AUC: 0.631605, LogLoss: 0.390470 (valid AUC: 0.576313, ... gap_auc=valid-holdout=-0.055293)`；backward-compat 路径（不传 flag）零 `[ADR-005]` 日志，与旧 job 100% 等价。ADR-005 保持 Proposed，等 S3 平台 proxy 回流后再 Accept。
 
