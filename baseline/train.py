@@ -301,6 +301,13 @@ def parse_args() -> argparse.Namespace:
                              'norm_ts is linearly scaled to [0,1] over the training split. '
                              '0 = disabled (default); 2~4 = moderate upweighting of '
                              'recent samples; useful for reducing train/test temporal gap.')
+    parser.add_argument('--enable_hour_only_features', action='store_true', default=False,
+                        help='Append hour-of-day sin/cos (2 dims) to user_dense. '
+                             'Captures diurnal periodicity WITHOUT day-of-week, which '
+                             'avoids overfitting to the weekday distribution of training '
+                             'data (train is dominated by a single weekday ~63%%). '
+                             'Use this instead of --enable_time_of_day_features when '
+                             'DOW features hurt leaderboard generalization.')
 
     # NS tokenizer variant.
     parser.add_argument('--ns_tokenizer_type', type=str, default='rankmixer',
@@ -422,6 +429,7 @@ def main() -> None:
         ),
         enable_time_of_day_features=args.enable_time_of_day_features,
         temporal_weight_alpha=args.temporal_weight_alpha,
+        enable_hour_only_features=args.enable_hour_only_features,
     )
 
     # ---- NS groups ----

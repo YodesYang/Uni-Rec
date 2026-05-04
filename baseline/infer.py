@@ -206,6 +206,7 @@ def main() -> None:
         history_cvr_available_lag_sec=int(cfg.get("history_cvr_available_lag_sec", 0)),
         history_cvr_prior_strength=float(cfg.get("history_cvr_prior_strength", 20.0)),
         enable_time_of_day_features=bool(cfg.get("enable_time_of_day_features", False)),
+        enable_hour_only_features=bool(cfg.get("enable_hour_only_features", False)),
     )
 
     loader_kwargs: Dict[str, Any] = {}

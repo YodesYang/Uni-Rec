@@ -139,6 +139,8 @@ SEQ_STATS_FEATURE_FID = 900002
 HISTORY_CVR_FEATURE_FID = 900003
 TIME_OF_DAY_FEATURE_FID = 900004  # impression hour/dow/weekend (5 dims)
 TIME_OF_DAY_FEATURE_DIM = 5       # hour_sin, hour_cos, dow_sin, dow_cos, is_weekend
+HOUR_ONLY_FEATURE_FID = 900005
+HOUR_ONLY_FEATURE_DIM = 2        # hour_sin, hour_cos only (no DOW/weekend)
 
 
 class HistoryCVRStore:
@@ -287,6 +289,7 @@ class PCVRParquetDataset(IterableDataset):
         temporal_weight_alpha: float = 0.0,
         temporal_weight_ts_min: Optional[int] = None,
         temporal_weight_ts_max: Optional[int] = None,
+        enable_hour_only_features: bool = False,
     ) -> None:
         """
         Args:
@@ -396,6 +399,7 @@ class PCVRParquetDataset(IterableDataset):
         self.temporal_weight_alpha = float(temporal_weight_alpha)
         self.temporal_weight_ts_min = temporal_weight_ts_min
         self.temporal_weight_ts_max = temporal_weight_ts_max
+        self.enable_hour_only_features = enable_hour_only_features
         if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
             raise ValueError(
                 "history_cvr_time_mode must be 'timestamp_cutoff' or "
@@ -547,6 +551,8 @@ class PCVRParquetDataset(IterableDataset):
             self.user_dense_schema.add(SEQ_STATS_FEATURE_FID, 2 * len(raw['seq']))
         if self.enable_time_of_day_features:
             self.user_dense_schema.add(TIME_OF_DAY_FEATURE_FID, TIME_OF_DAY_FEATURE_DIM)
+        if self.enable_hour_only_features:
+            self.user_dense_schema.add(HOUR_ONLY_FEATURE_FID, HOUR_ONLY_FEATURE_DIM)
         self._history_item_offsets: List[Tuple[int, int]] = []
         if self.enable_history_cvr_features:
             if self._history_store is None:
@@ -1077,6 +1083,20 @@ class PCVRParquetDataset(IterableDataset):
             dense_offset += TIME_OF_DAY_FEATURE_DIM
             result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
 
+        if self.enable_hour_only_features:
+            # Hour-of-day only (2 features): captures diurnal periodicity
+            # without day-of-week bias. DOW is excluded because training data
+            # is heavily skewed toward a single weekday (03-03, ~63%), which
+            # causes the model to overfit to that weekday's patterns and hurts
+            # generalization to the test set's temporal distribution.
+            ts_float = timestamps.astype(np.float64)
+            hours = ((ts_float // 3600) % 24).astype(np.float32)
+            ho = user_dense[:, dense_offset:dense_offset + HOUR_ONLY_FEATURE_DIM]
+            ho[:, 0] = np.sin(2.0 * np.pi * hours / 24.0)
+            ho[:, 1] = np.cos(2.0 * np.pi * hours / 24.0)
+            dense_offset += HOUR_ONLY_FEATURE_DIM
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
         # ---- Slice-diagnostic side-channel (training/valid only) ----
         # These underscore-prefixed fields are NOT read by trainer's
         # _make_model_input, so the training forward pass is unaffected.
@@ -1486,6 +1506,7 @@ def get_pcvr_data(
     dense_log1p_fids: frozenset[int] | None = None,
     enable_time_of_day_features: bool = False,
     temporal_weight_alpha: float = 0.0,
+    enable_hour_only_features: bool = False,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -1818,6 +1839,7 @@ def get_pcvr_data(
         temporal_weight_alpha=temporal_weight_alpha,
         temporal_weight_ts_min=int(train_ts_range[0]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
         temporal_weight_ts_max=int(train_ts_range[1]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
+        enable_hour_only_features=enable_hour_only_features,
     )
     use_cuda = torch.cuda.is_available()
     _train_kw = {}
@@ -1851,6 +1873,7 @@ def get_pcvr_data(
         history_cvr_prior_strength=history_cvr_prior_strength,
         dense_log1p_fids=dense_log1p_fids,
         enable_time_of_day_features=enable_time_of_day_features,
+        enable_hour_only_features=enable_hour_only_features,
     )
     valid_loader = DataLoader(
         valid_dataset, batch_size=None,
