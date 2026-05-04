@@ -1507,8 +1507,9 @@ def get_pcvr_data(
     enable_time_of_day_features: bool = False,
     temporal_weight_alpha: float = 0.0,
     enable_hour_only_features: bool = False,
+    holdout_ratio: float = 0.0,
     **kwargs: Any,
-) -> Tuple[DataLoader, DataLoader, PCVRParquetDataset]:
+) -> Tuple[DataLoader, DataLoader, Optional[DataLoader], PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
 
     The validation split is taken as the last ``valid_ratio`` fraction of Row
@@ -1531,11 +1532,24 @@ def get_pcvr_data(
     timestamp becomes a hard row-level cut: train keeps ``timestamp < cutoff``
     and valid keeps ``timestamp >= cutoff``.
 
+    When ``holdout_ratio > 0`` (ADR-005, requires ``valid_split_strategy=
+    'time'``), a *third* disjoint split is carved from the latest Row Groups
+    as a secondary validation set. The time-axis layout becomes
+    ``[ train | dev (valid_ratio) | holdout (holdout_ratio) ]`` with holdout
+    being the closest slice to the future-dated test set. Holdout never
+    contributes to ``train_loader`` or the primary ``valid_loader``; the
+    caller can pass the returned ``holdout_loader`` to the trainer to obtain
+    per-epoch holdout AUC/LogLoss as an independent generalization signal.
+    ``enable_row_time_cutoff`` is currently **not** supported in combination
+    with ``holdout_ratio > 0`` (would require extending ``_row_ts_cutoff`` to
+    emit two cut points; out of scope for this iteration).
+
     Returns:
-        A tuple ``(train_loader, valid_loader, train_dataset)``. The third
-        element is returned so the caller can access the feature schema
-        (``user_int_schema``, ``item_int_schema``, ...) needed to construct
-        the model.
+        A tuple ``(train_loader, valid_loader, holdout_loader, train_dataset)``.
+        ``holdout_loader`` is ``None`` unless ``holdout_ratio > 0``. The
+        fourth element is returned so the caller can access the feature
+        schema (``user_int_schema``, ``item_int_schema``, ...) needed to
+        construct the model.
     """
     random.seed(seed)
 
@@ -1543,6 +1557,23 @@ def get_pcvr_data(
         raise ValueError("limit_train_rgs must be >= 0")
     if limit_valid_rgs < 0:
         raise ValueError("limit_valid_rgs must be >= 0")
+    if holdout_ratio < 0.0:
+        raise ValueError("holdout_ratio must be >= 0")
+    if holdout_ratio > 0.0:
+        if valid_split_strategy != 'time':
+            raise ValueError(
+                "holdout_ratio > 0 requires valid_split_strategy='time' "
+                "(ADR-005): a future-most holdout only makes sense on a "
+                "time-sorted RG view.")
+        if enable_row_time_cutoff:
+            raise ValueError(
+                "holdout_ratio > 0 is not yet compatible with "
+                "enable_row_time_cutoff (would need a second row-level cut "
+                "point). Disable one of them.")
+        if valid_ratio + holdout_ratio >= 1.0:
+            raise ValueError(
+                f"valid_ratio ({valid_ratio}) + holdout_ratio "
+                f"({holdout_ratio}) must be < 1.0 to leave room for train.")
     if history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
         raise ValueError(
             "history_cvr_time_mode must be 'timestamp_cutoff' or 'available'")
@@ -1598,8 +1629,24 @@ def get_pcvr_data(
             f"[T8] valid_split_strategy=time: sorted {total_rgs} RGs "
             f"by max(timestamp) ASC")
 
-    base_n_valid_rgs = max(1, int(total_rgs * valid_ratio))
-    base_n_train_rgs = total_rgs - base_n_valid_rgs
+    # ADR-005 holdout split: carve the latest RGs as a third disjoint set
+    # *before* computing the primary train/valid split. Layout on the time
+    # axis (when valid_split_strategy='time' + holdout_ratio>0):
+    #   rg_info = [...  train  ...][ dev (valid_ratio) ][ holdout ]
+    # Holdout is the closest slice to the future-dated test set and is meant
+    # to serve as a covariate-shift-aware generalization probe (EXP-018
+    # showed local dev AUC is not a reliable LB proxy).
+    n_holdout_rgs = 0
+    if holdout_ratio > 0.0:
+        n_holdout_rgs = max(1, int(total_rgs * holdout_ratio))
+        if n_holdout_rgs >= total_rgs:
+            raise ValueError(
+                f"holdout_ratio={holdout_ratio} would consume all "
+                f"{total_rgs} row groups; reduce it.")
+
+    post_holdout_total = total_rgs - n_holdout_rgs
+    base_n_valid_rgs = max(1, int(post_holdout_total * valid_ratio))
+    base_n_train_rgs = post_holdout_total - base_n_valid_rgs
 
     # train_ratio: use only the first N% of the training Row Groups.
     if train_ratio < 1.0:
@@ -1607,19 +1654,25 @@ def get_pcvr_data(
         logging.info(
             f"train_ratio={train_ratio}: using {base_n_train_rgs} "
             "train Row Groups")
-    base_n_valid_rgs = total_rgs - base_n_train_rgs
+    base_n_valid_rgs = post_holdout_total - base_n_train_rgs
 
     train_start_idx = 0
     train_end_idx = base_n_train_rgs
     valid_start_idx = base_n_train_rgs
-    valid_end_idx = total_rgs
+    valid_end_idx = post_holdout_total
+    holdout_start_idx = post_holdout_total
+    holdout_end_idx = total_rgs
 
     split_train_rows = sum(r[2] for r in rg_info[train_start_idx:train_end_idx])
     split_valid_rows = sum(r[2] for r in rg_info[valid_start_idx:valid_end_idx])
+    split_holdout_rows = sum(
+        r[2] for r in rg_info[holdout_start_idx:holdout_end_idx])
 
     logging.info(f"Row Group split ({valid_split_strategy}): "
                  f"{base_n_train_rgs} train ({split_train_rows} rows), "
-                 f"{base_n_valid_rgs} valid ({split_valid_rows} rows)")
+                 f"{base_n_valid_rgs} valid ({split_valid_rows} rows)"
+                 + (f", {n_holdout_rgs} holdout "
+                    f"({split_holdout_rows} rows)" if n_holdout_rgs else ""))
 
     if limit_train_rgs > 0:
         available = train_end_idx - train_start_idx
@@ -1648,6 +1701,7 @@ def get_pcvr_data(
 
     train_rgs = rg_info[train_start_idx:train_end_idx]
     valid_rgs = rg_info[valid_start_idx:valid_end_idx]
+    holdout_rgs = rg_info[holdout_start_idx:holdout_end_idx]
     if not train_rgs:
         raise ValueError(
             "Train Row Group split is empty; adjust valid_ratio, "
@@ -1656,8 +1710,12 @@ def get_pcvr_data(
         raise ValueError(
             "Validation Row Group split is empty; adjust valid_ratio or "
             "limit_valid_rgs")
+    if holdout_ratio > 0.0 and not holdout_rgs:
+        raise ValueError(
+            "Holdout Row Group split is empty; adjust holdout_ratio")
     train_rows = sum(r[2] for r in train_rgs)
     valid_rows = sum(r[2] for r in valid_rgs)
+    holdout_rows = sum(r[2] for r in holdout_rgs)
 
     if limit_train_rgs > 0 or limit_valid_rgs > 0:
         logging.info(
@@ -1710,6 +1768,37 @@ def get_pcvr_data(
                 "train; consider --valid_split_strategy time for a "
                 "time-aware split (TAAC 2026 test set is strictly later "
                 "than training).")
+
+    # ADR-005: log holdout timestamp range + disjointness vs dev/train.
+    if holdout_ratio > 0.0:
+        for i in range(holdout_start_idx, holdout_end_idx):
+            if rg_ts_ranges[i] is None:
+                f, rg_idx, _ = rg_info[i]
+                rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
+        holdout_ts = [
+            r for r in rg_ts_ranges[holdout_start_idx:holdout_end_idx]
+            if r is not None
+        ]
+        if holdout_ts and valid_ts:
+            holdout_min = min(r[0] for r in holdout_ts)
+            holdout_max = max(r[1] for r in holdout_ts)
+            v_max = max(r[1] for r in valid_ts)
+            # dev ends at valid_max; holdout starts at holdout_min. Ideally
+            # holdout_min >= valid_max (strictly later). Overlap > 0 means
+            # the two sets share some RGs' ts ranges and the signal gets
+            # contaminated.
+            dev_holdout_overlap = v_max - holdout_min
+            logging.info(
+                f"[ADR-005] holdout ts: [{holdout_min}, {holdout_max}]  "
+                f"dev_end={v_max}  "
+                f"dev_holdout_overlap_sec (<=0 is clean): "
+                f"{dev_holdout_overlap}")
+            if dev_holdout_overlap > 0:
+                logging.warning(
+                    "[ADR-005] dev/holdout timestamp ranges overlap; "
+                    "holdout signal may be contaminated. This should not "
+                    "happen under valid_split_strategy='time'; check RG "
+                    "sorting.")
 
     train_timestamp_min = None
     train_timestamp_max = None
@@ -1880,6 +1969,39 @@ def get_pcvr_data(
         num_workers=0, pin_memory=use_cuda,
     )
 
+    # ADR-005: holdout loader. Disjoint from train/valid; read-only, never
+    # shuffled, never drives any weight update. Mirrors valid_dataset
+    # construction (same feature flags) so metrics are directly comparable.
+    holdout_loader: Optional[DataLoader] = None
+    if holdout_ratio > 0.0 and holdout_rgs:
+        holdout_dataset = PCVRParquetDataset(
+            parquet_path=data_dir,
+            schema_path=schema_path,
+            batch_size=batch_size,
+            seq_max_lens=seq_max_lens,
+            shuffle=False,
+            buffer_batches=0,
+            row_groups=holdout_rgs,
+            clip_vocab=clip_vocab,
+            timestamp_min=None,
+            timestamp_max=None,
+            enable_count_features=enable_count_features,
+            enable_seq_stats_features=enable_seq_stats_features,
+            enable_history_cvr_features=enable_history_cvr_features,
+            history_cvr_cache_path=history_cvr_cache_path,
+            history_cvr_time_mode=history_cvr_time_mode,
+            history_cvr_cutoff_sec=history_cvr_cutoff_sec,
+            history_cvr_available_lag_sec=history_cvr_available_lag_sec,
+            history_cvr_prior_strength=history_cvr_prior_strength,
+            dense_log1p_fids=dense_log1p_fids,
+            enable_time_of_day_features=enable_time_of_day_features,
+            enable_hour_only_features=enable_hour_only_features,
+        )
+        holdout_loader = DataLoader(
+            holdout_dataset, batch_size=None,
+            num_workers=0, pin_memory=use_cuda,
+        )
+
     if enable_row_time_cutoff:
         logging.info(
             f"Parquet train: {train_rows} pre-filter rows "
@@ -1889,7 +2011,8 @@ def get_pcvr_data(
             f"batch_size={batch_size}, buffer_batches={buffer_batches}")
     else:
         logging.info(
-            f"Parquet train: {train_rows} rows, valid: {valid_rows} rows, "
-            f"batch_size={batch_size}, buffer_batches={buffer_batches}")
+            f"Parquet train: {train_rows} rows, valid: {valid_rows} rows"
+            + (f", holdout: {holdout_rows} rows" if holdout_ratio > 0 else "")
+            + f", batch_size={batch_size}, buffer_batches={buffer_batches}")
 
-    return train_loader, valid_loader, train_dataset
+    return train_loader, valid_loader, holdout_loader, train_dataset

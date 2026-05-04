@@ -111,6 +111,15 @@ def parse_args() -> argparse.Namespace:
                              "'time' sorts RGs by max(timestamp) ASC so the "
                              'validation tail is strictly later than train, '
                              'matching the TAAC 2026 test-set time gap.')
+    parser.add_argument('--holdout_ratio', type=float, default=0.0,
+                        help='ADR-005 dual-valid switch: when > 0, carve the '
+                             'latest holdout_ratio fraction of Row Groups as '
+                             'a third disjoint split used purely as a '
+                             'generalization probe (holdout AUC/LogLoss is '
+                             'logged every epoch but never drives weight '
+                             'updates or checkpoint selection). Requires '
+                             "valid_split_strategy='time'. 0.0 (default) = "
+                             'disabled, behavior-preserving. Typical: 0.05.')
     parser.add_argument('--eval_every_n_steps', type=int, default=0,
                         help='Run validation every N steps '
                              '(0 = only at the end of each epoch)')
@@ -433,7 +442,7 @@ def main() -> None:
         logging.info(f"Seq max_lens override: {seq_max_lens}")
 
     logging.info("Using Parquet data format (IterableDataset)")
-    train_loader, valid_loader, pcvr_dataset = get_pcvr_data(
+    train_loader, valid_loader, holdout_loader, pcvr_dataset = get_pcvr_data(
         data_dir=args.data_dir,
         schema_path=schema_path,
         batch_size=args.batch_size,
@@ -466,6 +475,7 @@ def main() -> None:
         enable_time_of_day_features=args.enable_time_of_day_features,
         temporal_weight_alpha=args.temporal_weight_alpha,
         enable_hour_only_features=args.enable_hour_only_features,
+        holdout_ratio=args.holdout_ratio,
     )
 
     # ---- NS groups ----
@@ -583,6 +593,7 @@ def main() -> None:
         train_config=vars(args),
         logloss_rebound_patience=args.logloss_rebound_patience,
         logloss_rebound_delta=args.logloss_rebound_delta,
+        holdout_loader=holdout_loader,
     )
 
     trainer.train()

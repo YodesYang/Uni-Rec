@@ -65,10 +65,17 @@ class PCVRHyFormerRankingTrainer:
         train_config: Optional[Dict[str, Any]] = None,
         logloss_rebound_patience: int = 0,
         logloss_rebound_delta: float = 0.0,
+        holdout_loader: Optional[DataLoader] = None,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
         self.valid_loader: DataLoader = valid_loader
+        # ADR-005 holdout loader. Evaluated end-of-epoch for a covariate-shift
+        # aware generalization probe. Never drives best_model selection or
+        # EarlyStopping counters. `None` = disabled (back-compat).
+        self.holdout_loader: Optional[DataLoader] = holdout_loader
+        self.last_val_holdout_auc: Optional[float] = None
+        self.last_val_holdout_logloss: Optional[float] = None
         self.writer = writer
         # schema_path is copied alongside every checkpoint so that infer.py can
         # rebuild the exact same feature schema the model was trained with.
@@ -164,6 +171,11 @@ class PCVRHyFormerRankingTrainer:
                 f"regardless of AUC trend. best_model is still AUC-selected.")
         else:
             logging.info("LogLoss rebound guard DISABLED (patience<=0)")
+        if self.holdout_loader is not None:
+            logging.info(
+                "[ADR-005] holdout_loader attached: holdout AUC/LogLoss "
+                "will be logged every epoch. holdout never drives best_model "
+                "selection, EarlyStopping, or LogLoss rebound guard.")
 
     def _record_validation_result(
         self,
@@ -174,6 +186,31 @@ class PCVRHyFormerRankingTrainer:
         previous_best: Optional[float],
     ) -> None:
         """Track compact validation history for end-of-run summaries."""
+        # ADR-005: evaluate holdout immediately after the primary valid so the
+        # two metrics share the same training state. holdout is purely a
+        # read-only probe: it does NOT influence best_model selection,
+        # EarlyStopping, or the LogLoss rebound guard.
+        holdout_auc: Optional[float] = None
+        holdout_logloss: Optional[float] = None
+        if self.holdout_loader is not None:
+            try:
+                result = self.evaluate_holdout()
+                if result is not None:
+                    holdout_auc, holdout_logloss = result
+                    self.last_val_holdout_auc = float(holdout_auc)
+                    self.last_val_holdout_logloss = float(holdout_logloss)
+                    logging.info(
+                        f"[ADR-005] Epoch {epoch} step {total_step} "
+                        f"holdout AUC: {holdout_auc:.6f}, "
+                        f"LogLoss: {holdout_logloss:.6f} "
+                        f"(valid AUC: {val_auc:.6f}, "
+                        f"LogLoss: {val_logloss:.6f}; "
+                        f"gap_auc=valid-holdout="
+                        f"{val_auc - holdout_auc:+.6f})")
+            except Exception as e:
+                # Never let holdout eval crash training.
+                logging.warning(f"[ADR-005] holdout evaluation failed: {e}")
+
         is_new_best = (
             self.early_stopping.best_score is not None
             and (previous_best is None
@@ -186,6 +223,9 @@ class PCVRHyFormerRankingTrainer:
             "val_logloss": float(val_logloss),
             "is_best": bool(is_new_best),
         }
+        if holdout_auc is not None and holdout_logloss is not None:
+            row["holdout_auc"] = float(holdout_auc)
+            row["holdout_logloss"] = float(holdout_logloss)
         self.validation_history.append(row)
         self.last_epoch = int(epoch)
         self.last_global_step = int(total_step)
@@ -821,12 +861,39 @@ class PCVRHyFormerRankingTrainer:
         NaN predictions (which can arise from exploding gradients) are filtered
         out before computing both metrics.
         """
-        print("Start Evaluation (PCVRHyFormer) - validation")
-        self.model.eval()
-        if not epoch:
-            epoch = -1
+        return self._evaluate_on_loader(
+            loader=self.valid_loader,
+            split_tag='validation',
+            run_slice_diag=True,
+        )
 
-        pbar = tqdm(enumerate(self.valid_loader), total=len(self.valid_loader))
+    def evaluate_holdout(self) -> Optional[Tuple[float, float]]:
+        """ADR-005: evaluate the detached holdout split if attached.
+
+        Runs the same forward/NaN-filtering pipeline as ``evaluate`` but on
+        ``self.holdout_loader``. Returns ``None`` when holdout is not
+        configured, so callers can unconditionally call this at epoch end.
+        Slice diagnostics are skipped to keep logs focused on the primary
+        dev signal.
+        """
+        if self.holdout_loader is None:
+            return None
+        return self._evaluate_on_loader(
+            loader=self.holdout_loader,
+            split_tag='holdout',
+            run_slice_diag=False,
+        )
+
+    def _evaluate_on_loader(
+        self,
+        loader: DataLoader,
+        split_tag: str,
+        run_slice_diag: bool,
+    ) -> Tuple[float, float]:
+        print(f"Start Evaluation (PCVRHyFormer) - {split_tag}")
+        self.model.eval()
+
+        pbar = tqdm(enumerate(loader), total=len(loader))
 
         all_logits_list = []
         all_labels_list = []
@@ -848,15 +915,15 @@ class PCVRHyFormerRankingTrainer:
         all_logits = torch.cat(all_logits_list, dim=0)
         all_labels = torch.cat(all_labels_list, dim=0).long()
 
-        # Binary AUC via sklearn.
         probs = torch.sigmoid(all_logits).numpy()
         labels_np = all_labels.numpy()
 
-        # Filter NaN predictions (may appear if gradients explode).
         nan_mask = np.isnan(probs)
         if nan_mask.any():
             n_nan = int(nan_mask.sum())
-            logging.warning(f"[Evaluate] {n_nan}/{len(probs)} predictions are NaN, filtering them out")
+            logging.warning(
+                f"[Evaluate/{split_tag}] {n_nan}/{len(probs)} predictions "
+                f"are NaN, filtering them out")
             valid_mask = ~nan_mask
             probs = probs[valid_mask]
             labels_np = labels_np[valid_mask]
@@ -866,21 +933,24 @@ class PCVRHyFormerRankingTrainer:
         else:
             auc = float(roc_auc_score(labels_np, probs))
 
-        # Binary logloss (same NaN filtering).
         valid_logits = all_logits[~torch.isnan(all_logits)]
         valid_labels = all_labels[~torch.isnan(all_logits)]
         if len(valid_logits) > 0:
-            logloss = F.binary_cross_entropy_with_logits(valid_logits, valid_labels.float()).item()
+            logloss = F.binary_cross_entropy_with_logits(
+                valid_logits, valid_labels.float()).item()
         else:
             logloss = float('inf')
 
-        # Slice diagnostics (best-effort; never blocks the main metric).
-        if any(len(v) > 0 for v in all_diag.values()):
+        if run_slice_diag and any(len(v) > 0 for v in all_diag.values()):
             try:
-                diag_concat = {k: np.concatenate(v) for k, v in all_diag.items() if len(v) > 0}
+                diag_concat = {
+                    k: np.concatenate(v)
+                    for k, v in all_diag.items() if len(v) > 0
+                }
                 if nan_mask.any():
                     keep = ~nan_mask
-                    diag_concat = {k: arr[keep] for k, arr in diag_concat.items()}
+                    diag_concat = {
+                        k: arr[keep] for k, arr in diag_concat.items()}
                 self._slice_diagnose(probs, labels_np, diag_concat)
             except Exception as e:
                 logging.warning(f"[diag] slice diagnose failed: {e}")

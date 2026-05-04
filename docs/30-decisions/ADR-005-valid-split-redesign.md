@@ -135,6 +135,30 @@ A 作为 **fallback**（如果 B 发现 dev 训出来和 holdout gap 稳定很�
 5. **S4 Half Train**（2~3 epoch 全数据）：观察每个 epoch 的 `dev AUC / holdout AUC / dev LogLoss / holdout LogLoss` 四个指标，看 holdout AUC 是否更接近 LB 历史分数（~0.844）
 6. **S5 Full Train + LB**：若 S4 通过，用 1 次 evaluation quota 提交，验证 holdout AUC ≈ LB AUC（理想情况下差距 < 0.005）
 
+### S0 / S1 实测结果（2026-05-04 晚）
+
+**S0 Static** ✅
+- `python3 -m py_compile baseline/{dataset,trainer,train,infer}.py` → exit 0
+- `ReadLints` 仅报 basedpyright 环境 import warning（与改动无关）
+
+**S1 Local Smoke** ✅（`./data/demo` · 10 RG · `--valid_ratio 0.2 --holdout_ratio 0.2`）
+
+关键验证点逐项命中：
+
+| 验证点 | 期望 | 实测日志 |
+|---|---|---|
+| 三路切分正确 | time-sorted 下 `[train][dev][holdout]` 三路 disjoint | `Row Group split (time): 8 train (800 rows), 1 valid (100 rows), 2 holdout (1100 rows)`（10 RG 大小不对称，数学分配正确） |
+| holdout_loader 被 attach | 启动日志提示 | `[ADR-005] holdout_loader attached: holdout AUC/LogLoss will be logged every epoch. holdout never drives best_model selection, EarlyStopping, or LogLoss rebound guard.` |
+| 训练 forward 不触及 holdout | train_loader 仅用 train RG | train `PCVRParquetDataset: 800 rows ... shuffle=True` vs holdout `PCVRParquetDataset: 1100 rows ... shuffle=False`（只在 eval 流程用） |
+| epoch 末 holdout eval 独立跑 | `Start Evaluation - holdout` + 同步指标 | `[ADR-005] Epoch 1 step 5 holdout AUC: 0.631605, LogLoss: 0.390470 (valid AUC: 0.576313, LogLoss: 0.348653; gap_auc=valid-holdout=-0.055293)` |
+| best_model 仍按 valid AUC 选 | `best_val_AUC` 是 valid 的值 | `training_summary.json::best_val_auc = 0.576313`（不是 holdout 的 0.631605） |
+| backward-compat：不传 `--holdout_ratio` 等价于旧行为 | 无 ADR-005 日志、2 路切分 | `Row Group split (time): 9 train (900 rows), 2 valid (1100 rows)` · 全程无 `[ADR-005]` 日志 |
+| Guard：`holdout_ratio>0` 必须配 `valid_split_strategy='time'` | 早期 ValueError | `ValueError: holdout_ratio > 0 requires valid_split_strategy='time' (ADR-005)` |
+
+**demo 数据重叠告警是已知现象**：日志 `[ADR-005] dev/holdout timestamp ranges overlap ... holdout signal may be contaminated` —— demo 只有 10 RG 且 timestamp 高度重叠，属于已知 demo 特性；真实数据 1000+ RG 时 time-sorted 的相邻 RG 时间边界清晰分离，告警不会触发。已在日志里保留这个 warning 以便 full data 上做 sanity check。
+
+**S2 Local Sanity 暂缓**：demo 只有 1~2 个 valid RG，换 seed 也不会带来有意义的 dev/holdout 分布差异。直接跳 S3（full data fast proxy）。
+
 ---
 
 ## 决策权重（待评估后填 Accept）
