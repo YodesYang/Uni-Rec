@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04 晚 2（PDT · T16 代码落地 + 三路 full-train 收口）· 结论：① `t13tf-loss-full` E9 best local AUC 0.868989（目前所有 full-train 最高）已决定消耗 1 个 evaluation slot（LogLoss-select 副产物碰巧 E9 既 LogLoss 最低又 AUC 高,可用；Publish 前走三步检查清单）；② `t13-hash2m-timefeat-full` + `t13only-full` 已停止（信息增益耗尽,释放 training quota）；③ `icq-t13tf-full` 继续保留（今晚无法完成,明日回流）；④ **T16（ADR-004）方案 A Additive 已落地**: TargetItemSeqInjector 类 + CLI 参数 + train_config 落盘 + infer 兼容,~120 行代码,S1 本地 smoke 全部通过（10 step train + 1000 predictions + 可复现性验证 + 注入生效验证）,明日启动平台 fast proxy 验证。⑤ 评估配额修正: **24h 滚动窗口 4 次,PDT 21:00 重置,PDT 24:00 榜单刷新**（已入 team-memory）。
+**最近一次审视**：2026-05-04 晚 3（PDT · t13tf-loss-full LB 评估 + 双指标 ES 落地 + ADR-005 起草）· 结论：① **`t13tf-loss-full` E9 LB = 0.838707，低于 t13tf-full E4 的 0.844956（Δ−0.006249）**，valid AUC +0.000494 而 LB 掉 0.006，强证据过拟合；epoch 表分析显示 E4→E5 是 `AUC 仍涨但 LogLoss 反弹` 的拐点。② **trainer.py 已落地 LogLoss rebound guard**（默认 `--logloss_rebound_patience 1`）：AUC 仍作 best_model 选择（保持比赛指标对齐），LogLoss 反弹即停；本地 smoke 双路径（enabled/disabled）验证通过。③ **EXP-018 已回填** 全 epoch 表 + 7 次提交 gap 扫描（0.021~0.030）。④ **team-memory 更新**：两条新铁律（双指标 ES + valid→LB gap 系统性，决策以 `LB 能否 > 0.844956` 为准，不以 local AUC 为准）。⑤ **ADR-005 Proposed** — Valid Split Redesign：gap 根源在 valid 紧邻 train 而 test 跳跃，候选方案 B (dev+holdout) 优先探索。⑥ **T16 (ADR-004) 并行推进不变**，但 full train 默认已带双指标 ES 保护，过训练风险大降。⑦ **T17 新增**（ADR-005 落地）。⑧ **今日 evaluation quota**：已用 1（t13tf-loss-full），剩 3。
 
 ---
 
@@ -119,8 +119,37 @@
 1. 明日启动平台 fast proxy job: `t16-target-add-a01-proxy-swiglu-vr005-rg128x32-s1500`（参数 `--target_item_seq_injection additive --target_inject_alpha_init 0.1`）
 2. 保留 `icq-t13tf-full` 回流数据作为 "ICQ only" 基线对照
 3. 若 S2 proxy 通过, S3 half-train 作 `t16-target-add-a01-halftrain-...`
+4. **S4 full train 默认带双指标 ES 保护**（2026-05-04 落地）：`--logloss_rebound_patience 1`（默认值），一旦 val_logloss 反弹即停；best_model 仍按 AUC 选择。这大幅降低 "训过头 → LB 反而掉" 的风险（参考 t13tf-loss-full E4→E9 教训）。
 
-**当前优先级**：**最高**。距 SOTA 还差约 0.006 LB, ADR-003 的 P0-A/B/C 全部失效后, T16 是破局可能性最大的剩余单点方向。evaluation 额度策略: 先不占用任何 evaluation slot, 等 full train 回流后再决定。
+**当前优先级**：**最高**。距 SOTA 还差约 0.006 LB, ADR-003 的 P0-A/B/C 全部失效后, T16 是破局可能性最大的剩余单点方向。evaluation 额度策略: 先不占用任何 evaluation slot, 等 full train 回流后再决定。**注意**：即便 T16 full train local AUC 显著领先, 若 local-LB gap 仍保持在 0.023~0.030（ADR-005 未落地前的现状）, 也只有当 **local AUC ≥ 0.870** 时才可能超越 t13tf-full 的 LB 0.844956 ——**局 = LB 而非 local AUC**。
+
+---
+
+### T17 `[~]` Valid Split Strategy Redesign（ADR-005 Proposed）
+
+**决策推理外移至 [ADR-005](../30-decisions/ADR-005-valid-split-redesign.md)**（Status: Proposed）。本节只记任务状态。
+
+**触发**：2026-05-04 晚 `t13tf-loss-full` LB = 0.838707 事件 + 7 次历史提交 gap 扫描（0.021~0.030 稳定），gap 是系统性的 valid 定义偏差。
+
+**核心假说**：当前 time-split 尾部 valid 与训练尾部紧邻 → 模型在 valid 上"近未来延续"很成功但在 test"远未来外推"失败。需要 holdout split 提供 LB 代理信号。
+
+**候选方案**（详见 ADR-005 §Decision）：
+- **方案 B（优先）**：dev + holdout 双 valid，holdout 训练期间完全不访问
+- **方案 C（次选）**：train/valid 之间留时间空窗，模拟 test-时间-gap
+- 方案 A/D 作为 fallback / 不推荐
+
+**已完成**：
+- ✅ ADR-005 Draft → Proposed
+- ✅ trainer.py LogLoss rebound guard 落地（与 T17 并行的短期止损措施）
+
+**下一步**：
+1. 决定 B or C（本周内）：先看 C 方案下 Δ_gap 估计是否可从官方答复或 schema 反推；如不行默认走 B
+2. 代码落地约 80~120 行（dataset.py 新增 `holdout_ratio`，trainer 新增 `holdout_loader` + `evaluate_holdout()`）
+3. S0 静态检查 → S1 demo smoke → S3 fast proxy 对比 dev AUC vs holdout AUC → S4 half train → S5 full train + LB 校准
+
+**当前优先级**：高（与 T16 并行推进）。解决 gap 问题的 ROI 可能比任何单点模型改动更高——因为它**解锁了所有后续实验的决策信号可信度**。
+
+**何时 Accept ADR-005**：S3 回流数据证明 holdout AUC 对 LB 的预测能力强于 dev AUC 后。
 
 ---
 
@@ -230,6 +259,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT 晚 3（t13tf-loss-full LB 回流 + 双指标 ES 落地 + ADR-005 起草）**：`t13tf-loss-full-swiglu-vr005-bs128_eval_1777927874214` LB AUC = **0.838707**，vs `t13tf-full E4` LB = 0.844956，Δ−0.006249，valid AUC 反而 +0.000494。epoch 表诊断（E1~E8 完整）显示 E4→E5 是过拟合清晰拐点：AUC +0.000583 但 LogLoss +0.000608 反弹，之后多训 4 epoch **local AUC 仅再涨 0.000640 但 LB 掉 0.006249（10× 负向杠杆）**。三项响应动作：① **trainer.py 落地 LogLoss rebound guard**（`--logloss_rebound_patience` 默认 1 / `--logloss_rebound_delta` 默认 0.0）：AUC 仍作 best_model 选择（比赛指标对齐），val_logloss 反弹即停；本地 smoke 双路径（enabled 触发 + disabled 保留老行为）验证通过，guard 日志 `[logloss-guard]` + stop_reason `logloss_rebound_epoch_N` 准确。② **EXP-018 回填** 全 epoch 表 + 7 次历史 gap 扫描（0.021~0.030），LB 实测 0.838707 并重写"教训"段。③ **team-memory** 两条新铁律：EarlyStopping 多指标联合（旧的"按 AUC 选"单指标规则被合并推翻）+ valid→LB gap 系统性（决策红线改以 "能否 > LB 0.844956" 为准,不以 local AUC 为准）。④ **ADR-005 Proposed**（Valid Split Strategy Redesign）：候选方案 B (dev+holdout) 优先，需 S3 proxy 验证 holdout AUC 对 LB 的预测能力。⑤ **T17 新增**（ADR-005 落地任务），与 T16 并行推进。⑥ T16 S4 full train 默认带双指标 ES 保护，过训练风险降低。今日 evaluation quota 剩 3。
 
 - **2026-05-04 PDT 晚 2（T16 代码落地 + 平台 job 收口 + 评估额度修正）**：① T16（ADR-004 方案 A Additive）代码落地: `baseline/model.py` 新增 `TargetItemSeqInjector` 类（`off` / `additive` 两模式,α init=0 为 identity safe 起点）,`PCVRHyFormer.forward` / `predict` 前注入, train.py 加 `--target_item_seq_injection` + `--target_inject_alpha_init`, infer.py 同步读, 共 ~120 行代码; S1 本地 smoke 全部通过（demo 10 step train + 1000 predictions + 可复现性 + 注入生效）。② ADR-004 Draft → Accepted, 索引更新。③ 平台 `t13tf-loss-full` E9 升到 0.868989（目前所有 full-train 最高）,决定消耗 1 个 evaluation slot（Publish 前走三步检查,确认 ckpt 是 E9 AUC 0.868989 那次）;`t13-hash2m-timefeat-full` + `t13only-full` 停止释放 training quota; `icq-t13tf-full` 保留继续跑。④ **评估配额事实修正**: team-memory 原写"4 次/天", 实际为 **24h 滚动窗口 4 次,PDT 21:00 重置,PDT 24:00 榜单刷新** —— 今日 4 slot 到 PDT 21:00 前都未消耗, 仍可用。
 

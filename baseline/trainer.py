@@ -63,6 +63,8 @@ class PCVRHyFormerRankingTrainer:
         eval_every_n_steps: int = 0,
         max_train_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        logloss_rebound_patience: int = 0,
+        logloss_rebound_delta: float = 0.0,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -127,6 +129,20 @@ class PCVRHyFormerRankingTrainer:
         self.last_val_auc: Optional[float] = None
         self.last_val_logloss: Optional[float] = None
 
+        # LogLoss rebound co-monitor (complements AUC-based EarlyStopping).
+        # Motivation (2026-05-04 t13tf-loss-full LB incident): AUC-only ES
+        # keeps training past the point where LogLoss starts rebounding,
+        # which empirically correlates with LB degradation (valid AUC +0.0005
+        # vs LB AUC -0.006 between E4 and E9). The guard tracks the best
+        # val_logloss observed so far; once val_logloss exceeds that best by
+        # more than `logloss_rebound_delta` for `logloss_rebound_patience`
+        # consecutive validations, we flip `early_stopping.early_stop=True`.
+        # Disabled when `logloss_rebound_patience <= 0` (back-compat).
+        self.logloss_rebound_patience: int = int(logloss_rebound_patience)
+        self.logloss_rebound_delta: float = float(logloss_rebound_delta)
+        self._best_logloss_for_guard: Optional[float] = None
+        self._logloss_rebound_counter: int = 0
+
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
                      f"multi_task_loss={multi_task_loss}, "
@@ -138,6 +154,16 @@ class PCVRHyFormerRankingTrainer:
         if self.max_train_steps > 0:
             logging.info(
                 f"Fast proxy enabled: max_train_steps={self.max_train_steps}")
+        if self.logloss_rebound_patience > 0:
+            logging.info(
+                f"LogLoss rebound guard ENABLED: patience="
+                f"{self.logloss_rebound_patience}, delta="
+                f"{self.logloss_rebound_delta:.6f}. Training will stop once "
+                f"val_logloss worsens relative to the best observed for "
+                f"{self.logloss_rebound_patience} consecutive validation(s), "
+                f"regardless of AUC trend. best_model is still AUC-selected.")
+        else:
+            logging.info("LogLoss rebound guard DISABLED (patience<=0)")
 
     def _record_validation_result(
         self,
@@ -173,6 +199,78 @@ class PCVRHyFormerRankingTrainer:
             self.best_checkpoint_dir = os.path.dirname(
                 self.early_stopping.checkpoint_path)
 
+        self._check_logloss_rebound_guard(
+            epoch=epoch, total_step=total_step, val_logloss=val_logloss)
+
+    def _check_logloss_rebound_guard(
+        self,
+        epoch: int,
+        total_step: int,
+        val_logloss: float,
+    ) -> None:
+        """Co-monitor that trips EarlyStopping when val_logloss rebounds.
+
+        Complements the primary AUC-based ``EarlyStopping`` (which selects the
+        global best_model by AUC) by catching the overfitting regime where
+        AUC still climbs but LogLoss has already turned upward. See
+        ``__init__`` docstring for motivation (2026-05-04 t13tf-loss-full LB
+        incident: +0.0005 valid AUC between E4→E9 translated into −0.006 LB
+        AUC because the model kept sharpening toward the valid tail's local
+        time patterns, which do not transfer to the test window).
+
+        Semantics:
+        - Track ``_best_logloss_for_guard`` (lowest val_logloss observed).
+        - A validation is "rebound" iff
+          ``val_logloss > best_logloss + logloss_rebound_delta``.
+        - Rebound increments ``_logloss_rebound_counter``; a non-rebound
+          validation resets the counter to 0 (consecutive-only trip).
+        - When counter reaches ``logloss_rebound_patience``, we flip
+          ``early_stopping.early_stop=True`` so the main loop terminates
+          after finishing the current epoch-end handler.
+
+        No-op when ``logloss_rebound_patience <= 0`` (back-compat with
+        existing configs and jobs that predate this guard).
+        """
+        if self.logloss_rebound_patience <= 0:
+            return
+
+        if self._best_logloss_for_guard is None:
+            self._best_logloss_for_guard = float(val_logloss)
+            return
+
+        # Strictly-worse-than-best is a rebound; equality is tolerated to
+        # avoid tripping on FP noise in plateau regions.
+        is_rebound = (
+            float(val_logloss)
+            > self._best_logloss_for_guard + self.logloss_rebound_delta
+        )
+
+        if is_rebound:
+            self._logloss_rebound_counter += 1
+            logging.info(
+                f"[logloss-guard] epoch={epoch} step={total_step} "
+                f"val_logloss={val_logloss:.6f} > best="
+                f"{self._best_logloss_for_guard:.6f} + delta="
+                f"{self.logloss_rebound_delta:.6f}; "
+                f"rebound_counter={self._logloss_rebound_counter}/"
+                f"{self.logloss_rebound_patience}")
+            if self._logloss_rebound_counter >= self.logloss_rebound_patience:
+                logging.info(
+                    f"[logloss-guard] Triggering EarlyStopping: "
+                    f"val_logloss rebound sustained for "
+                    f"{self._logloss_rebound_counter} validation(s). "
+                    f"best_model (AUC-selected) remains the final ckpt.")
+                self.early_stopping.early_stop = True
+        else:
+            if self._logloss_rebound_counter > 0:
+                logging.info(
+                    f"[logloss-guard] epoch={epoch} step={total_step} "
+                    f"val_logloss recovered to {val_logloss:.6f}; "
+                    f"counter reset from {self._logloss_rebound_counter}")
+                self._logloss_rebound_counter = 0
+            if float(val_logloss) < self._best_logloss_for_guard:
+                self._best_logloss_for_guard = float(val_logloss)
+
     def _write_training_summary(self, stop_reason: str) -> None:
         """Emit a grep-friendly summary and persist it next to logs/checkpoints."""
         summary = {
@@ -188,6 +286,10 @@ class PCVRHyFormerRankingTrainer:
             "last_global_step": self.last_global_step,
             "early_stopping_counter": self.early_stopping.counter,
             "early_stopping_patience": self.early_stopping.patience,
+            "logloss_rebound_patience": self.logloss_rebound_patience,
+            "logloss_rebound_delta": self.logloss_rebound_delta,
+            "logloss_rebound_counter": self._logloss_rebound_counter,
+            "best_logloss_for_guard": self._best_logloss_for_guard,
             "validation_history": self.validation_history,
             "key_train_config": {},
         }
@@ -491,9 +593,16 @@ class PCVRHyFormerRankingTrainer:
                     validated_this_step = True
 
                     if self.early_stopping.early_stop:
-                        logging.info(f"Early stopping at step {total_step}")
+                        reason_tag = (
+                            "logloss_rebound" if self._logloss_rebound_counter
+                            >= self.logloss_rebound_patience
+                            and self.logloss_rebound_patience > 0
+                            else "early_stop"
+                        )
+                        logging.info(
+                            f"Early stopping at step {total_step} ({reason_tag})")
                         self._write_training_summary(
-                            f"early_stop_step_{total_step}")
+                            f"{reason_tag}_step_{total_step}")
                         return
 
                 if self.max_train_steps > 0 and total_step >= self.max_train_steps:
@@ -577,8 +686,14 @@ class PCVRHyFormerRankingTrainer:
                 epoch, total_step, val_auc, val_logloss, previous_best)
 
             if self.early_stopping.early_stop:
-                logging.info(f"Early stopping at epoch {epoch}")
-                self._write_training_summary(f"early_stop_epoch_{epoch}")
+                reason_tag = (
+                    "logloss_rebound" if self._logloss_rebound_counter
+                    >= self.logloss_rebound_patience
+                    and self.logloss_rebound_patience > 0
+                    else "early_stop"
+                )
+                logging.info(f"Early stopping at epoch {epoch} ({reason_tag})")
+                self._write_training_summary(f"{reason_tag}_epoch_{epoch}")
                 break
 
             # After the configured epoch, reinitialize high-cardinality sparse

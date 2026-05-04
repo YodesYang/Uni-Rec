@@ -108,19 +108,69 @@ hash2m（2M 桶，E9 best 0.868483）在 proxy 显示 +0.001028（优于 500k �
 
 ---
 
-## `t13tf-loss-full` 的 LogLoss-select 副作用
+## `t13tf-loss-full` 的 LogLoss-select 副作用 + LB 实测（2026-05-04 晚回流）
 
-同期启动的 `t13tf-loss-full-swiglu-vr005-bs128`（仅多一个 `--early_stop_metric logloss`）回流显示：
-- **实际 best AUC E5 = 0.868932**（超过 t13tf E4 的 0.868495）
-- 但因 EarlyStopping monitor=LogLoss，E8 ckpt（AUC=0.868571，LogLoss 更低）被 overwrite 保留,**E5 的 AUC 最高 ckpt 被丢弃**
+> 本节含**后续实测 LB 分数**，请读到底再做结论。
 
-**教训**：比赛指标是 AUC，EarlyStopping 必须也以 AUC 为 monitor;LogLoss-select 会静默丢失 AUC 最高 ckpt（已写入 team-memory 铁律）。
+### 训练收敛（完整 epoch-wise 表）
+
+| Epoch | Valid AUC | Valid LogLoss | Train Avg Loss | AUC Δ | LogLoss Δ | 信号 |
+|---|---|---|---|---|---|---|
+| E1 | 0.864577 | 0.226712 | 0.235514 | — | — | |
+| E2 | 0.865825 | 0.225783 | 0.231683 | +0.001248 | −0.000929 | ✓ 同向改善 |
+| E3 | 0.867679 | 0.224243 | 0.229686 | +0.001854 | −0.001540 | ✓ 同向改善 |
+| **E4** | **0.868349** | **0.223789** | 0.227966 | +0.000670 | **−0.000454** | ✓ 最后同向改善 epoch |
+| **E5** | **0.868932** | 0.224397 | 0.227220 | +0.000583 | **+0.000608** | ⚠️ **LogLoss 反弹，过拟合拐点** |
+| E6 | 0.868684 | 0.223547 | 0.226324 | −0.000248 | −0.000850 | AUC 开始回落 |
+| E7 | 0.868550 | 0.224680 | 0.226026 | −0.000134 | +0.001133 | 进一步劣化 |
+| E8 | 0.868571 | **0.223020** | 0.225189 | +0.000021 | −0.001660 | LogLoss 局部最低（但 AUC 不是） |
+| E9 | **0.868989** | —（未记录） | — | +0.000418 | — | AUC 新高（但已深度过拟合） |
+
+**拐点判据**：E4→E5 是 **AUC 仍涨但 LogLoss 反弹** 的第一个 epoch。
+
+### Leaderboard 实测
+
+| Ckpt | Valid AUC | Valid LogLoss | LB AUC | Local-LB Gap |
+|---|---|---|---|---|
+| t13tf-full **E4**（首次提交的 best） | 0.868495 | — | **0.844956** | 0.023539 |
+| t13tf-loss-full **E9**（新提交，10 epoch 过训练） | **0.868989** | — | **0.838707** | **0.030282** |
+
+**关键对照**：valid AUC **+0.000494**，LB AUC **−0.006249**。local 涨 1 份，LB 跌 **10 份**的负向杠杆。
+
+### 机制解释
+
+E5 起，模型为了进一步记忆 train/valid 尾部共享的局部时间模式，把预测概率推向更极端（positive 更接近 1、negative 更接近 0）：
+- **AUC**（排序指标）只看相对顺序，对这种"拉伸"不敏感甚至受益 → 继续涨
+- **LogLoss**（校准指标）对过度自信的错误预测惩罚呈 log 增长 → 反弹
+- **LB test 集**是**更远未来**的样本，协变量漂移更大，模型记忆的局部模式**失效** → AUC 掉得比 valid 还多
+
+### 历史 7 次提交的 Gap 扫描
+
+| 提交 | Local Valid AUC | LB AUC | Gap |
+|---|---|---|---|
+| transformer baseline (epoch 1 错 ckpt) | 0.8617 | 0.834015 | 0.0277 |
+| swiglu baseline (filename) | 0.8650 | 0.84381 | 0.0212 |
+| swiglu + time + vr=0.05 | 0.865884 | 0.844059 | 0.0218 |
+| swiglu + d_model=128 | 0.864881 | 0.836944 | 0.0279 |
+| swiglu + dropout=0.05 | 0.864563 | 0.83977 | 0.0248 |
+| **t13tf-full E4** | 0.868495 | **0.844956** | **0.0235** |
+| **t13tf-loss-full E9** | 0.868989 | **0.838707** | **0.0303** |
+
+**Gap 稳定在 0.021~0.030**，不是单点事故，是 **valid split 方法论**（尾部 valid 与训练尾部共享局部时间模式）的系统性症状。
+
+### 三重教训（已沉淀 team-memory 铁律）
+
+1. **单 monitor EarlyStopping 不可靠**：AUC-only 容易训过头（本案 E4→E9 多训 5 epoch 反而 LB 掉 0.006），LogLoss-only 会静默丢 AUC 最高 ckpt（E5 AUC 0.868932 被 E8 0.868571 覆盖）。必须**双指标联合停机**（任一指标反弹即停）。
+2. **local AUC 不是 LB 的等比例代理**：决策红线以 `t13tf-full E4 LB = 0.844956` 为准，不以 local AUC 为准。
+3. **valid split 系统性缺陷**：gap 0.021~0.030 不会自行消失。后续需 valid split 重设计（ADR-005 Proposed）。
 
 ---
 
 ## 下一步
 
 - ✅ t13only E7 数据已并入归因（2026-05-04 晚）
-- 等 `icq-t13tf-full-swiglu-vr005-bs128` 完成，若 best AUC ≥ 0.870 考虑第二次 evaluation
-- **不再单独 evaluate t13only / t13tf-loss** — 分数未超过首轮 t13tf（0.844956），信息增益低，不值一个 evaluation 配额（每日仅 4 次）
-- 下一个优先探索见新 ADR 草稿：target-item 硬交互（把 target item concat 到 seq side-info）
+- ✅ t13tf-loss-full E9 已 evaluate，LB = 0.838707，**低于** t13tf-full E4 的 0.844956 → 过拟合诊断成立
+- ❌ t13only / t13tf-loss 不再追加 evaluation（信息增益为负）
+- ⏸ icq-t13tf-full 等训完再看（但 EarlyStopping 策略仍是 AUC-only，需警惕过训练）
+- 🔥 **当前第一优先级已变为**：trainer 实施 AUC+LogLoss 双指标联合 EarlyStopping（LogLoss 反弹即停）→ T16 再做 full train
+- 下一个战略 ADR 草稿：ADR-005 Valid Split Redesign（从 gap 根源下手）

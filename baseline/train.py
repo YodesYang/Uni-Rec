@@ -67,6 +67,16 @@ def parse_args() -> argparse.Namespace:
                         help="Metric used for early stopping: 'auc' (maximize, default) "
                              "or 'logloss' (minimize). Using logloss may preserve "
                              "better-calibrated checkpoints that AUC would skip.")
+    parser.add_argument('--logloss_rebound_patience', type=int, default=1,
+                        help="Co-monitor (LogLoss rebound) patience. When >0, training "
+                             "stops once val_logloss exceeds the best-seen logloss for "
+                             "this many consecutive validations, even if AUC is still "
+                             "climbing. best_model remains AUC-selected. Default 1 "
+                             "(stop on first rebound); set 0 to disable. Rationale: "
+                             "2026-05-04 t13tf-loss-full LB incident.")
+    parser.add_argument('--logloss_rebound_delta', type=float, default=0.0,
+                        help="Absolute worsening of val_logloss beyond the best-seen "
+                             "that counts as a rebound. 0.0 = any uptick trips the guard.")
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--device', type=str,
@@ -571,6 +581,8 @@ def main() -> None:
         eval_every_n_steps=args.eval_every_n_steps,
         max_train_steps=args.max_train_steps,
         train_config=vars(args),
+        logloss_rebound_patience=args.logloss_rebound_patience,
+        logloss_rebound_delta=args.logloss_rebound_delta,
     )
 
     trainer.train()

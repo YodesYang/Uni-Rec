@@ -61,3 +61,4 @@
 | [ADR-002](./ADR-002-slice-diagnostics.md) | valid 集 4 维切片诊断（默认开，无 CLI 开关） | Accepted | 2026-04-30 | T10 |
 | [ADR-003](./ADR-003-feature-engineering-plan.md) | 特征工程作为 P0 路径（4 类候选 + 防泄露 + 实施时序） | Accepted | 2026-05-01 | 待 T11~T14 |
 | [ADR-004](./ADR-004-target-item-seq-conditioning.md) | Target-Item 硬交互注入序列侧（seq-token 级 target-item conditioning） | Accepted | 2026-05-04 | T16 |
+| [ADR-005](./ADR-005-valid-split-redesign.md) | Valid Split Strategy Redesign（dev + holdout 双 valid，降低 valid→LB gap） | Proposed | 2026-05-04 | T17 |
