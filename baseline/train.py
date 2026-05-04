@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--patience', type=int, default=5,
                         help='Early-stopping patience '
                              '(number of validations without improvement)')
+    parser.add_argument('--early_stop_metric', type=str, default='auc',
+                        choices=['auc', 'logloss'],
+                        help="Metric used for early stopping: 'auc' (maximize, default) "
+                             "or 'logloss' (minimize). Using logloss may preserve "
+                             "better-calibrated checkpoints that AUC would skip.")
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--device', type=str,
@@ -501,11 +506,14 @@ def main() -> None:
     logging.info(f"Total parameters: {total_params:,}")
 
     # ---- Training ----
+    es_mode = 'min' if args.early_stop_metric == 'logloss' else 'max'
     early_stopping = EarlyStopping(
         checkpoint_path=os.path.join(args.ckpt_dir, "placeholder", "model.pt"),
         patience=args.patience,
         label='model',
+        mode=es_mode,
     )
+    logging.info(f"EarlyStopping metric={args.early_stop_metric}, mode={es_mode}")
 
     ckpt_params = {
         "layer": args.num_hyformer_blocks,

@@ -404,22 +404,25 @@ class PCVRHyFormerRankingTrainer:
            ``EarlyStopping``'s own gate does not create a stray dir.
         """
         old_best = self.early_stopping.best_score
-        is_likely_new_best = (
-            old_best is None
-            or val_auc > old_best + self.early_stopping.delta
-        )
+        # Choose the metric that EarlyStopping optimizes (AUC or LogLoss).
+        es_score = val_logloss if getattr(self.early_stopping, 'mode', 'max') == 'min' else val_auc
+        if self.early_stopping.mode == 'max':
+            is_likely_new_best = (
+                old_best is None
+                or es_score > old_best + self.early_stopping.delta
+            )
+        else:  # 'min'
+            is_likely_new_best = (
+                old_best is None
+                or es_score < old_best - self.early_stopping.delta
+            )
         if not is_likely_new_best:
-            # No new best anticipated: leave disk untouched. The previous
-            # best_model dir (with its model.pt + sidecars) remains valid.
-            self.early_stopping(val_auc, self.model, {
+            self.early_stopping(es_score, self.model, {
                 "best_val_AUC": val_auc,
                 "best_val_logloss": val_logloss,
             })
             return
 
-        # Point EarlyStopping at the canonical best-model location for this
-        # step. Only done on the likely-new-best branch so that a skipped
-        # save never leaks the unused path into EarlyStopping state.
         best_dir = os.path.join(
             self.save_dir,
             self._build_step_dir_name(
@@ -427,19 +430,13 @@ class PCVRHyFormerRankingTrainer:
         )
         self.early_stopping.checkpoint_path = os.path.join(best_dir, "model.pt")
 
-        # Remove stale best dirs first so EarlyStopping's write is the only
-        # I/O needed when a new best is confirmed.
         self._remove_old_best_dirs()
 
-        self.early_stopping(val_auc, self.model, {
+        self.early_stopping(es_score, self.model, {
             "best_val_AUC": val_auc,
             "best_val_logloss": val_logloss,
         })
 
-        # Write sidecar files only when EarlyStopping actually confirmed a
-        # new best and wrote model.pt. If the score tripped our heuristic
-        # but EarlyStopping internally declined to save, skip to avoid
-        # creating an empty (sidecar-only) checkpoint directory.
         if self.early_stopping.best_score != old_best and os.path.exists(
             self.early_stopping.checkpoint_path
         ):

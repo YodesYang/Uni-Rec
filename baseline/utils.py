@@ -136,6 +136,7 @@ class EarlyStopping:
         patience: int = 5,
         verbose: bool = False,
         delta: float = 0,
+        mode: str = 'max',
     ) -> None:
         self.checkpoint_path: str = checkpoint_path
         self.patience: int = patience
@@ -148,19 +149,24 @@ class EarlyStopping:
         self.best_saved_score: float = 0.0
         self.best_extra_metrics: Optional[Dict[str, Any]] = None
         self.label: str = label
+        if mode not in ('max', 'min'):
+            raise ValueError(f"EarlyStopping mode must be 'max' or 'min', got {mode!r}")
+        self.mode: str = mode
         if self.label != "":
             self.label += " "
 
     def _is_not_improved(self, score: float) -> bool:
-        """Return ``True`` iff ``score`` fails to beat ``best_score + delta``.
+        """Return ``True`` iff ``score`` fails to beat the current best.
 
-        Used as the gating condition for incrementing the patience counter.
+        For mode='max' (AUC): improved iff score > best_score + delta.
+        For mode='min' (LogLoss): improved iff score < best_score - delta.
         ``best_score`` must have been seeded by a prior ``__call__``.
         """
         assert self.best_score is not None, "call __call__ first to seed best_score"
-        if score > self.best_score + self.delta:
-            return False
-        return True
+        if self.mode == 'max':
+            return not (score > self.best_score + self.delta)
+        else:  # 'min'
+            return not (score < self.best_score - self.delta)
 
     def __call__(
         self,
