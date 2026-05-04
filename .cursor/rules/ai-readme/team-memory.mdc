@@ -17,7 +17,7 @@ alwaysApply: true
 - 推理时长基线（基于 1.9M train + 523k test，单 GPU 19GB，batch=256）：transformer ≈ 514s / longer ≈ 203s / swiglu ≈ 82s，全部远低于 30min 硬上限；编码器选型对推理时长影响 6 倍以上
 - 推理需输出 `predictions.json`，user_id 必须**全量覆盖测试集**（社区有题报「Missing 310000 user_ids」直接掉分）；本届 baseline 已覆盖 523244 条
 - baseline `trainer.py::_save_step_checkpoint` 已自动把 `schema.json` + `train_config.json` + `ns_groups.json` 复制到每个 `*.best_model/` 目录 → 无需额外手工同步
-- **平台 Copy 陷阱**：Training 页 "Copy" 功能 = 克隆冻结的 script_archive snapshot，**不会同步本地最新代码**。引入新 CLI flag / 新代码后必须 Create New Training Job 重新上传 baseline/，否则 argparse 报 "unrecognized arguments" → exit code 2（已踩坑：2026-05-01 swiglu+`--valid_split_strategy time` 用 Copy 启动直接 Failed）
+- **平台 Copy 使用规则**：Training 页 "Copy" 会克隆上次 job 的 script_archive snapshot。**代码未发生变化时可以直接 Copy**，只需修改 run.sh 参数即可；**代码有改动时必须 Create New Training Job 重新上传改动的文件**。历史踩坑：2026-05-01 swiglu+`--valid_split_strategy time` 用 Copy 启动直接 Failed（argparse 报 "unrecognized arguments" → exit code 2）
 - **Publish ckpt verify 三步检查清单**：从平台 Model Management Publish ckpt 前必须 verify ① 是 `*.best_model/` 子目录（非中间步 ckpt）；② 是训练**完成（或至少早停）后**的全局最新 best（否则可能用 epoch 1 ckpt）；③ 子目录内含 `model.pt` + `train_config.json` + `schema.json` 三件套（缺 train_config 会让 default infer.py 走 baseline default 配置）。已踩坑：2026-04-30 transformer 发布 epoch 1 step=7610 而非全局 best step=38050，损失 0.0024 Val AUC ≈ leaderboard 0.002 AUC
 
 ## 实验纪律与训练配额
@@ -35,3 +35,4 @@ alwaysApply: true
 - **Push 触发条件**：明确开始新的、独立的工作单元前（如新一轮 platform job 启动 / 切代码分支 / 开始改新的 baseline 文件） → Agent **主动提醒** 用户 push，但**不主动**推送到 `main`（GitHub 远端 `origin` 为 `git@github.com:YodesYang/Tencent_Uni_Rec.git`，主分支政策敏感）；除非用户显式说「push」
 - **策略推荐前必查红线**：给出战略 / 方法学建议（如 ensemble、换架构、多 seed averaging、外部数据引入、预训练模型加载等）前，必须先 grep `docs/00-context/competition.md` §3 红线 + `docs/10-research/community-intel.md` 关键 Q&A，否则可能推荐违规方案（已踩坑：2026-04-30 Stage 3 推荐 multi-seed prediction averaging，被用户提醒 ensemble 禁令，纠正落 ADR-003 §Alternatives B）
 - **规则迭代记录原则**：比赛规则 / 平台配额 / 工程约束等"当前事实"类内容发生变化时，**只保留最新版本**，**不在 active docs 里累积「原 X / 现 Y」对照**。历史轨迹通过 git log + ADR/EXP 自然保留即可。例外：① 原始抓取快照（如 community-snapshots/）是 raw 性质，原文保留；② ADR/EXP 是历史决策 / 实验记录，按"永不删"原则保留
+- **平台 Job 提交格式约定**：每次告知平台提交任务时，输出三项：① Job Name；② 需要上传的**有改动**文件名（无改动说"无需上传新文件，直接 Copy"）；③ 完整 run.sh 脚本内容。

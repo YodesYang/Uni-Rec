@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04（PDT 深夜 · P0-C smoke 通过 + Multi-task P1 判定不可行）· 结论：P0-C 历史 CVR 代码链路已完整实现（dataset/train/trainer/infer 均已覆盖），本机 smoke 验证 sidecar 构建成功（800 rows, 13 scalar item fids, global_prior=0.125）；OOM 是本机沙盒内存限制非代码 bug，平台可正常运行。P1 Multi-task CTR+CVR 确认不可行：数据集全为点击样本（仅 label_type=1/2，无曝光样本 label_type=0），无法构建独立 CTR 监督信号。下一步：P0-C 平台 proxy，Job Name `p0c-timefeat-proxy-swiglu-vr005-rg128x32-s1500`。
+**最近一次审视**：2026-05-04（PDT · ICQ half-train 回流 → 推进 full train）· 结论：`icq-t13tf-halftrain-swiglu-vr005-bs128` E4 best AUC 0.868619，vs t13tf EXP-018 E4 0.868495，Δ+0.000124；训练曲线全程单调上升，无早停，预计 full train 累积增益更大。ICQ 再次验证"大参数分支 proxy 假负向"规律（与 hash500k 一致）。决策：推进 `icq-t13tf-full-swiglu-vr005-bs128`（10 epoch），evaluation 阈值 ≥ 0.870。详见 [`EXP-019`](../40-experiments/EXP-019-icq-halftrain-2026-05-04.md)。
 
 ---
 
@@ -36,6 +36,8 @@
 - ✅ 运行建议纪律补充：后续所有平台任务建议必须附带 Job Name，避免日志 / ckpt 回收时难以对应实验。
 - ⚠️ 平台并行能力修正：当前可以提交 3-4 个 training job，但 2026-05-02 晚出现同卡多进程 / 单次 20.49GiB allocation OOM；后续只把轻量 64/16 proxy 打包并行。128/32 larger proxy 与 full train 默认 `--batch_size 128`，且最多 1-2 个重 job 并行。
 - ⏳ 待 P0-A full train 最终 `[summary]` 回流后，决定 P0 分支是否整体收口；阈值暂定 `best local AUC >= 0.8665` 才考虑 evaluation，`>= 0.8685` 才强推。已完成/当前回流的 `p0seq` / `p0only` / `p0count` 都不建议 evaluation。
+- ✅ **ICQ half-train 回流（2026-05-04）**：`icq-t13tf-halftrain-swiglu-vr005-bs128` E4 best AUC 0.868619 / LogLoss 0.223356，vs t13tf EXP-018 E4 0.868495，Δ+0.000124；proxy 时负向翻转为正，决策推进 full train。详见 [`EXP-019`](../40-experiments/EXP-019-icq-halftrain-2026-05-04.md)。
+- ⏳ **ICQ full train 待启动**：Job Name `icq-t13tf-full-swiglu-vr005-bs128`（10 epoch），evaluation 阈值 ≥ 0.870。
 - ✅ sparse reinit 对照已回流：no-reinit proxy 快速崩盘（best 0.837562 / last 0.619751），default reinit 更稳（best 0.845306）；关闭 no-reinit full train 路线，详见 [`EXP-010`](../40-experiments/EXP-010-sparse-reinit-proxy-control-2026-05-02.md)。
 - ✅ **dense log1p 修复对照已回流**：`user_dense_feats_62~66` 为原始计数统计量（10^3~10^5），与 fid=61/87 的预归一化 embedding（10^-1）尺度差 4~5 个量级；log1p 修复后 proxy best AUC +0.000145 / LogLoss -0.000323，方向正确；`dense_log1p_fids=62,63,64,65,66` 已设为默认，详见 [`EXP-011`](../40-experiments/EXP-011-dense-log1p-proxy-2026-05-03.md)。
 
@@ -200,6 +202,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT（ICQ half-train 回流 → 推进 full train）**：`icq-t13tf-halftrain-swiglu-vr005-bs128` E4 best AUC 0.868619 / LogLoss 0.223356，vs t13tf（EXP-018 E4）0.868495，Δ+0.000124；训练曲线全程单调上升，无早停迹象。ICQ proxy（Δ−0.001417）→ half-train 正向，再次验证"大参数分支 proxy 假负向"规律。决策：推进 `icq-t13tf-full-swiglu-vr005-bs128`（10 epoch），evaluation 阈值 ≥ 0.870，不评估 half-train E4。详见 [`EXP-019`](../40-experiments/EXP-019-icq-halftrain-2026-05-04.md)。
 
 - **2026-05-04 PDT（3-blocks proxy 负向 → 所有 proxy 候选耗尽）**：`t14-3blocks-timefeat-proxy-swiglu-vr005-rg128x32-s1500` AUC 0.838003 / LogLoss 0.242790，低于 2-blocks timefeat-only 基线 0.839285，Δ−0.001282。1500 步 proxy 可能不足以热身更深模型，但按漏斗规则不推进；维持 `num_hyformer_blocks=2` 默认。至此本轮所有 proxy 候选（log1p/T12/focal/ICQ/T13/3-blocks）全部回流，唯一正向信号 T12 已进入 full train，进入"等待 full train 结果"阶段。详见 [`EXP-016`](../40-experiments/EXP-016-3blocks-proxy-2026-05-04.md)。
 
