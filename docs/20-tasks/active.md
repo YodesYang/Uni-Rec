@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04（PDT · ICQ proxy 负向回流）· 结论：ICQ（item-conditioned query）proxy AUC **0.837866**，低于 timefeat-only 对照 **0.839283**，Δ−0.001417，不推进 full train；代码保留（`--item_conditioned_query` 默认 OFF）。当前主线等 `timefeat-full-swiglu-vr005-bs128` 结果。详见 [`EXP-014`](../40-experiments/EXP-014-icq-proxy-2026-05-04.md)。
+**最近一次审视**：2026-05-04（PDT · t13tf 评估完成，Local→LB 转化率 34%）· 结论：t13tf（hash500k+timefeat）LB **0.844956**（local 0.868495），转化率 34%，Local-LB Gap 扩大至 0.023539；三路归因发现 hash 单独有害但与 timefeat 有强正向交互（+0.001752）；hash2m E4 意外低于 t13tf。等 hash2m/t13only 完成后，下一步优先验证 ICQ half-train（4 epoch）。详见 [`EXP-018`](../40-experiments/EXP-018-t13tf-full-train-2026-05-04.md)。
 
 ---
 
@@ -71,16 +71,14 @@
 - **方案 A（截断）**：在 `dataset.py` 的 `_convert_batch` 里，对 vocab 超大的 item ID 特征，将值限制在 `[0, clip_threshold]`，超出归 UNK（0），这样可以保留高频 ID，同时 embedding table 大小可控
 - **方案 B（hash embedding）**：在模型侧对超大 vocab 的特征做 hash 取模，映射到固定大小的 embedding table（例如取模到 1M），损失少量 collision，但保留了所有 ID 的可学习表示
 
-方案 A 代码改动小，先实验；方案 B 保留为后备。
-
-**注意**：改动涉及 `emb_skip_threshold` 逻辑和 seq embedding 初始化，需要仔细核查 OOB clip 逻辑，避免 index 越界。
+方案 A 代码改动小，先实验；方案 B **已验证失效**（见下）。
 
 **分层漏斗**：
 1. 本地 smoke 验证 embedding table 大小和显存
-2. proxy 对比（128/32 RG）
-3. proxy 正向 → full train
+2. ✅（方案 B）`t13-hash500k-timefeat-proxy-swiglu-vr005-rg128x32-s1500` proxy 回流：AUC 0.837684，**低于** timefeat-only 对照 0.839285，Δ−0.001601 → 方案 B **负向，放弃**。详见 [`EXP-015`](../40-experiments/EXP-015-t13-hash-proxy-2026-05-04.md)
+3. 方案 A（vocab 截断）尚未实验，作为备选
 
-**当前优先级**：中。修复代价不低，且 domain_c fid=47 是 item ID 而非行为类别，信号密度取决于数据分布；先做 T12，再启动 T13。
+**当前优先级**：低。方案 B 已失败；方案 A 需代价估算后与其他候选竞争额度。不占用当前 full train 资源。
 
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
@@ -188,6 +186,10 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT（3-blocks proxy 负向 → 所有 proxy 候选耗尽）**：`t14-3blocks-timefeat-proxy-swiglu-vr005-rg128x32-s1500` AUC 0.838003 / LogLoss 0.242790，低于 2-blocks timefeat-only 基线 0.839285，Δ−0.001282。1500 步 proxy 可能不足以热身更深模型，但按漏斗规则不推进；维持 `num_hyformer_blocks=2` 默认。至此本轮所有 proxy 候选（log1p/T12/focal/ICQ/T13/3-blocks）全部回流，唯一正向信号 T12 已进入 full train，进入"等待 full train 结果"阶段。详见 [`EXP-016`](../40-experiments/EXP-016-3blocks-proxy-2026-05-04.md)。
+
+- **2026-05-04 PDT（T13 hash-embedding proxy 负向回流）**：`t13-hash500k-timefeat-proxy-swiglu-vr005-rg128x32-s1500` AUC 0.837684 / LogLoss 0.242104，低于 timefeat-only 对照 0.839285，Δ−0.001601 AUC。hash-mod 500k 引入 collision 噪声大于其恢复 domain_c_seq_47 信号的收益；方案 B（hash embedding）正式放弃，方案 A（vocab 截断）降为低优先级备选。当前无待进行的 proxy，等 `timefeat-full-swiglu-vr005-bs128` 回流。详见 [`EXP-015`](../40-experiments/EXP-015-t13-hash-proxy-2026-05-04.md)。
 
 - **2026-05-03 PDT（P0 路线收口 + OneTrans 全量回流）**：P0-C full best AUC 0.865097（E4，Early Stop E9），MNW full best AUC 0.864357（E11，仍在跑），均低于 no-P0 reference 0.865884。P0-A/B/C/组合 + MNW 共 6 轮全量训练全部失败，差值 -0.0007~-0.0015，P0 特征工程路线正式关闭。OneTrans v2 full（无 NS conditioner）14 epoch best 0.848712，停止；OneTrans v3 full（有 NS conditioner）E10 best 0.859408，仍在运行，NS conditioner 使 full train 提升 +0.010。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)、[`EXP-013`](../40-experiments/EXP-013-onetrans-full-train-2026-05-03.md)。
 

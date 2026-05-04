@@ -27,6 +27,7 @@ alwaysApply: true
 - **新增功能优先支持快速验证开关**：涉及训练链路的新实验应优先考虑 `max_train_steps`、`limit_train_rgs`、`limit_valid_rgs` 或等价参数，避免每个想法都等待 10 小时才暴露 shape / 数据切分 / 收敛问题
 - **实验记录最小字段**：每次平台任务必须记录 commit、job name、关键 args、valid AUC / LogLoss、public score、是否使用 default infer.py、结论；没有这些字段的结果不作为路线决策依据
 - **当前策略**：full train 是复核，不是探索；优先建立 fast proxy 与 valid→leaderboard 映射，再推进 T8.5 / P0 特征工程
+- **⚠️ Proxy 对大型 Sparse Embedding Table 类变量不可靠**（2026-05-04 教训）：`--seq_hash_vocab` 等引入新大型 embedding table 的变量，proxy（128/32 RG + 1500 steps）因 table 预热不足显示负向信号，但 full train（1.9M 行 + 10 epoch）可能正向（实测：EXP-015 proxy Δ−0.0016，full train E4 Δ+0.0003）。此类变量**绕过 proxy，直接上 2~3 epoch half-train** 验证，避免误杀。
 
 ## 协作与提交约定
 
