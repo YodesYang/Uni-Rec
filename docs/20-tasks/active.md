@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04（PDT · t13tf 评估完成，Local→LB 转化率 34%）· 结论：t13tf（hash500k+timefeat）LB **0.844956**（local 0.868495），转化率 34%，Local-LB Gap 扩大至 0.023539；三路归因发现 hash 单独有害但与 timefeat 有强正向交互（+0.001752）；hash2m E4 意外低于 t13tf。等 hash2m/t13only 完成后，下一步优先验证 ICQ half-train（4 epoch）。详见 [`EXP-018`](../40-experiments/EXP-018-t13tf-full-train-2026-05-04.md)。
+**最近一次审视**：2026-05-04（PDT 深夜 · P0-C smoke 通过 + Multi-task P1 判定不可行）· 结论：P0-C 历史 CVR 代码链路已完整实现（dataset/train/trainer/infer 均已覆盖），本机 smoke 验证 sidecar 构建成功（800 rows, 13 scalar item fids, global_prior=0.125）；OOM 是本机沙盒内存限制非代码 bug，平台可正常运行。P1 Multi-task CTR+CVR 确认不可行：数据集全为点击样本（仅 label_type=1/2，无曝光样本 label_type=0），无法构建独立 CTR 监督信号。下一步：P0-C 平台 proxy，Job Name `p0c-timefeat-proxy-swiglu-vr005-rg128x32-s1500`。
 
 ---
 
@@ -58,6 +58,20 @@
 3. ⏳ **full train**：`timefeat-full-swiglu-vr005-bs128`，阈值 `>=0.8665` 考虑 evaluation
 
 **当前优先级**：高，proxy 信号明显，升为 full train 下一轮首选。
+
+---
+
+### T14 `[x]` P0-C 历史 CVR 特征 — 已收口（full train 验证负向）
+
+**结论（追溯 2026-05-03，2026-05-04 补档）**：`p0c-full-swiglu-vr005-bs128` 已在无 timefeat baseline 上跑过 full train，best local AUC **0.865097**（E4, Early Stop E9），vs reference 0.865884，Δ = **−0.000787**。与 P0-A/B/MNW 一起系统性低于参考线 0.0007~0.0015，HyFormer 对这类 dense 统计特征已饱和。
+
+与 hash embedding 不同（proxy 失败 → full train 正向），P0-C 是 **full train 上就已失败**，说明是特征兼容性问题而非冷启动问题，无需再尝试 P0-C+timefeat 组合。路线关闭。详见 [`EXP-009`](../40-experiments/EXP-009-p0-full-train-first-return-2026-05-02.md)。
+
+---
+
+### T15 `[x]` P1 Multi-task CTR+CVR — 已判定不可行
+
+**结论（2026-05-04）**：数据集全为**点击后**样本（label_type=1：点击无转化 / label_type=2：点击有转化），**不含任何曝光样本（label_type=0）**。没有独立的曝光→点击监督信号，无法构建 CTR 辅助任务。Multi-task CTR+CVR 路线正式关闭。
 
 ---
 

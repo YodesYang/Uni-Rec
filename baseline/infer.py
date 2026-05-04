@@ -260,6 +260,8 @@ def main() -> None:
         "use_onetrans": bool(cfg.get("use_onetrans", False)),
         "onetrans_top_k": int(cfg.get("onetrans_top_k", 50)),
         "seq_hash_vocab": int(cfg.get("seq_hash_vocab", 0)),
+        "item_conditioned_query": bool(cfg.get("item_conditioned_query", False)),
+        "enable_dense_bypass": bool(cfg.get("enable_dense_bypass", False)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

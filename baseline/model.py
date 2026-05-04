@@ -1734,6 +1734,11 @@ class PCVRHyFormer(nn.Module):
         seq_hash_vocab: int = 0,
         # Item-conditioned query generation (DIN-style target-item awareness)
         item_conditioned_query: bool = False,
+        # Dense bypass: project dense features directly to the classifier input,
+        # bypassing NS-token dilution in HyFormer blocks. When enabled the dense
+        # token is removed from ns_tokens and the classifier input dimension is
+        # extended by d_model (d_model + d_model = 2*d_model).
+        enable_dense_bypass: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1742,6 +1747,7 @@ class PCVRHyFormer(nn.Module):
         self.action_num = action_num
         self.num_queries = num_queries
         self.seq_domains = sorted(seq_vocab_sizes.keys())  # deterministic order
+        self.enable_dense_bypass = enable_dense_bypass
         self.num_sequences = len(self.seq_domains)
         self.num_time_buckets = num_time_buckets
         self.rank_mixer_mode = rank_mixer_mode
@@ -1819,9 +1825,22 @@ class PCVRHyFormer(nn.Module):
                 nn.LayerNorm(d_model),
             )
 
-        # Total NS token count
-        self.num_ns = (num_user_ns + (1 if self.has_user_dense else 0)
+        # Total NS token count: in bypass mode dense features are NOT added as
+        # NS tokens, so their slot is excluded from num_ns.
+        self.num_ns = (num_user_ns + (0 if (self.has_user_dense and enable_dense_bypass) else (1 if self.has_user_dense else 0))
                        + num_item_ns + (1 if self.has_item_dense else 0))
+
+        # Dense bypass projections: used instead of (or in addition to) the
+        # NS-token path when enable_dense_bypass=True. The projected vectors are
+        # concatenated directly to the output of output_proj, bypassing all
+        # HyFormer blocks, so the classifier sees them at full strength.
+        self.has_dense_bypass = enable_dense_bypass and self.has_user_dense
+        if self.has_dense_bypass:
+            self.user_dense_bypass_proj = nn.Sequential(
+                nn.Linear(user_dense_dim, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+            )
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
@@ -1982,9 +2001,13 @@ class PCVRHyFormer(nn.Module):
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
 
+        # Classifier input dimension: d_model normally; d_model*2 when dense
+        # bypass is active because the bypass vector is concatenated to output.
+        clsfier_in_dim = d_model * 2 if self.has_dense_bypass else d_model
+
         # Classifier
         self.clsfier = nn.Sequential(
-            nn.Linear(d_model, d_model),
+            nn.Linear(clsfier_in_dim, d_model),
             nn.LayerNorm(d_model),
             nn.SiLU(),
             nn.Dropout(dropout_rate),
@@ -2274,11 +2297,16 @@ class PCVRHyFormer(nn.Module):
         return output
 
     def _build_ns_tokens(self, inputs: ModelInput) -> torch.Tensor:
-        """Build NS token tensor from user/item int and dense features."""
+        """Build NS token tensor from user/item int and dense features.
+
+        When ``enable_dense_bypass`` is True, user dense features are NOT
+        included as an NS token here; they are instead injected directly into
+        the classifier input via ``_apply_dense_bypass``.
+        """
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
         ns_parts = [user_ns]
-        if self.has_user_dense:
+        if self.has_user_dense and not self.enable_dense_bypass:
             ns_parts.append(
                 F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
         ns_parts.append(item_ns)
@@ -2286,6 +2314,17 @@ class PCVRHyFormer(nn.Module):
             ns_parts.append(
                 F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1))
         return torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
+
+    def _apply_dense_bypass(
+        self, output: torch.Tensor, inputs: ModelInput
+    ) -> torch.Tensor:
+        """Concatenate bypassed dense vector to the backbone output.
+
+        Only called when ``has_dense_bypass`` is True. Produces a
+        (B, 2*D) tensor that feeds directly into the classifier.
+        """
+        bypass = self.user_dense_bypass_proj(inputs.user_dense_feats)  # (B, D)
+        return torch.cat([output, bypass], dim=-1)  # (B, 2D)
 
     def _build_seq_tokens(
         self, inputs: ModelInput
@@ -2322,6 +2361,9 @@ class PCVRHyFormer(nn.Module):
                 q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
                 apply_dropout=self.training)
 
+        if self.has_dense_bypass:
+            output = self._apply_dense_bypass(output, inputs)
+
         logits = self.clsfier(output)
         return logits
 
@@ -2340,6 +2382,9 @@ class PCVRHyFormer(nn.Module):
             output = self._run_multi_seq_blocks(
                 q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
                 apply_dropout=False)
+
+        if self.has_dense_bypass:
+            output = self._apply_dense_bypass(output, inputs)
 
         logits = self.clsfier(output)
         return logits, output

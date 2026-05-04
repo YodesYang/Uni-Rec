@@ -300,6 +300,13 @@ def parse_args() -> argparse.Namespace:
                              'global-info query with a target-item-aware query branch, '
                              'letting the model focus user history on the target ad.')
 
+    parser.add_argument('--enable_dense_bypass', action='store_true', default=False,
+                        help='Dense bypass: project dense features directly to the '
+                             'classifier input instead of (or in addition to) the NS '
+                             'token path. The bypass vector is concatenated to the '
+                             'output_proj output, making the classifier input 2*d_model. '
+                             'This avoids dense signal dilution inside HyFormer blocks.')
+
     parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
                         help='Recency reweighting: give samples closer to the test period '
                              'higher training weight via weight=exp(alpha*norm_ts). '
@@ -491,6 +498,7 @@ def main() -> None:
         "onetrans_top_k": args.onetrans_top_k,
         "seq_hash_vocab": args.seq_hash_vocab,
         "item_conditioned_query": args.item_conditioned_query,
+        "enable_dense_bypass": args.enable_dense_bypass,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
