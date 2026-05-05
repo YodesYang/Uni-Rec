@@ -2,11 +2,51 @@
 
 **日期**：2026-05-04 夜  
 **作者**：Agent  
-**状态**：🔄 Local smoke 完成 + 单元级数值验证全过 → 等 S2 proxy 启动
+**状态**：❌ **已终结证伪**（2026-05-04 晚 10 · 三合一 E4 LB = **0.836445**，vs SOTA 0.84637 **Δ −0.00993**，ADR-006 Deprecated）
 
 ---
 
-## 背景
+## ⚠️ 终结状态（2026-05-04 晚 10 · 结论）
+
+**T18 CombinedAUCLoss 被 LB evaluation 实锐证伪**,ADR-006 状态从 Accepted 降为 Deprecated。
+
+### 关键 evaluation 数据
+
+| Job | Local dev | Local holdout | **LB AUC** | dev-LB Gap | holdout-LB Gap |
+|---|---|---|---|---|---|
+| t13tf-full E4 (参考基线) | 0.868495 | — | 0.844956 | +0.0235 | — |
+| icq-half E4 (T16 基线等价) | 0.868619 | — | **0.84637** | +0.0222 | — |
+| **三合一 E4 (T16+T18 w=0.3)** | **0.865516** | **0.867196** | **0.836445** ❌ | **+0.0291** | **+0.0308** |
+
+### 判决
+
+- **LB Δ vs SOTA = −0.00993**（比 icq-half E4 LB 低 ~1%）
+- dev 差距只有 −0.003，但 LB 差距放大到 **−0.010**（3.3× 负向放大）
+- **Holdout AUC 也没能成为 LB 代理**，gap +0.0308 比 dev 的 +0.0291 还大
+- 证明 BPR 破坏了 sigmoid 输出的 calibration，在"远未来 test"分布偏差下被放大
+
+### 后续动作（已完成）
+
+1. **T18 路线整体关闭**：代码保留（`combined_auc_loss` / `pairwise_bpr_loss` 纯函数 + trainer `elif loss_type='auc'` 分支），默认 `--loss_type bce`
+2. **四合一 half-train 同步停止**（含 T18）
+3. **T16-only full train 接替**，成为当前唯一在跑的突破 SOTA 候选
+4. **team-memory 新铁律**（2026-05-04 晚 10）：BPR/Ranking loss 在"远未来 test"场景破坏 calibration，gap 不可预测，外部 anchor（Tencent +0.7~1.26% GMV）不可直接照搬同分布 test 的结论
+5. **ADR-006 状态降级**：Accepted → **Deprecated**（详见 ADR-006 §Deprecation Notice）
+
+### 三合一 Half-Train 完整 Epoch 表（保留作参考）
+
+| Epoch | Step | Val AUC | Val LogLoss | **Holdout AUC** | Holdout LogLoss | Gap (dev−holdout) | ES |
+|---|---|---|---|---|---|---|---|
+| E1 | 15119 | 0.862036 | 0.228495 | 0.863404 | 0.227842 | −0.001367 | — |
+| E2 | 30238 | 0.864589 | 0.226830 | 0.865579 | 0.226023 | −0.000990 | reset |
+| E3 | 45357 | 0.865035 | 0.226381 | 0.866078 | 0.225614 | −0.001043 | reset |
+| **E4** | **60476** | **0.865516** | 0.226387 | **0.867196** | 0.225230 | −0.001680 | **reset + logloss-guard rebound 1/2** |
+
+**关键观察**: E4 dev LogLoss 反弹 +0.000006 触发 guard，但 holdout LogLoss 仍在下降。guard 机制**没问题**，但 T18 的 LB 破坏效应是**分布外现象**，训练侧任何指标都观察不到。
+
+---
+
+## 背景（保留历史记录，说明为何 T18 当初被 Accept）
 
 ADR-006 把 CombinedAUCLoss = `(1-w)·BCE + w·PairwiseBPR` 作为新增 loss_type。核心假说：
 

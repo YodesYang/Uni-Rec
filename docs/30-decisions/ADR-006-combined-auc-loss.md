@@ -1,9 +1,10 @@
 # ADR-006 · CombinedAUCLoss = WeightedBCE + PairwiseBPR
 
-> **Status**: Accepted(2026-05-04 晚 · S1 本地 smoke 通过后升 Accepted)
+> **Status**: ❌ **Deprecated**（2026-05-04 晚 10 · 三合一 E4 LB evaluation 0.836445 实锐证伪,vs SOTA 0.84637 **Δ LB −0.00993**）
+> **Original Status**: Accepted（2026-05-04 晚 · S1 本地 smoke 通过后升 Accepted；晚 10 被 LB 证伪后降级为 Deprecated）
 > **Date**: 2026-05-04
-> **Related Tasks**: T18（见 `docs/20-tasks/active.md`）
-> **Related Experiments**: 待 EXP-022（proxy / half-train 验证）
+> **Related Tasks**: T18（见 `docs/20-tasks/active.md`，已关闭）
+> **Related Experiments**: EXP-022（三合一 half-train LB evaluation 实锐）
 > **External References**:
 > - Twitter / 腾讯: "Understanding the Ranking Loss for Recommendation with Sparse User Feedback", arXiv 2403.14144
 > - PWiseR: "Pairwise Ranking Loss for Multi-Task Learning in Recommender Systems", arXiv 2406.02163
@@ -11,7 +12,42 @@
 
 ---
 
-## Context（背景与触发原因）
+## ⚠️ Deprecation Notice（2026-05-04 晚 10）
+
+**T18 CombinedAUCLoss 路线已 Deprecated**。实验证据：
+
+| Job | Config | Local dev | Local holdout | **LB** | Gap |
+|---|---|---|---|---|---|
+| t13tf-full E4（参考基线，纯 BCE） | T13+TF | 0.868495 | — | 0.844956 | +0.0235 |
+| icq-half E4（T16 基线等价，纯 BCE） | T16 additive | 0.868619 | — | **0.84637** | +0.0222 |
+| **三合一 E4（T16+T18 w=0.3）** | T16 + T18 | **0.865516** | **0.867196** | **0.836445** ❌ | **+0.0291** |
+
+**关键数字**：
+- **LB Δ vs SOTA = −0.00993**（比 icq-half E4 LB 低 ~1%）
+- dev-LB gap **0.0291** / holdout-LB gap **0.0308** 都是历史最大
+- dev Δ vs icq-half = −0.003, LB Δ = −0.010 → **LB 负向放大 3.3×**
+
+**机制解释**（已写入 team-memory 铁律）：
+1. BPR 是 pairwise loss，只优化样本间相对排序，不关心绝对值 calibration
+2. Val AUC 是排序指标，对 BPR 友好 → dev 差距小
+3. LB AUC 可能评估绝对阈值下的 TPR/FPR（或 test positive 分布不同），对 calibration 敏感
+4. CombinedAUCLoss α=0.3 时 30% 梯度来自 BPR，**系统性扭曲 sigmoid 输出分布**
+5. test（远未来 + 时间分布偏差）上未 calibrated 的 sigmoid 错得更厉害，gap 放大 3~4×
+
+**为什么 external anchor（Tencent +0.70~1.26% GMV）在这里不适用**：
+- 腾讯论文的 ablation 在**同分布 test** 下做
+- 本赛题 test 是**远未来 + 0.023 baseline gap** 的"远外推"场景
+- calibration 破坏在远外推场景下被放大，超过 ranking 增益
+
+**Deprecation 影响**：
+- 🚫 `--loss_type auc` 不再推荐使用（代码保留但默认 `bce`）
+- 🚫 后续所有 `--auc_loss_weight / --auc_margin / --auc_max_pairs` 调参实验全部关闭
+- ⚠️ Holdout→LB 经验公式 "LB ≈ holdout − 0.022" **仅在纯 BCE 路径下有效**，BPR 路径下 gap 不可预测
+- ✅ 代码本身不回滚（`combined_auc_loss` 纯函数 + trainer 分支保留），便于未来有"calibration-aware ranking loss"出现时快速验证
+
+---
+
+## Context（背景与触发原因，写于 Accepted 时期）
 
 ### 触发证据
 

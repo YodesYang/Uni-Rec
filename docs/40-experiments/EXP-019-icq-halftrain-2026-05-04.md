@@ -2,7 +2,7 @@
 
 **日期**：2026-05-04  
 **作者**：Agent  
-**状态**：✅ 完成 → 推进 full train
+**状态**：✅ 完成 → full train 也已完成 → half-train E4 evaluation **成为 LB SOTA 0.84637**(2026-05-04 晚 9 补档)
 
 ---
 
@@ -87,3 +87,62 @@ ICQ 增加 +429,824 dense 参数（gate 网络），需要足够的梯度信号�
 1. 启动 `icq-t13tf-full-swiglu-vr005-bs128`（10 epoch full train）
 2. 等待 final `[summary]`，阈值 ≥ 0.870 考虑 evaluation
 3. 同期关注 `timefeat-full` 是否已跑完（T12），两者做 E10 对比确认 ICQ 增益
+
+---
+
+## 补档 · full train 回流 + half-train evaluation 翻转（2026-05-04 晚 9）
+
+### ICQ full train 完整轨迹（job `icq-t13tf-full-swiglu-vr005-bs128`）
+
+| Epoch | Step | Val AUC | Val LogLoss | ΔAUC | ΔLogLoss | EarlyStop 状态 |
+|---|---|---|---|---|---|---|
+| E1 | 14k | 0.864992 | 0.225920 | — | — | reset |
+| E2 | 28k | 0.867575 | 0.224159 | +0.002583 | −0.001761 | reset |
+| E3 | 42k | 0.868195 | 0.223949 | +0.000620 | −0.000209 | reset |
+| E4 | 56k | 0.868669 | 0.223416 | +0.000474 | −0.000534 | reset |
+| E5 | 70k | 0.868733 | 0.223572 | +0.000064 | **+0.000156 ← LogLoss 首次反弹** | reset |
+| **E6** | 84k | **0.869138** | 0.222990 | +0.000405 | −0.000582 | reset ← AUC global best |
+| E7 | 98k | 0.868604 | 0.223510 | −0.000534 | +0.000520 | +1 |
+| E8 | 112k | 0.868837 | 0.222797 | +0.000233 | −0.000713 | +2 |
+| E9 | 126k | 0.868452 | 0.223949 | −0.000386 | +0.001152 | +3 |
+
+注：该 full train 的训练日志显示 `logloss_rebound_patience=None`（旧 commit），LogLoss rebound guard 尚未落地。若当时启用（patience=1），应在 E5 评估完停机，best_model=E4 ckpt。
+
+### 关键 Evaluation 对照
+
+| CKPT | Local AUC | **LB AUC** | Local−LB Gap |
+|---|---|---|---|
+| t13tf-full E4（EXP-018 参考基线） | 0.868495 | 0.844956 | +0.023539 |
+| **icq-t13tf-halftrain E4** | **0.868619** | **0.84637** ✅ **LB SOTA** | **+0.022249** |
+| icq-t13tf-full E6（global best） | 0.869138 | 0.843599 ❌ | +0.025539 |
+
+**⭐ 核心发现**：
+- **half-train E4 ckpt 的 LB (0.84637) 比 full-train best E6 ckpt 的 LB (0.843599) 高 +0.00277**。
+- **Local 涨 +0.000519（E4→E6）,LB 反而跌 −0.00277,负向杠杆 ~5.3×**。
+- LB 新天花板 **0.84637** 由 icq-half E4 建立，vs 前 SOTA t13tf-full E4 的 0.844956 提升 **+0.001414**。
+
+### 机制解释
+
+E5 起 LogLoss 首次反弹（+0.000156），标志过拟合开始：
+- AUC 仍在涨 0.000064 → 0.000405 → 0.000233（E5~E8），但这部分涨幅来自 train/dev 共享的**局部时间模式记忆**
+- test（远未来）的时间模式与 dev 不同 → 过拟合的 AUC 增益无法传递到 LB
+- `valid→LB gap` 从 E4 的 +0.0222 扩大到 E6 的 +0.0255（两个 job 的 gap 都随训练长度单调扩大）
+
+### 对后续实验的影响
+
+1. **LB 新红线 0.84637**：任何新策略的 evaluation 阈值至少要在此之上。
+2. **优先 evaluation half-train E4 ckpt**，不必等 full train 完成。
+3. **确认 LogLoss rebound guard 的必要性**：trainer 里已实施（patience=1 默认），未来实验默认保护。
+4. **valid→LB gap 不是常数，随训练长度扩大**：更新 team-memory 铁律（已落）。
+
+### 三条新铁律（已写入 team-memory.mdc · 2026-05-04 晚 9）
+
+1. Half-train E4 ckpt 的 LB 可以优于 full-train best ckpt
+2. valid→LB gap 随训练长度扩大而非常数
+3. Holdout AUC 在 half-train E1/E2 比 dev AUC 更稳定/更优
+
+### 本次 evaluation 消耗情况
+
+- 当日 evaluation quota 用量：2/4（`t13tf-loss-full` E9 LB 0.838707 + `icq-t13tf-halftrain` E4 LB 0.84637）
+- 剩余 2 slots 至 PDT 21:00 窗口重置
+- 下一个 evaluation 触发条件：四合一 / 三合一 half-train E4 的 holdout AUC ≥ 0.867（预测 LB ≥ 0.847，即超过当前 SOTA 0.84637 至少 +0.0003）

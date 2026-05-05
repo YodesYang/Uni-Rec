@@ -62,5 +62,5 @@
 | [ADR-003](./ADR-003-feature-engineering-plan.md) | 特征工程作为 P0 路径（4 类候选 + 防泄露 + 实施时序） | Accepted | 2026-05-01 | 待 T11~T14 |
 | [ADR-004](./ADR-004-target-item-seq-conditioning.md) | Target-Item 硬交互注入序列侧（seq-token 级 target-item conditioning） | Accepted | 2026-05-04 | T16 |
 | [ADR-005](./ADR-005-valid-split-redesign.md) | Valid Split Strategy Redesign（dev + holdout 双 valid，降低 valid→LB gap） | Proposed | 2026-05-04 | T17 |
-| [ADR-006](./ADR-006-combined-auc-loss.md) | CombinedAUCLoss = WeightedBCE + PairwiseBPR（对齐 AUC 评估指标的 ranking loss） | Accepted | 2026-05-04 | T18 |
+| [ADR-006](./ADR-006-combined-auc-loss.md) | CombinedAUCLoss = WeightedBCE + PairwiseBPR（对齐 AUC 评估指标的 ranking loss） | ❌ **Deprecated**（2026-05-04 晚 10 · LB −0.00993 证伪） | 2026-05-04 | T18（已关闭） |
 | [ADR-007](./ADR-007-rank-mixer-per-token-ffn.md) | RankMixerBlock Per-token FFN（修正仓库 shared FFN 与论文原版偏差） | Accepted | 2026-05-04 | T19 |
