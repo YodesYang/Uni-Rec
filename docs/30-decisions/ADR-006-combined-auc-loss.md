@@ -27,12 +27,54 @@
 - dev-LB gap **0.0291** / holdout-LB gap **0.0308** 都是历史最大
 - dev Δ vs icq-half = −0.003, LB Δ = −0.010 → **LB 负向放大 3.3×**
 
-**机制解释**（已写入 team-memory 铁律）：
-1. BPR 是 pairwise loss，只优化样本间相对排序，不关心绝对值 calibration
-2. Val AUC 是排序指标，对 BPR 友好 → dev 差距小
-3. LB AUC 可能评估绝对阈值下的 TPR/FPR（或 test positive 分布不同），对 calibration 敏感
-4. CombinedAUCLoss α=0.3 时 30% 梯度来自 BPR，**系统性扭曲 sigmoid 输出分布**
-5. test（远未来 + 时间分布偏差）上未 calibrated 的 sigmoid 错得更厉害，gap 放大 3~4×
+**机制解释（2026-05-05 修订 · 原版基于 "calibration 破坏" 的论证有逻辑漏洞）**：
+
+### 🔍 原版论证的 bug
+
+原 Deprecation Notice 写："BPR 破坏 sigmoid 绝对值 calibration → LB AUC 下降 −0.010"。
+
+**这条逻辑在严格意义下站不住**：
+- AUC = `P(score_pos > score_neg)`，是**排序指标**
+- 对 score 做任意**单调变换**（例如整体 ×10、+5、logit transform）不改变 AUC
+- 所以**在同分布 test 下，calibration 破坏不会直接降 AUC**
+
+### ✅ 修订后的机制解释（更严谨）
+
+BPR 在本赛题下 LB 崩盘的真正机制，是**"学到的排序依赖于 train 绝对分数分布，在 test 分布偏移下不稳定"**：
+
+1. **BPR 的训练目标是推开 pair 间的分数差**：`-log σ(s_pos - s_neg - margin)`，梯度驱使模型把 positive 和 negative 的 score 推向极端（例如 pos → +∞, neg → −∞）
+2. **这种"推极端"的方式依赖于 train batch 的局部分布**——哪些是 hard positive、哪些是 hard negative，由 batch 采样决定
+3. 当 **train/test 分布发生 shift**（本赛题 test 是远未来 + 时间分布漂移）：
+   - test 上"曾经是 easy positive 的样本"可能 score 不再极端
+   - test 上"新出现的 hard negative"可能落在模型从未学过的 score region
+   - **排序关系整体变得不稳定**，部分 pair 的相对排序翻转 → AUC 下降
+4. **BCE 的排序依赖更"平滑"**：BCE 梯度是 `σ(s) − y`，在整个 score range 都有梯度，不会推向极端 → 排序对分布漂移**更 robust**
+5. 这也解释了为什么**三合一 dev LogLoss 比 icq-half 高 +0.003**：BPR 让模型的概率分布推得更极端，dev 上 LogLoss 校准度变差 → 暗示 test 上泛化会更差（LogLoss 比 AUC 对分布 shift 更敏感）
+
+### ⚠️ 归因歧义（重要！）
+
+**必须承认：三合一 E4 LB −0.010 的归因存在歧义**，因为三合一是**组合实验**同时改了 3 个变量：
+- T16 additive target injection
+- T18 CombinedAUCLoss (w=0.3, m=0.5)
+- `holdout_ratio=0.05` → **训练数据从 95% 减到 90%**（损失 ~100k 样本）
+- `logloss_rebound_patience` 从 1 改到 2
+
+**三合一 vs icq-half 的 LB 差距 −0.00993 无法干净归因到单一变量**。可能的分解：
+
+| 归因候选 | 可能贡献 | 证据强度 |
+|---|---|---|
+| T18 BPR（排序稳定性） | -0.003 ~ -0.007 | 中（机制合理但未独立验证） |
+| Holdout 切分（训练数据 −5%） | -0.002 ~ -0.005 | 中（1.9M × 5% ≈ 100k sparse embedding 更新减少） |
+| T16 vs ICQ 架构差异 | ±0.002 | 低（两者都是 target conditioning，强度相当） |
+| logloss_patience 放宽 | 0 ~ -0.001 | 低（未到反弹拐点前都一样） |
+
+**结论**：T18 Deprecated 的判决仍然成立（排序稳定性论证 + dev LogLoss 显著抬高），但**贡献幅度** −0.003 ~ −0.007（而非之前暗示的全部 −0.010）。**完整干净归因需要独立 T18-only half-train vs BCE-only half-train 对照**（目前无此数据）。
+
+### ⚠️ 后续 holdout_ratio 的独立嫌疑
+
+若 T16-only full train（当前 run.sh 配置 `--holdout_ratio 0.05`）LB 结果显著低于 icq-half E4 LB 0.84637，则**反向证明 holdout 切分本身有 −0.003 ~ −0.005 的 LB 成本**，独立于 T18。届时需要:
+1. 把 ADR-005 T17 `holdout_ratio` 默认值回归到 0.0
+2. 重新设计 "holdout as LB proxy" 的切分策略（例如 ADR-005 方案 C：留时间空窗而非切走 train 数据）
 
 **为什么 external anchor（Tencent +0.70~1.26% GMV）在这里不适用**：
 - 腾讯论文的 ablation 在**同分布 test** 下做

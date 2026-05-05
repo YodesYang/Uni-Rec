@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04 晚 10（PDT · 🔥 T18 LB 实锐证伪 0.836445 · T19 放弃 · T16-only full train 接替）· 结论：① **🔥 三合一 E4 LB = 0.836445**（dev 0.865516 / holdout 0.867196），vs SOTA 0.84637 **−0.00993**,dev→LB gap **0.0291** / holdout→LB gap **0.0308** 均历史最大,**Holdout 也未能成为 LB 代理**；② **T18 CombinedAUCLoss 路线整体关闭** — ADR-006 状态降 **Deprecated**;机制：BPR 破坏 sigmoid 绝对值 calibration,在"远未来 test + 时间分布偏差"场景下 gap 放大 3~4×,外部 anchor（Tencent 同分布 test +0.7~1.26% GMV）不适用本赛题;③ **T19 per-token FFN 同步放弃**（四合一 E2 dev 0.862946 更差,与 T18 叠加 LB 必然更糟,不评估）；④ **T16-only full train 接替为当前唯一 SOTA 候选**,run.sh 已切换到 `T16 additive + holdout + logloss_rebound_patience=1` 配置,Job Name `t16-add-a01-ho005-lgrp1-full-swiglu-vr005-bs128`,预期 best ckpt dev ≈ 0.869,LB ≈ 0.847~0.848；⑤ **当日 evaluation quota**：已用 3（t13tf-loss-full + icq-half E4 + 三合一 E4）,剩 1；⑥ **training quota**：四合一停止释放 1 slot,T16-only full train 占 1,剩 2。
+**最近一次审视**：2026-05-04 晚 11（PDT · 🔬 深度方法论复盘 · T20 新增 · ADR-006 机制修订 · T16-only full train 待回流）· 结论：① **今日 3 次 evaluation 2 次反向（−0.006 / −0.010 LB）暴露 funnel 系统性缺陷**,EXP-024 方法论复盘落档,核心诊断: dev AUC 和 LB AUC 是**两个不同任务的 generalization**(近 train / 远 train),相关性不稳定,funnel 按 dev 决策在 distribution shift 场景下**系统性失效**；② **T20 `[!]` 新增: Funnel 重设计**（6 个改革方向 A-F）,优先级**最高**,在 funnel 修复前任何方法学创新 LB 信号不可信;③ **ADR-006 机制修订**: "BPR 破坏 calibration" 逻辑站不住（AUC 是排序指标,单调变换不改 AUC），修订为 **"BPR 学到的排序依赖 train 绝对分数分布,在 test 分布偏移下不稳定"**;加入**归因歧义段**（三合一 LB −0.010 三变量混杂,T18 贡献分解 -0.003~-0.007 / holdout 切分 -0.002~-0.005 / 架构差 ±0.002）;④ **test 集假设核查**: 大概率没 bug（gap 系统性 + SOTA 可达 + 正向响应 3 个证据）,但"版本核查"5 分钟可做,列入 T20 P1;⑤ **Holdout 独立成本待验证**: T16-only full train 带 holdout 若 LB < 0.846 → 反证 holdout 有 −0.003 以上隐性成本,立刻回归 `holdout_ratio=0`;⑥ **team-memory 新增** "holdout 切分隐性成本" 铁律;⑦ **quota 状态不变**: evaluation 3/4 用,training T16-only full 占 1 slot 在跑。
 
 ---
 
@@ -172,6 +172,38 @@
 
 ---
 
+### T20 `[!]` Funnel 重设计 — 根治 dev→LB 系统性背离
+
+**触发**：2026-05-04 一日 3 次 evaluation,2 次 LB 反向（合计 −0.016 LB），暴露现有 funnel (proxy → half-train → full-train → evaluation) **按 dev AUC 决策**在本赛题 distribution shift 场景下**系统性失效**。
+
+**完整复盘见 [`EXP-024`](../40-experiments/EXP-024-methodology-retrospective-2026-05-04.md)**，本节只记 next action。
+
+**核心诊断**：
+- Dev AUC 测 "train 前 95% → train 尾部 5%" 的 generalization；LB AUC 测 "train 100% → 远未来 test" 的 generalization；**两个不同任务**。
+- Proxy / half-train 都无法区分"慢性泛化失败",只能过滤"代码 bug / 极端负向"。
+- 正交子弹假设有漏洞,多个 target-conditioning / ranking 改动可能**共同加大 overfitting**。
+- 组合实验（T16+T18+holdout）违反单变量 ablation 纪律 → LB 失败无法归因。
+
+**改革方向（按优先级）**：
+
+| # | 方向 | 预期工作量 | 预期价值 |
+|---|---|---|---|
+| A | Valid split 重设计: `train[0, 80%] \| 空窗[80, 95%] \| valid[95, 100%]`(ADR-005 方案 C) | ~60 行 `dataset.py` | 🔴 治本,提升 dev→LB 相关性 |
+| B | 纪律: 组合实验前必须先有单变量 ablation | 纯纪律,写入 `.cursor/rules` | 🔴 避免归因歧义 |
+| C | Trainer 加 `keep_topk_ckpt=3`,保留多 epoch ckpt | ~50 行 `trainer.py` | 🟡 离线选优空间,quota 3× 换取完整曲线 |
+| D | Proxy 重新定位: 只过滤代码 bug,不做方法学判决 | 纯纪律 | 🟡 释放 proxy quota 给 ablation |
+| E | Evaluation 前 5~10 次明确用于建立 dev→LB 映射 | 纯纪律 | 🟡 有了映射后再追 SOTA |
+| F | Ranking-family loss（BPR / ListMLE / Contrastive）降优先级 | 规则 | 🟢 避免重犯 T18 错误 |
+
+**下一步（等 T16-only full train 回流后）**：
+1. **用 T16-only LB 核查 holdout 独立成本**：若 T16-only 带 holdout LB < 0.846 → holdout 有 −0.003 以上成本,立刻去掉 holdout 并重设计
+2. **启动方向 A（valid split 重设计）的代码实现**,作为下一轮实验的默认 valid 定义
+3. **写 `.cursor/rules/experiment-discipline.mdc`**,落方向 B/D/E/F 的纪律铁律
+
+**当前优先级**：**最高**。在 funnel 修复之前,任何方法学级创新（例如 DIN interest token, Feature Cross Layer, Muon optimizer）的 LB 信号都**不可信**,**不应该投入 quota**。
+
+---
+
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
 **决策（2026-04-26）**：暂缓启动。理由：
@@ -278,6 +310,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT 晚 11（🔬 方法论深度复盘 · EXP-024 落档 · T20 新增 · ADR-006 机制修订）**：用户反思 "为什么离线屡屡提升,评估却反向?funnel 是不是有问题?" + "有没有可能测试集有问题?"。系统性复盘今日 3 次 evaluation (其中 2 次 LB 反向 −0.006 / −0.010,合计 LB 下降 −0.016)。**核心诊断**: funnel 设计本身有系统性缺陷 —— dev AUC 测 "train 前 95% → 尾部 5%" 的 generalization,LB AUC 测 "train 100% → 远未来 test" 的 generalization,是**两个不同任务**;按 dev 决策在本赛题 distribution shift 场景下相关性不稳定(3×~11× 放大,方向不固定);Proxy 和 half-train 无法区分"慢性泛化失败";"正交子弹可叠加" 假设站不住(target-conditioning + ranking loss 可能共同加大 overfitting);组合实验违反单变量 ablation 纪律(三合一 LB −0.010 无法干净归因)。**test 集 bug 假设**: 大概率否定(gap 系统性 + SOTA 0.858 可达 + ICQ 正向响应 3 证据),但 "版本核查" 5 分钟可做。① **EXP-024 落档**(独立方法论复盘文档): 完整包含所有 LB 数据点、funnel 缺陷诊断、6 个改革方向(valid split 重设计 / 归因实验纪律 / keep_topk_ckpt / proxy 重新定位 / evaluation 作数据源 / ranking loss 降优先级)、P0/P1/P2/P3 可执行行动项、7 条最诚实的自我批评(过早给 T18 判死刑 / holdout 成本低估 / dev 涨阈值机械化 / 忽视归因实验的合理消耗方式);② **T20 `[!]` 新增**: Funnel 重设计 task,**优先级最高**,在 funnel 修复之前任何方法学创新 LB 信号**不可信**,不应投 quota;③ **ADR-006 Deprecation Notice 机制修订**: 原 "BPR 破坏 calibration" 论证逻辑站不住(AUC 是排序指标,单调变换不改 AUC),修订为更严谨的 **"BPR 学到的排序依赖 train 绝对分数分布,在 test 分布偏移下不稳定" 机制**,加入**归因歧义段**(三合一是 3 变量组合实验,LB −0.010 分解: T18 -0.003~-0.007 / holdout -0.002~-0.005 / 架构差 ±0.002 / patience ±0.001),明确 T18 Deprecated 判决仍成立(机制+辅证)但贡献幅度不可独立归因;④ **team-memory 2 条铁律更新**: 原"BPR 破坏 calibration"改为排序稳定性机制 + 归因歧义 + 组合实验禁令(第 5 条); 新增第 6 条 "Holdout 切分可能有隐藏 train data loss 成本,T16-only full train 可检验,若 LB < 0.846 则反证立刻去掉 holdout";⑤ **最诚实小结**: 在积累信号的关键节点,**反思 > 继续推进**;今天早 6 小时进入复盘模式可能用 2 次 evaluation 就能获得今天 3 次的信息量,并避免三合一组合实验错误。
 
 - **2026-05-04 PDT 晚 10（🔥 T18 LB 实锐证伪 −0.00993 · T18/T19 task 关闭 · T16-only full train 接替）**：三合一 E4 evaluation 结果回流:LB **0.836445**(dev 0.865516 / holdout 0.867196)。vs SOTA 0.84637 **Δ−0.00993**,dev→LB gap **+0.0291** / holdout→LB gap **+0.0308**,**双双历史最大**,Holdout 未能成为 LB 代理。诊断：CombinedAUCLoss(BPR α=0.3)破坏 sigmoid 绝对值 calibration,在"远未来 test + 时间分布偏差"场景下 gap 放大 3~4×,外部 anchor(Tencent 同分布 test +0.7~1.26% GMV)不可直接照搬到本赛题。① **ADR-006 Accepted → Deprecated**,首部添加 Deprecation Notice 完整记录机制与影响;② **T18 task 关闭**,active.md T18 节简化为关闭声明,代码保留(`combined_auc_loss` 纯函数 + trainer `elif loss_type=='auc'` 分支不回滚,便于未来 calibration-aware ranking loss 验证),默认 `--loss_type bce`;③ **T19 task 同步关闭**:四合一 E1/E2 dev 持续落后三合一 0.0008~0.0016,四合一不可 evaluation(与 T18 叠加必 LB 崩盘),T19 独立收益未单独验证,ADR-007 保留 Accepted 但 task 关闭,future 若重启必须不叠加 T18 单独 full train;④ **EXP-022 落终结状态**,附三合一全 E1~E4 epoch 表 + evaluation 对照;⑤ **team-memory 新铁律**(第 5 条):BPR/Ranking loss 在"远未来 test"破坏 calibration + holdout→LB 经验公式仅在纯 BCE 路径下有效 + 不同 loss 跨类比 gap 不可预测 + 外部 anchor 同分布 test ablation 不可直接照搬;⑥ **T16-only full train 接替**:run.sh 已切换到 `target_item_seq_injection=additive + alpha=0.1 + holdout_ratio=0.05 + logloss_rebound_patience=1`(严格,vs halftrain 的 patience=2),Job Name `t16-add-a01-ho005-lgrp1-full-swiglu-vr005-bs128`,10 epoch + LogLoss guard 保护,预期 best ckpt dev ≈ 0.869, LB ≈ 0.847~0.848(突破 SOTA 0.84637 +0.001);⑦ **本地 smoke 通过**:Args 正确(T16 on / T18 off / T19 off / T17 on / guard p=1),LogLoss guard banner 打出,best_model 落盘正常,py_compile + ReadLints 全过;⑧ **当日 quota**:evaluation 3/4 已用(t13tf-loss-full + icq-half E4 + 三合一 E4),剩 1;training quota 四合一停止释放 1 slot,T16-only full train 占 1,剩 2。
 
