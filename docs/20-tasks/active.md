@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-05 凌晨 0:30（PDT · 🔥 社区 Seed 主楼深度解析 · P1+P3 代码落地并启动 2 job · 4 training slot 全满）· 结论：① **社区 lexiang 选手 Seed (LB 0.85+) 主楼 + 评论区深读**：抓到 5 条情报，其中 3 条直接对口本项目——问题-1 "uid 一次性 + item id 线下虚高线上掉"证实本赛题 dev→LB gap 机制，问题-4 "pure model 掉分"排除 kernel-fused 重写路线，问题-5 "seqc feat47=itemid 做 match 都掉分"证实 T13 hash500k 的谨慎处理正确；② **P1 Item-ID Random Mask 落地**（T21 新增）：`baseline/dataset.py` + `train.py` 共 ~115 行，双 gate (`is_training AND shuffle`) 保证推理路径 bit-identical，本地 smoke 5/5 通过；③ **P3 Valid Split Gap 落地**（T22 新增, ADR-005 方案 C 首个实测）：`baseline/dataset.py::get_pcvr_data` 新增 `valid_gap_ratio` 参数，time-sorted 切分支持 `[train | gap (dropped) | valid | holdout]`；④ **2 个单变量 ablation job 已启动**：`idmaskc15-icq-halftrain` (EXP-025) 与 `gap15-icq-halftrain` (EXP-026)，都基于 icq-half SOTA (LB 0.84637)；⑤ **quota 状态**：training 4 slot 全满（T16 full + 四合一 + P1 + P3），evaluation 3/4 用剩 1 slot；⑥ **P3 的判决逻辑与其他 job 不同**：主指标是 `dev→LB gap`，不是 dev 绝对值，gap < +0.018 即算成功；⑦ **已 commit 代码改动**，push 待用户指示。
+**最近一次审视**：2026-05-05 中午 11:50（PDT · 4 并行 ablation 批次回流 + T21 证伪 + T22 Blocked + T23 落地 + 1 eval quota 用完）· 结论：① **4 个 parallel job 全部完成**: 四合一 (T16+T18+T19+ho) E4 dev 0.866133, T16-only full E2 best 0.865122（E3 触发 logloss guard 停）, idmaskc15 E3 dev 0.868288, gap15 E4 dev 0.867124 —— **全部低于 icq-half SOTA E4 0.868619 (LB 0.84637)**; ② **idmaskc15 evaluation**: LB **0.842176** vs SOTA **Δ−0.004194**, dev→LB gap **+0.0261** 放大 2× —— **T21 P1 证伪关闭**; 机制: input-level random mask 让 85% token 仍可见, 模型仍依赖 id embedding, 不是强度问题而是方法不对口; ③ **T22 P3 Blocked 诊断**: gap15 dev 降 0.0015 完全匹配"减 15% train data"纯预期,无"任务变难"加成; 日志 `effective train→valid distance = -341046 sec` 证明 RG-level 切分**无法真正隔离时间**（RG 内部时间跨 4 天）; 修方向 T22-fix = row-level gap cutoff, 排在 T23 之后; ④ **T23 seq_c feat47 disable 代码落地**: `baseline/dataset.py` + `train.py` + `infer.py` + smoke 5/5, 对口 Seed 主楼问题-5 "seqc feat47 跟 itemid 是一样的 做不做 match 特征都掉分", 明日 training quota 重置后启动 `disablefid47-icq-halftrain`; ⑤ **T16 additive α=0.1 独立证伪**: T16-only full E2 best 比 icq-half E4 低 0.003, E3 就 guard 停, ADR-004 方案 A 单独路线关闭 (除非换 concat / gated-sum 模式 B/C 重验); ⑥ **EXP-024 再次验证**: dev 涨 +0.0003 → LB 跌 −0.004 放大 14×, "dev 做决策" 的铁律铁证,下轮 T23 evaluation 仍会按"dev 不看绝对值,以 holdout→LB 估算 + LB direct"决策; ⑦ **quota**: evaluation 1/4 已用剩 3 slot; training 4 slot 全空闲,等 PDT 21:00 前可启动 T23 / T22-fix / 或其他新方向。
 
 ---
 
@@ -204,65 +204,63 @@
 
 ---
 
-### T21 `[~]` P1 Item-ID Random Mask（社区 Seed 0.85+ 情报子弹）
+### T21 `[x]` P1 Item-ID Random Mask — ❌ 已证伪关闭（LB 0.842176 vs SOTA 0.84637 Δ−0.004194）
 
-**来源**：2026-05-04 晚抓到社区 lexiang 选手 Seed（LB 0.85+）主楼与评论区 2 条情报：
-- Seed 主楼问题-1：uid 训练集和测试集"几乎全是一次性 user 且无交集"；**item id 线下 auc 虚高 → 线上掉**；Seed 判断"估计是分布问题"
-- 评论区 Pung：item id 没用可能是因为 **test 中 itemid OOV 率太高** 导致；建议加上**随机 mask**，训练时让模型不要过度依赖 id 特征
+**2026-05-05 终结**：`idmaskc15-icq-halftrain-swiglu-vr005-bs128` E3 dev **0.868288**（vs icq-half E3 0.867965 +0.000323）→ evaluation **LB 0.842176**（vs SOTA 0.84637 **Δ−0.004194**）。Dev 和 LB 方向相反；dev→LB gap 从 icq-half 的 +0.0222 放大到 **+0.0261**。
 
-**假设**：训练时对 `domain_c_seq_47`（vocab=278M，最长尾 item_id 序列）做 token 粒度随机 mask（概率 p=0.15），强制模型在"看不到具体 id"的条件下也能从上下文预测 CVR → id 通道 regularisation → 降低 dev→LB gap。
+**机制**：input-level random mask 让 85% token 仍可见，模型仍依赖 id embedding。Dev 近 train（id 分布共享）略涨；test 远 train（id OOV 率高）85% 训练路径失效。**不是强度问题**（降到 0.10 也救不了），方法本身在"远未来 test"场景无效。
 
-**代码落地**：
-- ✅ `baseline/dataset.py::PCVRParquetDataset`：`_convert_batch` 中 seq 填充后对指定 domain 按 Bernoulli 采样随机置 0，time_bucket 同位置同步置 0。Mask 双 gate：`is_training AND shuffle AND prob>0`
-- ✅ `baseline/dataset.py::get_pcvr_data`：新增 `id_mask_prob` / `id_mask_seq_domains` 透传（只给 train dataset）
-- ✅ `baseline/train.py`：新增 CLI `--id_mask_prob` / `--id_mask_seq_domains`
-- ✅ `baseline/infer.py`：**零改动**，双 gate 保证推理 bit-identical
-- ✅ 本地 dataset-only smoke 5/5 通过：全 domain p=0.5 实际丢弃率 0.497~0.511 / domain=['c'] p=0.9 只掉 seq_c 0.903 / inference 路径 bit-identical
+详见 [`EXP-025`](../40-experiments/EXP-025-p1-idmask-c15-halftrain-2026-05-05.md) 与 [`EXP-027`](../40-experiments/EXP-027-parallel-ablation-batch-2026-05-05.md)。
 
-**已启动 job**：
-- `idmaskc15-icq-halftrain-swiglu-vr005-bs128`（2026-05-05 ~00:00 PDT），基于 icq-half SOTA（LB 0.84637）单变量加 `--id_mask_prob 0.15 --id_mask_seq_domains c`，其他完全一致
-- 详情见 [`EXP-025`](../40-experiments/EXP-025-p1-idmask-c15-halftrain-2026-05-05.md)
-
-**判决阈值**：
-| 场景 | E4 dev AUC | 行动 |
-|---|---|---|
-| 强成功 | ≥ 0.868 | Evaluate，下轮叠 T16 |
-| 正常 | [0.866, 0.868] | Evaluate（LB ≥ 0.846 即可接受）|
-| 边界 | [0.863, 0.866] | 参考 P3 gap 缩减再决定 |
-| 失败 | < 0.863 | 0.15 过强，下轮 0.10；或方向错误 |
-
-**当前优先级**：高。与 T16 正交，成则纳入默认叠加。
+代码保留（`--id_mask_prob` / `--id_mask_seq_domains` 默认 0），不回滚；未来若有"structural mask + input mask"组合路径可复用。
 
 ---
 
-### T22 `[~]` P3 Valid Split Gap（funnel 重设计方案 C 首个实测）
+### T22 `[⚠️]` P3 Valid Split Gap — Blocked（RG-level 切分失效，待改为 row-level gap）
 
-**来源**：[ADR-005](../30-decisions/ADR-005-valid-split-redesign.md) 方案 C + [EXP-024](../40-experiments/EXP-024-methodology-retrospective-2026-05-04.md) 方法论复盘结论"dev 是 train 近未来 / LB 是 train 远未来"。
+**2026-05-05 部分证伪**：`gap15-icq-halftrain-swiglu-vr005-bs128` E4 dev **0.867124**（vs icq-half E4 0.868619 Δ−0.001495）。dev 降幅与"减 15% train data"纯预期完全匹配，**gap 未真正起到时间退让作用**。
 
-**假设**：在 train 尾部和 dev 之间**丢弃一段时间窗**（15%）完全不训也不评，让 dev 退让到相对 train 的"远未来"位置，模拟 test 的 covariate shift 特征 → dev→LB 相关性提升 → gap 缩小。
+**根因**：`valid_split_strategy='time'` 按每个 RG 的 `max(timestamp)` 排序，但**每个 RG 内部时间跨 4 天**（总跨度 4.04 天），排序后尾部 RG 的 `min(ts)` 仍是 2/28。RG-level gap 无法真正隔离时间窗。
 
-布局：
+日志证据：
 ```
-[ train 80% ] [ gap 15% (dropped) ] [ dev 5% ]
+train ts: [1772238909, 1772588918]
+gap   ts: [1772247536, 1772588958]   ← 与 train 严重重叠
+valid ts: [1772247872, 1772588990]   ← 与 train 严重重叠
+effective train→valid distance = -341046 sec
 ```
 
-**代码落地**：
-- ✅ `baseline/dataset.py::get_pcvr_data`：新增 `valid_gap_ratio` 参数，time-sorted RG 切分顺序变为 `[train | gap (dropped) | valid | holdout]`
-- ✅ 参数校验齐全：需 `valid_split_strategy='time'`；与 `enable_row_time_cutoff` 互斥；`valid + holdout + gap < 1.0`
-- ✅ 日志 `[P3] gap ts (dropped): [min, max]  effective train→valid distance = X sec`
-- ✅ smoke 通过（三路切分 `7 train / 1 gap (dropped) / 1 valid / 1 holdout` ✓）
+详见 [`EXP-026`](../40-experiments/EXP-026-p3-gap15-halftrain-2026-05-05.md)。
 
-**已启动 job**：
-- `gap15-icq-halftrain-swiglu-vr005-bs128`（2026-05-05 00:28 PDT），基于 icq-half SOTA 单变量加 `--valid_gap_ratio 0.15`
-- 详情见 [`EXP-026`](../40-experiments/EXP-026-p3-gap15-halftrain-2026-05-05.md)
+**修复方向 T22-fix**（不立即启动）：在 `_row_ts_cutoff` 基础上扩展为双阈值 row-level gap cutoff，~50 行代码。优先级排在 T23 之后；先看 seq_c disable 方向是否有 LB 收益，再决定是否投入修 P3。
 
-**判决逻辑（关键，与其他 job 不同）**：
-- **主指标不是 dev 绝对值，而是 `dev→LB gap`**
-- Dev AUC 绝对值**必然降**（train 少 15% + dev 更难），这是正常，不是失败
-- 若 `dev→LB gap < +0.018` → P3 成立，ADR-005 方案 C Accept，下轮默认带 gap
-- 若 `gap ≥ +0.020` → P3 无效，切方案 A（triple-split）或 B（dev+holdout）
+---
 
-**当前优先级**：最高（T20 子任务 - 治本 funnel）。
+### T23 `[~]` seq_c feat47 Structural Disable（Seed 主楼问题-5 对口）
+
+**来源**：
+- 社区 Seed 主楼问题-5："长序列: seqc feat47 跟 itemid 是一样的，做不做 match 特征都掉分" —— 证实 `domain_c_seq_47` (vocab=278M) 作为 item_id 序列**本身信号稀薄 / 过拟合严重**
+- T21 P1 证伪（LB −0.004）证明 input-level random mask **机制上不对**，下一步是完全**去掉 item_id 通路**
+
+**代码落地（2026-05-05）**：
+- ✅ `baseline/dataset.py::PCVRParquetDataset`：新增 `disable_seq_fids` 参数；`_convert_batch` 中对指定 sideinfo fid 的 slot 整列置 0；lengths 向量不变（避免 SDPA all-padding NaN）
+- ✅ `baseline/dataset.py::get_pcvr_data`：透传到 train / valid / holdout 三个 dataset（uniform across splits）
+- ✅ `baseline/train.py`：新增 CLI `--disable_seq_fids`（comma-separated）
+- ✅ `baseline/infer.py`：新增 `_parse_disable_seq_fids` 辅助函数 + PCVRParquetDataset 构造透传 → **训推一致**
+- ✅ **本地 smoke 5/5 通过**：None/[] bit-identical / `[47]` 只归零 seq_c 的 slot=10 (fid=47) 14138 个 ids / shuffle=True/False 同效果 / lengths 未变 / 非法输入抛 ValueError
+
+**判决阈值**（次轮 job `disablefid47-icq-halftrain`）：
+
+| 场景 | LB vs SOTA 0.84637 | 行动 |
+|---|---|---|
+| 破 SOTA | ≥ 0.847 | 路线 Accept，下轮扩大 disable 范围（fid=47+29 等）|
+| 持平 | [0.845, 0.847] | 方向对，继续尝试 disable 更多 id fid |
+| 微负 | [0.843, 0.845] | 扩大范围再试一次 |
+| 大负 | < 0.843 | 方向也错，触发战略转向（T22-fix 升优先级或换方向）|
+
+**当前优先级**：**最高**（剩余方向 ROI 最高 + 代码已就位 + 最小单变量 ablation）。
+
+**⚠️ 平台提交注意**：T23 引入 `disable_seq_fids` 参数会写入 `train_config.json`。平台默认 infer.py 如果不读这个 key 会导致**训推不一致**（推理看到完整 seq_c 而训练已去 fid=47）。**首次平台 evaluation 必须勾选"上传自定义 infer.py"**（我们本地已改好）。
 
 ---
 
@@ -372,6 +370,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-05 PDT 中午 11:50（4 并行 ablation 批次回流 + T21 证伪 + T22 Blocked + T23 落地）**：4 个 parallel job 全部回流, 1 次 evaluation 消耗后 LB 红线 0.84637 未破。① **四合一 E4 dev 0.866133** (vs icq-half 0.868619 Δ−0.0025), holdout 0.867182 预估 LB ≈ 0.845, 不 eval; ② **T16-only full E2 best 0.865122** (vs icq-half E4 Δ−0.0035), E3 触发 logloss rebound guard 停, T16 additive α=0.1 full train 下更早过拟合, **ADR-004 方案 A 单独路线关闭**; ③ **idmaskc15 E3 dev 0.868288** (vs icq-half E3 +0.000323, 唯一正向 dev 信号) → **evaluation LB 0.842176** (vs SOTA 0.84637 **Δ−0.004194**, dev→LB gap +0.0261 放大 2×), **T21 P1 证伪关闭**; 机制: input-level random mask 85% token 仍可见,模型仍依赖 id embedding,dev 近 train 略涨, test 远 train 失效; ④ **gap15 E4 dev 0.867124** (Δ−0.0015 完全匹配"减 15% train data"纯预期), 日志 `effective train→valid distance = -341046 sec` 证明 **RG-level 切分无法隔离时间** (RG 内部时间跨 4 天), **T22 P3 Blocked**, 修方向 = row-level gap cutoff (T22-fix 暂不启动); ⑤ **T23 seq_c feat47 structural disable 代码落地**: `baseline/dataset.py` PCVRParquetDataset `disable_seq_fids` 字段 + `_convert_batch` slot 置零 + `get_pcvr_data` 传三路 / `train.py` CLI `--disable_seq_fids` / `baseline/infer.py` `_parse_disable_seq_fids` 透传 → **训推一致**; 本地 smoke 5/5 通过 (None/[] bit-identical / `[47]` 只归零 seq_c slot=10 14138 ids / shuffle=True/False 同效果 / lengths 未变 / 非法输入抛 ValueError); 对口 Seed 主楼问题-5 "seqc feat47 跟 itemid 是一样的 做不做 match 特征都掉分"; ⑥ **EXP-024 "dev 不是 LB 单调代理" 铁律再次验证**: idmaskc15 dev +0.000323 → LB −0.004194, 反向放大 14×; ⑦ **EXP-025 / EXP-026 / EXP-027 落档**, EXP-027 汇总表 + 机制小结 + 剩余方向 ROI; ⑧ **quota**: evaluation 1/4 用剩 3; training 4 slot 全空闲等 PDT 21:00 前启动下一轮 `disablefid47-icq-halftrain` (T23 首个实测)。**LB 红线 0.84637 未破, 距 ddl ~20 天, 剩余方向 ROI 排序: T23 seq_c disable (最高, 代码已就位) > T22-fix row-level gap (修 funnel 不直接贡献 LB) > T16 方案 B/C > DIN / UE 分离**。
 
 - **2026-05-05 PDT 凌晨 0:30（🔥 社区 Seed 主楼深度解析 · P1 + P3 代码落地 · 2 job 启动）**：用户推送 Seed (LB 0.85+) 主楼 "腾讯广告算法大赛 Day x" 截图,抓到 5 条未消化情报。3 条直接对口本项目: ① 问题-1 "uid 训练集测试集几乎全是一次性 user 且无交集 / item id 线下 auc 虚高 → 线上掉 / 估计是分布问题" —— 证实我们 EXP-018 观测到的 dev→LB gap +0.021~+0.030 机制是 id 特征 OOV 导致; ② 问题-4 "pure model 主流 rankmixer/onetrans/hyformer/mixformer 都改 pure attention + FFN 为了 MFU,Seed 实测都掉分,可能数据量不够" —— 排除 kernel-fused 重写路线,本项目 HyFormer + RankMixerNS 方向对口; ③ 问题-5 "seqc feat47 跟 itemid 是一样的,做不做 match 特征都掉分" —— 证实 T13 hash500k 谨慎处理正确,且反向说明 seq_c 作为 item_id 序列信号稀薄。评论区 Pung 建议 "item id OOV 率太高 → 训练时随机 mask" —— 方向与上述一致。**代码落地 2 条正交子弹**: ① **T21 P1 Item-ID Random Mask** (baseline/dataset.py PCVRParquetDataset + get_pcvr_data, baseline/train.py,共 ~115 行): 训练时对指定 domain 按 token 粒度 Bernoulli 采样 mask,双 gate (`is_training AND shuffle AND prob>0`) 保证推理 bit-identical。domain 名字支持 `'c'` 和 `'seq_c'` 两种。5/5 smoke 通过: prob=0.5 全 domain 实际丢弃率 0.497~0.511 / domain=['c'] prob=0.9 只掉 seq_c 0.903。② **T22 P3 Valid Split Gap** (baseline/dataset.py::get_pcvr_data 新增 `valid_gap_ratio` 参数): time-sorted RG 切分顺序变为 `[train | gap (dropped) | valid | holdout]`,gap 区间完全丢弃不参与训练也不算指标。参数校验齐全 (需 `valid_split_strategy='time'` / 与 `enable_row_time_cutoff` 互斥 / `valid + holdout + gap < 1.0`)。日志 `[P3] gap ts (dropped) + effective train→valid distance`。**2 job 启动**: `idmaskc15-icq-halftrain-swiglu-vr005-bs128` (~00:00 PDT, +`--id_mask_prob 0.15 --id_mask_seq_domains c`) 与 `gap15-icq-halftrain-swiglu-vr005-bs128` (00:28 PDT, +`--valid_gap_ratio 0.15`),都是 icq-half SOTA (LB 0.84637) 的**单变量 ablation**,严格遵守 EXP-024 的归因纪律。**training quota 4/4 全满** (T16-only full + 四合一 + P1 + P3),evaluation 3/4 剩 1 slot。EXP-025 / EXP-026 落档, active.md T21/T22 新增, ADR-005 方案 C 进入首个实测阶段。**P3 判决逻辑关键: 主指标不是 dev 绝对值,而是 `dev→LB gap`**,dev 绝对值下降是预期且正常的。infer.py 零改动,与平台默认 infer.py 完全兼容。
 

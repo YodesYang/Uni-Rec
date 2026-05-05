@@ -11,7 +11,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -95,6 +95,28 @@ def _resolve_history_cvr_path(model_dir: str, cfg: Dict[str, Any]) -> str:
         if path and os.path.exists(path):
             return path
     return ""
+
+
+def _parse_disable_seq_fids(raw: Any) -> Optional[List[int]]:
+    """Parse ``disable_seq_fids`` from ``train_config.json``.
+
+    Accepts a comma-separated string (what ``train.py`` writes) or a
+    list (future-compat). Returns ``None`` when no fids are requested
+    so ``PCVRParquetDataset`` takes its default "no-op" branch and we
+    stay bit-identical to pre-T23 infer behaviour.
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        parts = [s.strip() for s in raw.split(",") if s.strip()]
+        if not parts:
+            return None
+        return [int(p) for p in parts]
+    if isinstance(raw, (list, tuple)):
+        out = [int(x) for x in raw]
+        return out or None
+    raise ValueError(
+        f"Unexpected type for disable_seq_fids: {type(raw).__name__}")
 
 
 def _load_ns_groups(
@@ -207,6 +229,7 @@ def main() -> None:
         history_cvr_prior_strength=float(cfg.get("history_cvr_prior_strength", 20.0)),
         enable_time_of_day_features=bool(cfg.get("enable_time_of_day_features", False)),
         enable_hour_only_features=bool(cfg.get("enable_hour_only_features", False)),
+        disable_seq_fids=_parse_disable_seq_fids(cfg.get("disable_seq_fids", "")),
     )
 
     loader_kwargs: Dict[str, Any] = {}

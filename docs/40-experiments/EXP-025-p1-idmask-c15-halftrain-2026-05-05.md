@@ -2,7 +2,7 @@
 
 **日期**：2026-05-05
 **作者**：Agent
-**状态**：🔄 In Progress（platform running 中，等 E4 回流）
+**状态**：❌ **已证伪**（2026-05-05 · LB 0.842176 vs SOTA 0.84637 · Δ **−0.004194**）
 
 ---
 
@@ -97,20 +97,63 @@ EXP-024 方法论复盘后的结论之一："dev 是 train 近未来、LB 是 tr
 
 ---
 
-## 回流数据（待填）
+## 回流数据
 
 | Epoch | Step | Val AUC | Val LogLoss | vs icq-half same epoch |
 |---|---|---|---|---|
-| E1 | TBD | TBD | TBD | icq-half E1=0.864992 |
-| E2 | TBD | TBD | TBD | icq-half E2=0.867557 |
-| E3 | TBD | TBD | TBD | icq-half E3=0.867965 |
-| **E4** | TBD | **TBD** | TBD | icq-half E4=**0.868619** |
+| E1 | 15941 | 0.864440 | 0.22703 | icq-half E1=0.864992 (Δ **−0.000552**) |
+| E2 | 31882 | 0.867081 | 0.22503 | icq-half E2=0.867557 (Δ **−0.000476**) |
+| **E3** | **47823** | **0.868288** | **0.22382** | icq-half E3=0.867965 (Δ **+0.000323**, **global best**) |
+| E4 | 63764 | 0.868272 | 0.22326 | icq-half E4=0.868619 (Δ **−0.000347**, E3 比 E4 更高) |
+
+**best = E3 @ step 47823, local AUC = 0.868288**
+stop_reason = max_epochs_completed（未触发 logloss rebound guard）。
+总训练时长 ≈ 7h06m。
 
 ---
 
-## 下一步
+## Evaluation 结果
 
-- E4 回流 → 对照 icq-half E4 判断是否 evaluation
-- 若 E4 dev AUC 健康（≥ 0.866）且当日 evaluation quota 有余 → 消耗 1 次 eval slot 拿 LB
-- 若后续 slot 允许，下一轮尝试 `id_mask_prob=0.10`（更保守）或 `id_mask_seq_domains c,d`（扩到 seq_d）做强度/范围扫描
-- P1 若 LB 正向 → 纳入 default config 与 T16 叠加做 full train
+**Job**：`idmaskc15-icq-halftrain-swiglu-vr005-bs128_eval_*`（2026-05-05 PDT, evaluation quota 1/4 used）
+**Ckpt**：`global_step47823.auc=0.868288.best_model`（E3 global best）
+**上传**：`baseline/infer.py` 零改动版本（双 gate 保证推理 bit-identical）
+
+| 指标 | 数值 |
+|---|---|
+| Local Val AUC (E3) | 0.868288 |
+| **Leaderboard AUC** | **0.842176** |
+| **vs SOTA 0.84637** | **Δ −0.004194** |
+| dev→LB gap | **+0.026112** （放大 2× 相对 icq-half 的 +0.0222）|
+
+---
+
+## 小结 · P1 方向证伪
+
+**核心观察**：dev AUC 微升 +0.000323 对应 LB 大跌 −0.004194，**dev 与 LB 方向相反**。这再次证明 EXP-024 复盘的"dev 不是 LB 的单调代理"铁律。
+
+### 机制重新审视
+
+社区 Seed 的原话是 **"id 特征在精排没用真的难绷"** —— 他说的是 **id 特征本身不该用**，不是"用了但 mask 一下能解决"。我们对 Seed 情报的解读方向错了：
+
+- **Pung 评论的建议**："可以加上随机 mask，训练时让模型不要过度依赖 id 特征"
+- **我们实际做的**：对 `seq_c` 按 token 以概率 15% 随机置 0 —— 但 **80% token 仍可见**，模型仍依赖 id embedding
+- **真实 test 集**：item_id OOV 率高时，**那 80% 没被 mask 的训练路径**完全失效
+
+**本质结论**：input-level random mask 在 "远未来 test" 场景下**无效**。机制上的问题不是正则强度（mask=0.15），而是模型仍然在 80% 时间里学到了"依赖 id"的路径。
+
+### 为什么 dev 看不出问题
+
+Dev valid 集与 train 尾部时间接近，**id 分布基本共享** → 训练路径和 dev 路径都看到 id，模型微调后 dev 反而略升。只有在 test（远未来）时 id 分布漂移才显露问题。
+
+### 不应再尝试的变体
+
+- ❌ `id_mask_prob = 0.10`（更保守）：方向就错了，降强度没意义
+- ❌ `id_mask_prob = 0.30` 以上：dev 会崩盘，LB 不会变好
+- ❌ `id_mask_seq_domains = c,d`（扩大范围）：同样的机制问题
+
+### 下一步：方向切换到 T23（structural disable）
+
+**正确的路线**：彻底**去掉 item_id 通路**，让模型学习"没有 item_id 的 CVR 预测"。这和 Seed 主楼问题-5 "seqc feat47 跟 itemid 是一样的，做不做 match 特征都掉分" 一致 —— seq_c 的 item_id 序列**本身信号就是噪声**。
+
+T23 代码已就位（`--disable_seq_fids 47`），next 实验 = `disablefid47-icq-halftrain`。
+

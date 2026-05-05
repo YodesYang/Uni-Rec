@@ -2,7 +2,7 @@
 
 **日期**：2026-05-05
 **作者**：Agent
-**状态**：🔄 In Progress（platform running 中，等 E4 回流）
+**状态**：⚠️ **Funnel 未真正起效**（2026-05-05 · 诊断结果见下文 · gap 区间时间戳与 train/valid 严重重叠）
 
 ---
 
@@ -97,35 +97,86 @@ Gap 丢弃的数据既不进 train 也不进 dev。Dev 距 train 尾部多了 15
 
 ---
 
-## 回流数据（待填）
+## 回流数据
 
 | Epoch | Step | Val AUC | Val LogLoss | vs icq-half same epoch |
 |---|---|---|---|---|
-| E1 | TBD | TBD | TBD | icq-half E1=0.864992 |
-| E2 | TBD | TBD | TBD | icq-half E2=0.867557 |
-| E3 | TBD | TBD | TBD | icq-half E3=0.867965 |
-| **E4** | **TBD** | **TBD** | TBD | icq-half E4=**0.868619** |
+| E1 | 13342 | 0.862648 | 0.22878 | icq-half E1=0.864992 (Δ **−0.002344**) |
+| E2 | 26684 | 0.865276 | 0.22617 | icq-half E2=0.867557 (Δ **−0.002281**) |
+| E3 | 40026 | 0.865914 | 0.22568 | icq-half E3=0.867965 (Δ **−0.002051**) |
+| **E4** | **53368** | **0.867124** | **0.22506** | icq-half E4=0.868619 (Δ **−0.001495**) |
 
-预期轨迹：E1~E4 dev AUC 应低于 icq-half 对应 epoch **约 0.002~0.005**，即 E4 落在 **[0.863, 0.866]** 区间为"正常"。
+**best = E4 @ step 53368, local AUC = 0.867124** (stop_reason=max_epochs_completed)
+总训练时长 ≈ 5h52m（vs icq-half 5h19m，因为 train 行数减少 15%）
+
+### Row Group 切分实际结果
+
+```
+Row Group split (time): 836 train (1666033 rows), 156 gap (dropped, 324948 rows), 52 valid (108975 rows)
+```
+
+看似正确的三路切分，但时间戳分析暴露**致命问题**：
+
+```
+[T8]  train ts: [1772238909, 1772588918]   (跨度 4.04 天)
+[P3]  gap   ts: [1772247536, 1772588958]   (跨度 3.95 天)  ← 与 train 严重重叠！
+      valid ts: [1772247872, 1772588990]   (跨度 3.95 天)  ← 与 train 严重重叠！
+```
+
+`effective train→valid distance (valid_min - train_max) = -341046 sec` ⚠️
+
+**负值意味着 valid_min < train_max**，即 train 尾部和 valid 起点时间上**完全反向**。gap 根本没起到"时间退让"的作用。
 
 ---
 
-## 与 EXP-025（P1 id_mask）并行关系
+## Funnel 失效诊断（关键 insight）
 
-- 两个 job 都基于 icq-half SOTA 做**单变量 ablation**
-- EXP-025 改**训练信号**（token-level mask）
-- EXP-026 改**评价信号**（valid 定义）
-- **正交**，互不干扰
-- 两个 job E4 回流后可做交叉分析：
-  - 若 P1 正向（LB ≥ 0.846）但 P3 gap 没缩 → 说明问题主要是 id 过拟合，不是 valid 定义
-  - 若 P3 gap 缩了但 P1 LB 没涨 → 说明 funnel 方向对，但 P1 强度需要调
-  - 若两者都正向 → **下一轮叠加** 成为新默认 config
+### 为什么 gap 未真正隔离时间？
+
+**根源**：`valid_split_strategy='time'` 的排序键是 **每个 RG 的 `max(timestamp)`**，但**单个 RG 内部时间跨度 4 天 vs 总跨度 4.04 天**——即：
+
+- **每个 RG 的时间范围都几乎覆盖整个 train 时段**（RG 内时间乱序 / 广泛交织）
+- 按 `max(ts)` 排序后取尾部 15% 做 gap，**这些尾部 RG 的 min(ts) 仍能小到 2/28 左右**
+- 所以 "gap RGs" 丢弃的是 "max(ts) 较新但内部包含跨 4 天全部时期的样本"
+- **实际时间上 train / gap / valid 三方几乎完全共享同一时间窗**
+
+### 对比 EXP-024 诊断
+
+EXP-024 已指出"dev AUC 测 `train 前 95%` → `train 尾部 5%`，LB 测 `train 100%` → `远未来 test`"，两者是不同任务。**我们原本以为加 gap 能让 dev 接近 LB 任务**。但因为 RG 内部时间乱序，**加 gap 只是减少了 15% 训练数据，没缩小 dev/test 任务差**。
+
+### 证据：dev AUC 降 0.0015 符合"减 15% train data"的纯预期
+
+- 15% train data 减少 → dev AUC 约降 **0.001~0.002**（经验估算）
+- 实测 E4 Δ dev = **−0.001495** ← 完美落在该预期内
+- 如果 gap **真的** 起到时间退让作用，dev 应额外降 **0.003~0.005**（test 远未来任务更难）
+- **实测 dev 降幅只有"数据损失"那一档，没有"任务变难"那一档** → 证明 gap 未起效
 
 ---
 
-## 下一步
+## 结论与修复方案
 
-1. E4 数据回流 → 对照 icq-half 判断 dev 轨迹健康度
-2. 与 EXP-025 交叉分析 gap vs id_mask 哪个改善更大
-3. 如 dev 轨迹健康 + evaluation quota 允许 → 消耗 1 eval 拿 LB，校准 `dev→LB` 经验公式
-4. 若 gap 明显缩小 → 下一轮 config 默认加 `--valid_gap_ratio 0.15`（或 adjusted ratio），与 P1 / T16 叠加做 full train
+### 方案 C（RG-level gap）在当前数据下**天然失效**
+
+除非：① RG 内部时间是单调的（已证否）；② 使用 **row-level** cutoff（类似 T8.5 的实现）。
+
+### 下一步（不立即启动）
+
+**T22-fix · Row-level gap**：在 `_row_ts_cutoff` 的基础上实现 row-level gap cutoff，即：
+
+```
+train row: timestamp < T_cutoff_1
+gap row:   T_cutoff_1 <= timestamp < T_cutoff_2   (丢弃)
+dev row:   timestamp >= T_cutoff_2
+```
+
+需要：
+- `_row_ts_cutoff` 扩展为双阈值版本
+- `PCVRParquetDataset.timestamp_min/max` 新增"排除范围"语义
+- 与现有 `enable_row_time_cutoff`（单阈值）兼容
+
+代码量估算 ~50 行，但**优先级排在 T23 之后**：先验证 seq_c disable 方向是否有 LB 收益，再决定是否投入修 P3 的工程成本。
+
+### Evaluation 决策
+
+**不 evaluate gap15**。本轮 E4 dev 0.867124 落在 icq-half E4 减数据的预期内，无法提供独立 LB 校准价值。Evaluation quota 已优先用于 idmaskc15（结果 LB 0.842176 已证伪）。
+

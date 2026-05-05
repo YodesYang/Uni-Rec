@@ -143,6 +143,19 @@ def parse_args() -> argparse.Namespace:
                              'apply --id_mask_prob to (e.g. "c" to only mask '
                              'domain_c_seq, the longest-tail vocab=278M '
                              'domain). Empty (default) = mask all domains.')
+    parser.add_argument('--disable_seq_fids', type=str, default='',
+                        help='T23 structural disable: comma-separated '
+                             'sequence-side-info fids that should be zeroed '
+                             'out on every row (train / valid / inference). '
+                             'Motivated by community Seed (LB 0.85+) '
+                             'reporting `seq_c feat47 == top-level item_id` '
+                             'is effectively noise, and our P1 random mask '
+                             'ablation (EXP-025 LB 0.842176 vs SOTA 0.84637) '
+                             'confirming token-level mask is not enough. '
+                             'Typical: "47" to drop only the suspected '
+                             'item_id fid in seq_c. Requires uploading a '
+                             'custom infer.py that reads this flag from '
+                             'train_config.json.')
     parser.add_argument('--eval_every_n_steps', type=int, default=0,
                         help='Run validation every N steps '
                              '(0 = only at the end of each epoch)')
@@ -528,6 +541,10 @@ def main() -> None:
         id_mask_prob=args.id_mask_prob,
         id_mask_seq_domains=(
             [s.strip() for s in args.id_mask_seq_domains.split(',') if s.strip()]
+            or None
+        ),
+        disable_seq_fids=(
+            [int(s.strip()) for s in args.disable_seq_fids.split(',') if s.strip()]
             or None
         ),
     )

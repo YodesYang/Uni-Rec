@@ -292,6 +292,7 @@ class PCVRParquetDataset(IterableDataset):
         enable_hour_only_features: bool = False,
         id_mask_prob: float = 0.0,
         id_mask_seq_domains: Optional[List[str]] = None,
+        disable_seq_fids: Optional[List[int]] = None,
     ) -> None:
         """
         Args:
@@ -369,6 +370,20 @@ class PCVRParquetDataset(IterableDataset):
                 mask to. ``None`` means "all domains"; pass e.g. ``['c']`` to
                 only mask the longest-tail domain (TAAC's
                 ``domain_c_seq_47`` has vocab 278M, most at risk of OOV).
+            disable_seq_fids: list of sequence side-info fids whose values
+                should be forced to 0 (padding) for every row, effectively
+                removing that feature from the model's input. Applies to
+                all Row Groups / all batches, including valid and
+                inference paths, so the model sees a consistent schema at
+                train and test time. Motivation: community Seed (LB 0.85+)
+                reports ``seq_c feat47 == top-level item_id`` is
+                effectively noise ("做不做 match 特征都掉分"), and our P1
+                id-mask ablation (EXP-025, LB 0.842176 vs SOTA 0.84637)
+                confirmed input-level random mask is not enough — the
+                model still relies on the 85% of id tokens it sees. A
+                full structural disable is the next step to verify
+                whether dropping the id channel entirely helps. Typical:
+                ``[47]`` to drop only the suspected item_id fid in seq_c.
         """
         super().__init__()
 
@@ -443,6 +458,28 @@ class PCVRParquetDataset(IterableDataset):
                 else:
                     normalized.add(s[len('seq_'):])
             self.id_mask_seq_domains = frozenset(normalized) if normalized else None
+
+        # T23 · Structural disable of specified sequence fids.
+        # Any fid in ``disable_seq_fids`` will have its column zeroed out
+        # during ``_convert_batch``. Unlike ``id_mask_prob`` (token-level
+        # random drop on the training path), this disable is
+        # deterministic and applies uniformly to train / valid /
+        # inference, so the model sees a consistent "fid-gone" view at
+        # both training and evaluation time. Motivated by EXP-025's
+        # finding that input-level random mask (15%) caused dev→LB to
+        # move in opposite directions (dev +0.0003, LB -0.0042).
+        if disable_seq_fids is None:
+            self.disable_seq_fids: frozenset[int] = frozenset()
+        else:
+            fids_parsed: set[int] = set()
+            for f in disable_seq_fids:
+                try:
+                    fids_parsed.add(int(f))
+                except (TypeError, ValueError) as e:
+                    raise ValueError(
+                        f"disable_seq_fids entries must be integer-like; "
+                        f"got {f!r}") from e
+            self.disable_seq_fids = frozenset(fids_parsed)
         if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
             raise ValueError(
                 "history_cvr_time_mode must be 'timestamp_cutoff' or "
@@ -562,7 +599,8 @@ class PCVRParquetDataset(IterableDataset):
             f"history_cvr_time_mode={history_cvr_time_mode}, "
             f"mature_negative_weighting={enable_mature_negative_weighting}, "
             f"id_mask_prob={self.id_mask_prob}, "
-            f"id_mask_seq_domains={sorted(self.id_mask_seq_domains) if self.id_mask_seq_domains else 'all'}")
+            f"id_mask_seq_domains={sorted(self.id_mask_seq_domains) if self.id_mask_seq_domains else 'all'}, "
+            f"disable_seq_fids={sorted(self.disable_seq_fids) if self.disable_seq_fids else 'none'}")
 
     def _load_schema(self, schema_path: str, seq_max_lens: Dict[str, int]) -> None:
         """Populate per-group schema information from ``schema_path``."""
@@ -1028,6 +1066,18 @@ class PCVRParquetDataset(IterableDataset):
                     self._record_oob(f'seq_{domain}', ci, slice_c, vs)
                 else:
                     slice_c[:] = 0
+
+            # ---- T23 · Structural disable of requested sideinfo fids ----
+            # Applied uniformly to every row (train/valid/inference). Does
+            # NOT zero the entire time step (other side-info columns keep
+            # their ids), so the ``lengths`` vector and key_padding_mask
+            # derived from it stay correct and we never trigger the
+            # all-padding SDPA NaN failure mode.
+            if self.disable_seq_fids:
+                sideinfo_fids_for_domain = self.sideinfo_fids[domain]
+                for c, fid in enumerate(sideinfo_fids_for_domain):
+                    if int(fid) in self.disable_seq_fids:
+                        out[:, c, :] = 0
 
             # ---- P1 · Item-ID Random Mask (training path only) ----
             # Gate: require shuffle=True (training DataLoader) + is_training
@@ -1598,6 +1648,7 @@ def get_pcvr_data(
     valid_gap_ratio: float = 0.0,
     id_mask_prob: float = 0.0,
     id_mask_seq_domains: Optional[List[str]] = None,
+    disable_seq_fids: Optional[List[int]] = None,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, Optional[DataLoader], PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -2086,6 +2137,7 @@ def get_pcvr_data(
         enable_hour_only_features=enable_hour_only_features,
         id_mask_prob=id_mask_prob,
         id_mask_seq_domains=id_mask_seq_domains,
+        disable_seq_fids=disable_seq_fids,
     )
     use_cuda = torch.cuda.is_available()
     _train_kw = {}
@@ -2120,6 +2172,7 @@ def get_pcvr_data(
         dense_log1p_fids=dense_log1p_fids,
         enable_time_of_day_features=enable_time_of_day_features,
         enable_hour_only_features=enable_hour_only_features,
+        disable_seq_fids=disable_seq_fids,
     )
     valid_loader = DataLoader(
         valid_dataset, batch_size=None,
@@ -2153,6 +2206,7 @@ def get_pcvr_data(
             dense_log1p_fids=dense_log1p_fids,
             enable_time_of_day_features=enable_time_of_day_features,
             enable_hour_only_features=enable_hour_only_features,
+            disable_seq_fids=disable_seq_fids,
         )
         holdout_loader = DataLoader(
             holdout_dataset, batch_size=None,
