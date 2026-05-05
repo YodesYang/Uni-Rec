@@ -120,6 +120,29 @@ def parse_args() -> argparse.Namespace:
                              'updates or checkpoint selection). Requires '
                              "valid_split_strategy='time'. 0.0 (default) = "
                              'disabled, behavior-preserving. Typical: 0.05.')
+    parser.add_argument('--valid_gap_ratio', type=float, default=0.0,
+                        help='Funnel Redesign P3 (ADR-005 alt C): carve a '
+                             'time-axis gap of this fraction of Row Groups '
+                             'between the train tail and the dev head. Those '
+                             'gap Row Groups are dropped entirely (never '
+                             'loaded). Simulates the "remote-future" test-set '
+                             'shift so dev AUC becomes a closer proxy for LB '
+                             "AUC. Requires valid_split_strategy='time'. "
+                             '0.0 (default) = disabled, behavior-preserving. '
+                             'Typical: 0.10~0.15.')
+    parser.add_argument('--id_mask_prob', type=float, default=0.0,
+                        help='Item-ID Random Mask (community 0.85+ hint, '
+                             '2026-05-04): per-token probability of dropping '
+                             'a sequence token to 0 (padding) on the training '
+                             'path only. Counteracts "dev up / LB down" by '
+                             'forcing the model not to overfit specific IDs '
+                             'that may be OOV in the future-dated test set. '
+                             '0.0 (default) = disabled. Typical: 0.10~0.20.')
+    parser.add_argument('--id_mask_seq_domains', type=str, default='',
+                        help='Comma-separated sequence-domain letters to '
+                             'apply --id_mask_prob to (e.g. "c" to only mask '
+                             'domain_c_seq, the longest-tail vocab=278M '
+                             'domain). Empty (default) = mask all domains.')
     parser.add_argument('--eval_every_n_steps', type=int, default=0,
                         help='Run validation every N steps '
                              '(0 = only at the end of each epoch)')
@@ -501,6 +524,12 @@ def main() -> None:
         temporal_weight_alpha=args.temporal_weight_alpha,
         enable_hour_only_features=args.enable_hour_only_features,
         holdout_ratio=args.holdout_ratio,
+        valid_gap_ratio=args.valid_gap_ratio,
+        id_mask_prob=args.id_mask_prob,
+        id_mask_seq_domains=(
+            [s.strip() for s in args.id_mask_seq_domains.split(',') if s.strip()]
+            or None
+        ),
     )
 
     # ---- NS groups ----

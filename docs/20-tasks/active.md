@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04 晚 11（PDT · 🔬 深度方法论复盘 · T20 新增 · ADR-006 机制修订 · T16-only full train 待回流）· 结论：① **今日 3 次 evaluation 2 次反向（−0.006 / −0.010 LB）暴露 funnel 系统性缺陷**,EXP-024 方法论复盘落档,核心诊断: dev AUC 和 LB AUC 是**两个不同任务的 generalization**(近 train / 远 train),相关性不稳定,funnel 按 dev 决策在 distribution shift 场景下**系统性失效**；② **T20 `[!]` 新增: Funnel 重设计**（6 个改革方向 A-F）,优先级**最高**,在 funnel 修复前任何方法学创新 LB 信号不可信;③ **ADR-006 机制修订**: "BPR 破坏 calibration" 逻辑站不住（AUC 是排序指标,单调变换不改 AUC），修订为 **"BPR 学到的排序依赖 train 绝对分数分布,在 test 分布偏移下不稳定"**;加入**归因歧义段**（三合一 LB −0.010 三变量混杂,T18 贡献分解 -0.003~-0.007 / holdout 切分 -0.002~-0.005 / 架构差 ±0.002）;④ **test 集假设核查**: 大概率没 bug（gap 系统性 + SOTA 可达 + 正向响应 3 个证据）,但"版本核查"5 分钟可做,列入 T20 P1;⑤ **Holdout 独立成本待验证**: T16-only full train 带 holdout 若 LB < 0.846 → 反证 holdout 有 −0.003 以上隐性成本,立刻回归 `holdout_ratio=0`;⑥ **team-memory 新增** "holdout 切分隐性成本" 铁律;⑦ **quota 状态不变**: evaluation 3/4 用,training T16-only full 占 1 slot 在跑。
+**最近一次审视**：2026-05-05 凌晨 0:30（PDT · 🔥 社区 Seed 主楼深度解析 · P1+P3 代码落地并启动 2 job · 4 training slot 全满）· 结论：① **社区 lexiang 选手 Seed (LB 0.85+) 主楼 + 评论区深读**：抓到 5 条情报，其中 3 条直接对口本项目——问题-1 "uid 一次性 + item id 线下虚高线上掉"证实本赛题 dev→LB gap 机制，问题-4 "pure model 掉分"排除 kernel-fused 重写路线，问题-5 "seqc feat47=itemid 做 match 都掉分"证实 T13 hash500k 的谨慎处理正确；② **P1 Item-ID Random Mask 落地**（T21 新增）：`baseline/dataset.py` + `train.py` 共 ~115 行，双 gate (`is_training AND shuffle`) 保证推理路径 bit-identical，本地 smoke 5/5 通过；③ **P3 Valid Split Gap 落地**（T22 新增, ADR-005 方案 C 首个实测）：`baseline/dataset.py::get_pcvr_data` 新增 `valid_gap_ratio` 参数，time-sorted 切分支持 `[train | gap (dropped) | valid | holdout]`；④ **2 个单变量 ablation job 已启动**：`idmaskc15-icq-halftrain` (EXP-025) 与 `gap15-icq-halftrain` (EXP-026)，都基于 icq-half SOTA (LB 0.84637)；⑤ **quota 状态**：training 4 slot 全满（T16 full + 四合一 + P1 + P3），evaluation 3/4 用剩 1 slot；⑥ **P3 的判决逻辑与其他 job 不同**：主指标是 `dev→LB gap`，不是 dev 绝对值，gap < +0.018 即算成功；⑦ **已 commit 代码改动**，push 待用户指示。
 
 ---
 
@@ -204,6 +204,68 @@
 
 ---
 
+### T21 `[~]` P1 Item-ID Random Mask（社区 Seed 0.85+ 情报子弹）
+
+**来源**：2026-05-04 晚抓到社区 lexiang 选手 Seed（LB 0.85+）主楼与评论区 2 条情报：
+- Seed 主楼问题-1：uid 训练集和测试集"几乎全是一次性 user 且无交集"；**item id 线下 auc 虚高 → 线上掉**；Seed 判断"估计是分布问题"
+- 评论区 Pung：item id 没用可能是因为 **test 中 itemid OOV 率太高** 导致；建议加上**随机 mask**，训练时让模型不要过度依赖 id 特征
+
+**假设**：训练时对 `domain_c_seq_47`（vocab=278M，最长尾 item_id 序列）做 token 粒度随机 mask（概率 p=0.15），强制模型在"看不到具体 id"的条件下也能从上下文预测 CVR → id 通道 regularisation → 降低 dev→LB gap。
+
+**代码落地**：
+- ✅ `baseline/dataset.py::PCVRParquetDataset`：`_convert_batch` 中 seq 填充后对指定 domain 按 Bernoulli 采样随机置 0，time_bucket 同位置同步置 0。Mask 双 gate：`is_training AND shuffle AND prob>0`
+- ✅ `baseline/dataset.py::get_pcvr_data`：新增 `id_mask_prob` / `id_mask_seq_domains` 透传（只给 train dataset）
+- ✅ `baseline/train.py`：新增 CLI `--id_mask_prob` / `--id_mask_seq_domains`
+- ✅ `baseline/infer.py`：**零改动**，双 gate 保证推理 bit-identical
+- ✅ 本地 dataset-only smoke 5/5 通过：全 domain p=0.5 实际丢弃率 0.497~0.511 / domain=['c'] p=0.9 只掉 seq_c 0.903 / inference 路径 bit-identical
+
+**已启动 job**：
+- `idmaskc15-icq-halftrain-swiglu-vr005-bs128`（2026-05-05 ~00:00 PDT），基于 icq-half SOTA（LB 0.84637）单变量加 `--id_mask_prob 0.15 --id_mask_seq_domains c`，其他完全一致
+- 详情见 [`EXP-025`](../40-experiments/EXP-025-p1-idmask-c15-halftrain-2026-05-05.md)
+
+**判决阈值**：
+| 场景 | E4 dev AUC | 行动 |
+|---|---|---|
+| 强成功 | ≥ 0.868 | Evaluate，下轮叠 T16 |
+| 正常 | [0.866, 0.868] | Evaluate（LB ≥ 0.846 即可接受）|
+| 边界 | [0.863, 0.866] | 参考 P3 gap 缩减再决定 |
+| 失败 | < 0.863 | 0.15 过强，下轮 0.10；或方向错误 |
+
+**当前优先级**：高。与 T16 正交，成则纳入默认叠加。
+
+---
+
+### T22 `[~]` P3 Valid Split Gap（funnel 重设计方案 C 首个实测）
+
+**来源**：[ADR-005](../30-decisions/ADR-005-valid-split-redesign.md) 方案 C + [EXP-024](../40-experiments/EXP-024-methodology-retrospective-2026-05-04.md) 方法论复盘结论"dev 是 train 近未来 / LB 是 train 远未来"。
+
+**假设**：在 train 尾部和 dev 之间**丢弃一段时间窗**（15%）完全不训也不评，让 dev 退让到相对 train 的"远未来"位置，模拟 test 的 covariate shift 特征 → dev→LB 相关性提升 → gap 缩小。
+
+布局：
+```
+[ train 80% ] [ gap 15% (dropped) ] [ dev 5% ]
+```
+
+**代码落地**：
+- ✅ `baseline/dataset.py::get_pcvr_data`：新增 `valid_gap_ratio` 参数，time-sorted RG 切分顺序变为 `[train | gap (dropped) | valid | holdout]`
+- ✅ 参数校验齐全：需 `valid_split_strategy='time'`；与 `enable_row_time_cutoff` 互斥；`valid + holdout + gap < 1.0`
+- ✅ 日志 `[P3] gap ts (dropped): [min, max]  effective train→valid distance = X sec`
+- ✅ smoke 通过（三路切分 `7 train / 1 gap (dropped) / 1 valid / 1 holdout` ✓）
+
+**已启动 job**：
+- `gap15-icq-halftrain-swiglu-vr005-bs128`（2026-05-05 00:28 PDT），基于 icq-half SOTA 单变量加 `--valid_gap_ratio 0.15`
+- 详情见 [`EXP-026`](../40-experiments/EXP-026-p3-gap15-halftrain-2026-05-05.md)
+
+**判决逻辑（关键，与其他 job 不同）**：
+- **主指标不是 dev 绝对值，而是 `dev→LB gap`**
+- Dev AUC 绝对值**必然降**（train 少 15% + dev 更难），这是正常，不是失败
+- 若 `dev→LB gap < +0.018` → P3 成立，ADR-005 方案 C Accept，下轮默认带 gap
+- 若 `gap ≥ +0.020` → P3 无效，切方案 A（triple-split）或 B（dev+holdout）
+
+**当前优先级**：最高（T20 子任务 - 治本 funnel）。
+
+---
+
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
 **决策（2026-04-26）**：暂缓启动。理由：
@@ -310,6 +372,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-05 PDT 凌晨 0:30（🔥 社区 Seed 主楼深度解析 · P1 + P3 代码落地 · 2 job 启动）**：用户推送 Seed (LB 0.85+) 主楼 "腾讯广告算法大赛 Day x" 截图,抓到 5 条未消化情报。3 条直接对口本项目: ① 问题-1 "uid 训练集测试集几乎全是一次性 user 且无交集 / item id 线下 auc 虚高 → 线上掉 / 估计是分布问题" —— 证实我们 EXP-018 观测到的 dev→LB gap +0.021~+0.030 机制是 id 特征 OOV 导致; ② 问题-4 "pure model 主流 rankmixer/onetrans/hyformer/mixformer 都改 pure attention + FFN 为了 MFU,Seed 实测都掉分,可能数据量不够" —— 排除 kernel-fused 重写路线,本项目 HyFormer + RankMixerNS 方向对口; ③ 问题-5 "seqc feat47 跟 itemid 是一样的,做不做 match 特征都掉分" —— 证实 T13 hash500k 谨慎处理正确,且反向说明 seq_c 作为 item_id 序列信号稀薄。评论区 Pung 建议 "item id OOV 率太高 → 训练时随机 mask" —— 方向与上述一致。**代码落地 2 条正交子弹**: ① **T21 P1 Item-ID Random Mask** (baseline/dataset.py PCVRParquetDataset + get_pcvr_data, baseline/train.py,共 ~115 行): 训练时对指定 domain 按 token 粒度 Bernoulli 采样 mask,双 gate (`is_training AND shuffle AND prob>0`) 保证推理 bit-identical。domain 名字支持 `'c'` 和 `'seq_c'` 两种。5/5 smoke 通过: prob=0.5 全 domain 实际丢弃率 0.497~0.511 / domain=['c'] prob=0.9 只掉 seq_c 0.903。② **T22 P3 Valid Split Gap** (baseline/dataset.py::get_pcvr_data 新增 `valid_gap_ratio` 参数): time-sorted RG 切分顺序变为 `[train | gap (dropped) | valid | holdout]`,gap 区间完全丢弃不参与训练也不算指标。参数校验齐全 (需 `valid_split_strategy='time'` / 与 `enable_row_time_cutoff` 互斥 / `valid + holdout + gap < 1.0`)。日志 `[P3] gap ts (dropped) + effective train→valid distance`。**2 job 启动**: `idmaskc15-icq-halftrain-swiglu-vr005-bs128` (~00:00 PDT, +`--id_mask_prob 0.15 --id_mask_seq_domains c`) 与 `gap15-icq-halftrain-swiglu-vr005-bs128` (00:28 PDT, +`--valid_gap_ratio 0.15`),都是 icq-half SOTA (LB 0.84637) 的**单变量 ablation**,严格遵守 EXP-024 的归因纪律。**training quota 4/4 全满** (T16-only full + 四合一 + P1 + P3),evaluation 3/4 剩 1 slot。EXP-025 / EXP-026 落档, active.md T21/T22 新增, ADR-005 方案 C 进入首个实测阶段。**P3 判决逻辑关键: 主指标不是 dev 绝对值,而是 `dev→LB gap`**,dev 绝对值下降是预期且正常的。infer.py 零改动,与平台默认 infer.py 完全兼容。
 
 - **2026-05-04 PDT 晚 11（🔬 方法论深度复盘 · EXP-024 落档 · T20 新增 · ADR-006 机制修订）**：用户反思 "为什么离线屡屡提升,评估却反向?funnel 是不是有问题?" + "有没有可能测试集有问题?"。系统性复盘今日 3 次 evaluation (其中 2 次 LB 反向 −0.006 / −0.010,合计 LB 下降 −0.016)。**核心诊断**: funnel 设计本身有系统性缺陷 —— dev AUC 测 "train 前 95% → 尾部 5%" 的 generalization,LB AUC 测 "train 100% → 远未来 test" 的 generalization,是**两个不同任务**;按 dev 决策在本赛题 distribution shift 场景下相关性不稳定(3×~11× 放大,方向不固定);Proxy 和 half-train 无法区分"慢性泛化失败";"正交子弹可叠加" 假设站不住(target-conditioning + ranking loss 可能共同加大 overfitting);组合实验违反单变量 ablation 纪律(三合一 LB −0.010 无法干净归因)。**test 集 bug 假设**: 大概率否定(gap 系统性 + SOTA 0.858 可达 + ICQ 正向响应 3 证据),但 "版本核查" 5 分钟可做。① **EXP-024 落档**(独立方法论复盘文档): 完整包含所有 LB 数据点、funnel 缺陷诊断、6 个改革方向(valid split 重设计 / 归因实验纪律 / keep_topk_ckpt / proxy 重新定位 / evaluation 作数据源 / ranking loss 降优先级)、P0/P1/P2/P3 可执行行动项、7 条最诚实的自我批评(过早给 T18 判死刑 / holdout 成本低估 / dev 涨阈值机械化 / 忽视归因实验的合理消耗方式);② **T20 `[!]` 新增**: Funnel 重设计 task,**优先级最高**,在 funnel 修复之前任何方法学创新 LB 信号**不可信**,不应投 quota;③ **ADR-006 Deprecation Notice 机制修订**: 原 "BPR 破坏 calibration" 论证逻辑站不住(AUC 是排序指标,单调变换不改 AUC),修订为更严谨的 **"BPR 学到的排序依赖 train 绝对分数分布,在 test 分布偏移下不稳定" 机制**,加入**归因歧义段**(三合一是 3 变量组合实验,LB −0.010 分解: T18 -0.003~-0.007 / holdout -0.002~-0.005 / 架构差 ±0.002 / patience ±0.001),明确 T18 Deprecated 判决仍成立(机制+辅证)但贡献幅度不可独立归因;④ **team-memory 2 条铁律更新**: 原"BPR 破坏 calibration"改为排序稳定性机制 + 归因歧义 + 组合实验禁令(第 5 条); 新增第 6 条 "Holdout 切分可能有隐藏 train data loss 成本,T16-only full train 可检验,若 LB < 0.846 则反证立刻去掉 holdout";⑤ **最诚实小结**: 在积累信号的关键节点,**反思 > 继续推进**;今天早 6 小时进入复盘模式可能用 2 次 evaluation 就能获得今天 3 次的信息量,并避免三合一组合实验错误。
 

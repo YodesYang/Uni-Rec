@@ -290,6 +290,8 @@ class PCVRParquetDataset(IterableDataset):
         temporal_weight_ts_min: Optional[int] = None,
         temporal_weight_ts_max: Optional[int] = None,
         enable_hour_only_features: bool = False,
+        id_mask_prob: float = 0.0,
+        id_mask_seq_domains: Optional[List[str]] = None,
     ) -> None:
         """
         Args:
@@ -353,6 +355,20 @@ class PCVRParquetDataset(IterableDataset):
                 circular encoding), and ``is_weekend`` (1 if Sat/Sun else 0).
                 These capture diurnal and weekly periodicity in user purchase
                 intent that is absent from the existing sequence features.
+            id_mask_prob: token-level random mask probability applied on the
+                training path only. Counteracts the "dev AUC up / LB AUC
+                down" symptom that a community 0.85+ player attributed to
+                high OOV rate on ``item_id``-like features in the test set
+                (comment thread on lexiang, 2026-05-04): with some
+                probability each non-padding token is replaced by 0, forcing
+                the model to rely on context rather than memorising specific
+                IDs. No effect unless ``shuffle=True`` (treated as a proxy
+                for "training path"), so valid / holdout / inference loaders
+                are unaffected.
+            id_mask_seq_domains: which sequence domains to apply the id
+                mask to. ``None`` means "all domains"; pass e.g. ``['c']`` to
+                only mask the longest-tail domain (TAAC's
+                ``domain_c_seq_47`` has vocab 278M, most at risk of OOV).
         """
         super().__init__()
 
@@ -400,6 +416,33 @@ class PCVRParquetDataset(IterableDataset):
         self.temporal_weight_ts_min = temporal_weight_ts_min
         self.temporal_weight_ts_max = temporal_weight_ts_max
         self.enable_hour_only_features = enable_hour_only_features
+        # P1 Item-ID Random Mask (community 0.85+ hint 2026-05-04): gate the
+        # mask on shuffle=True so only the *training* DataLoader ever
+        # touches it. Valid / holdout / inference construct the dataset
+        # with shuffle=False and therefore get id_mask_prob=0 effectively,
+        # even if the same parameters are passed through.
+        if not 0.0 <= float(id_mask_prob) <= 1.0:
+            raise ValueError(
+                f"id_mask_prob must be in [0, 1]; got {id_mask_prob}")
+        self.id_mask_prob = float(id_mask_prob)
+        # Accept both short names ('c') and schema-native names ('seq_c').
+        # Matching is done case-insensitively on the trailing letter when a
+        # single-character entry is passed in, so users can write the
+        # natural "domain c" shorthand from the community discussion.
+        if id_mask_seq_domains is None:
+            self.id_mask_seq_domains: Optional[frozenset[str]] = None
+        else:
+            normalized: set[str] = set()
+            for d in id_mask_seq_domains:
+                s = str(d).strip().lower()
+                if not s:
+                    continue
+                normalized.add(s)
+                if not s.startswith('seq_'):
+                    normalized.add(f'seq_{s}')
+                else:
+                    normalized.add(s[len('seq_'):])
+            self.id_mask_seq_domains = frozenset(normalized) if normalized else None
         if self.history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
             raise ValueError(
                 "history_cvr_time_mode must be 'timestamp_cutoff' or "
@@ -517,7 +560,9 @@ class PCVRParquetDataset(IterableDataset):
             f"time_of_day_features={enable_time_of_day_features}, "
             f"history_cvr_features={enable_history_cvr_features}, "
             f"history_cvr_time_mode={history_cvr_time_mode}, "
-            f"mature_negative_weighting={enable_mature_negative_weighting}")
+            f"mature_negative_weighting={enable_mature_negative_weighting}, "
+            f"id_mask_prob={self.id_mask_prob}, "
+            f"id_mask_seq_domains={sorted(self.id_mask_seq_domains) if self.id_mask_seq_domains else 'all'}")
 
     def _load_schema(self, schema_path: str, seq_max_lens: Dict[str, int]) -> None:
         """Populate per-group schema information from ``schema_path``."""
@@ -984,6 +1029,42 @@ class PCVRParquetDataset(IterableDataset):
                 else:
                     slice_c[:] = 0
 
+            # ---- P1 · Item-ID Random Mask (training path only) ----
+            # Gate: require shuffle=True (training DataLoader) + is_training
+            # + mask_prob > 0 + (all domains OR this domain explicitly
+            # opted-in). Mask is token-level and applied uniformly across
+            # all side-info columns of the same (row, token), so a single
+            # sequence position is either fully kept or fully dropped
+            # rather than losing only some of its features. Padding tokens
+            # (out[i, c, t]==0 everywhere) are never selected because we
+            # only draw from real non-padding positions, but the mask is
+            # still applied on top of the raw data and any position that
+            # happened to be padding stays 0. ``domain_seq_mask`` is
+            # retained so the downstream time_bucket can share the same
+            # keep/drop pattern (otherwise dropped tokens would still
+            # expose their recency to the model).
+            domain_seq_mask: Optional["npt.NDArray[np.bool_]"] = None
+            if (self.is_training and self.shuffle
+                    and self.id_mask_prob > 0.0
+                    and (self.id_mask_seq_domains is None
+                         or domain in self.id_mask_seq_domains)):
+                # Only mask non-padding positions (lengths[i] gives the
+                # valid prefix length); random uniform per (row, token).
+                token_mask = (np.random.rand(B, max_len)
+                              < self.id_mask_prob)
+                length_mask = (
+                    np.arange(max_len)[None, :]
+                    < lengths[:, None]
+                )
+                drop_mask = token_mask & length_mask
+                if drop_mask.any():
+                    # Broadcast across all side-info columns so the
+                    # dropped token's entire feature vector becomes
+                    # padding (0), keeping shape/vocab invariants.
+                    out[:, :, :][np.broadcast_to(
+                        drop_mask[:, None, :], out.shape)] = 0
+                    domain_seq_mask = drop_mask
+
             result[domain] = torch.from_numpy(out.copy())
             result[f'{domain}_len'] = torch.from_numpy(lengths.copy())
 
@@ -1023,6 +1104,12 @@ class PCVRParquetDataset(IterableDataset):
                 buckets = raw_buckets.reshape(B, max_len) + 1
                 buckets[ts_padded == 0] = 0
                 time_bucket[:] = buckets
+
+            # P1: also clear time_bucket at masked positions so the model
+            # cannot recover the dropped token's recency through the time
+            # channel.
+            if domain_seq_mask is not None:
+                time_bucket[domain_seq_mask] = 0
 
             result[f'{domain}_time_bucket'] = torch.from_numpy(time_bucket.copy())
 
@@ -1508,6 +1595,9 @@ def get_pcvr_data(
     temporal_weight_alpha: float = 0.0,
     enable_hour_only_features: bool = False,
     holdout_ratio: float = 0.0,
+    valid_gap_ratio: float = 0.0,
+    id_mask_prob: float = 0.0,
+    id_mask_seq_domains: Optional[List[str]] = None,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, Optional[DataLoader], PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -1559,6 +1649,22 @@ def get_pcvr_data(
         raise ValueError("limit_valid_rgs must be >= 0")
     if holdout_ratio < 0.0:
         raise ValueError("holdout_ratio must be >= 0")
+    if valid_gap_ratio < 0.0:
+        raise ValueError("valid_gap_ratio must be >= 0")
+    if not 0.0 <= id_mask_prob <= 1.0:
+        raise ValueError(
+            f"id_mask_prob must be in [0, 1]; got {id_mask_prob}")
+    if valid_gap_ratio > 0.0 and valid_split_strategy != 'time':
+        raise ValueError(
+            "valid_gap_ratio > 0 requires valid_split_strategy='time' "
+            "(Funnel Redesign P3 / ADR-005 alt C): carving a time-axis "
+            "gap between train and valid is only meaningful when Row "
+            "Groups are ordered by timestamp.")
+    if valid_gap_ratio > 0.0 and enable_row_time_cutoff:
+        raise ValueError(
+            "valid_gap_ratio > 0 is not yet compatible with "
+            "enable_row_time_cutoff (would need a second row-level cut "
+            "point). Disable one of them.")
     if holdout_ratio > 0.0:
         if valid_split_strategy != 'time':
             raise ValueError(
@@ -1574,6 +1680,11 @@ def get_pcvr_data(
             raise ValueError(
                 f"valid_ratio ({valid_ratio}) + holdout_ratio "
                 f"({holdout_ratio}) must be < 1.0 to leave room for train.")
+    if (valid_ratio + holdout_ratio + valid_gap_ratio) >= 1.0:
+        raise ValueError(
+            f"valid_ratio ({valid_ratio}) + holdout_ratio "
+            f"({holdout_ratio}) + valid_gap_ratio ({valid_gap_ratio}) "
+            "must be < 1.0 to leave room for train.")
     if history_cvr_time_mode not in ('timestamp_cutoff', 'available'):
         raise ValueError(
             "history_cvr_time_mode must be 'timestamp_cutoff' or 'available'")
@@ -1646,7 +1757,21 @@ def get_pcvr_data(
 
     post_holdout_total = total_rgs - n_holdout_rgs
     base_n_valid_rgs = max(1, int(post_holdout_total * valid_ratio))
-    base_n_train_rgs = post_holdout_total - base_n_valid_rgs
+    # Funnel Redesign P3: carve an optional time-axis gap between train
+    # and dev. Layout with valid_split_strategy='time':
+    #   [..... train .....][ gap (dropped) ][ dev (valid_ratio) ][ holdout ]
+    # ``gap`` is never loaded by any loader; it exists only to push dev
+    # away from the train tail so the "dev vs LB" covariate-shift pattern
+    # observed in EXP-024 (dev↑ / LB↓) has a proxy we can measure locally.
+    n_gap_rgs = 0
+    if valid_gap_ratio > 0.0:
+        n_gap_rgs = max(1, int(post_holdout_total * valid_gap_ratio))
+        if n_gap_rgs + base_n_valid_rgs >= post_holdout_total:
+            raise ValueError(
+                f"valid_gap_ratio={valid_gap_ratio} leaves no room for "
+                f"train after reserving {base_n_valid_rgs} dev RGs "
+                f"from {post_holdout_total} post-holdout RGs.")
+    base_n_train_rgs = post_holdout_total - base_n_valid_rgs - n_gap_rgs
 
     # train_ratio: use only the first N% of the training Row Groups.
     if train_ratio < 1.0:
@@ -1654,11 +1779,17 @@ def get_pcvr_data(
         logging.info(
             f"train_ratio={train_ratio}: using {base_n_train_rgs} "
             "train Row Groups")
-    base_n_valid_rgs = post_holdout_total - base_n_train_rgs
+    # Note: when valid_gap_ratio>0 the arithmetic below reserves slack
+    # (gap + dev) on the right; we only recompute valid when gap==0 to
+    # preserve the legacy "train + valid = post_holdout_total" invariant.
+    if n_gap_rgs == 0:
+        base_n_valid_rgs = post_holdout_total - base_n_train_rgs
 
     train_start_idx = 0
     train_end_idx = base_n_train_rgs
-    valid_start_idx = base_n_train_rgs
+    gap_start_idx = train_end_idx
+    gap_end_idx = train_end_idx + n_gap_rgs
+    valid_start_idx = gap_end_idx
     valid_end_idx = post_holdout_total
     holdout_start_idx = post_holdout_total
     holdout_end_idx = total_rgs
@@ -1667,10 +1798,14 @@ def get_pcvr_data(
     split_valid_rows = sum(r[2] for r in rg_info[valid_start_idx:valid_end_idx])
     split_holdout_rows = sum(
         r[2] for r in rg_info[holdout_start_idx:holdout_end_idx])
+    split_gap_rows = sum(
+        r[2] for r in rg_info[gap_start_idx:gap_end_idx])
 
     logging.info(f"Row Group split ({valid_split_strategy}): "
                  f"{base_n_train_rgs} train ({split_train_rows} rows), "
-                 f"{base_n_valid_rgs} valid ({split_valid_rows} rows)"
+                 + (f"{n_gap_rgs} gap (dropped, {split_gap_rows} rows), "
+                    if n_gap_rgs else "")
+                 + f"{base_n_valid_rgs} valid ({split_valid_rows} rows)"
                  + (f", {n_holdout_rgs} holdout "
                     f"({split_holdout_rows} rows)" if n_holdout_rgs else ""))
 
@@ -1768,6 +1903,26 @@ def get_pcvr_data(
                 "train; consider --valid_split_strategy time for a "
                 "time-aware split (TAAC 2026 test set is strictly later "
                 "than training).")
+        # Funnel P3: expose the gap region's timestamp range so the
+        # effective "train→valid distance" can be confirmed in platform
+        # logs without re-scanning parquet metadata.
+        if n_gap_rgs > 0:
+            for i in range(gap_start_idx, gap_end_idx):
+                if rg_ts_ranges[i] is None:
+                    f, rg_idx, _ = rg_info[i]
+                    rg_ts_ranges[i] = _rg_ts_range(pf_cache, f, rg_idx)
+            gap_ts = [
+                r for r in rg_ts_ranges[gap_start_idx:gap_end_idx]
+                if r is not None
+            ]
+            if gap_ts:
+                gap_min = min(r[0] for r in gap_ts)
+                gap_max = max(r[1] for r in gap_ts)
+                # Expected: train_max < gap_min <= gap_max < valid_min.
+                logging.info(
+                    f"[P3] gap ts (dropped): [{gap_min}, {gap_max}]  "
+                    f"effective train→valid distance (valid_min - train_max) "
+                    f"= {valid_min - train_max} sec")
 
     # ADR-005: log holdout timestamp range + disjointness vs dev/train.
     if holdout_ratio > 0.0:
@@ -1929,6 +2084,8 @@ def get_pcvr_data(
         temporal_weight_ts_min=int(train_ts_range[0]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
         temporal_weight_ts_max=int(train_ts_range[1]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
         enable_hour_only_features=enable_hour_only_features,
+        id_mask_prob=id_mask_prob,
+        id_mask_seq_domains=id_mask_seq_domains,
     )
     use_cuda = torch.cuda.is_available()
     _train_kw = {}
