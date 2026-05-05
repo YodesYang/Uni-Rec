@@ -18,6 +18,7 @@ alwaysApply: true
 - 推理需输出 `predictions.json`，user_id 必须**全量覆盖测试集**（社区有题报「Missing 310000 user_ids」直接掉分）；本届 baseline 已覆盖 523244 条
 - baseline `trainer.py::_save_step_checkpoint` 已自动把 `schema.json` + `train_config.json` + `ns_groups.json` 复制到每个 `*.best_model/` 目录 → 无需额外手工同步
 - **平台 Copy 使用规则**：Training 页 "Copy" 会克隆上次 job 的 script_archive snapshot。**代码未发生变化时可以直接 Copy**，只需修改 run.sh 参数即可；**代码有改动时必须 Create New Training Job 重新上传改动的文件**。历史踩坑：2026-05-01 swiglu+`--valid_split_strategy time` 用 Copy 启动直接 Failed（argparse 报 "unrecognized arguments" → exit code 2）
+- **⚠️ run.sh 不能作为文件上传（2026-05-05 用户澄清）**：平台创建 Training Job 时，`run.sh` **只能在平台的脚本编辑框里编辑/粘贴**，无法作为上传文件。因此：① Agent 每次给"平台提交清单"时，**必须**把 `run.sh` 完整内容展开给用户复制粘贴；② "上传文件列表" 里**永远不含 `run.sh`**，只含 `dataset.py` / `train.py` / `infer.py` / `model.py` 等 Python 代码；③ 用 Copy 时，`run.sh` 也是在平台编辑框里改，不是本地推上去
 - **Publish ckpt verify 三步检查清单**：从平台 Model Management Publish ckpt 前必须 verify ① 是 `*.best_model/` 子目录（非中间步 ckpt）；② 是训练**完成（或至少早停）后**的全局最新 best（否则可能用 epoch 1 ckpt）；③ 子目录内含 `model.pt` + `train_config.json` + `schema.json` 三件套（缺 train_config 会让 default infer.py 走 baseline default 配置）。已踩坑：2026-04-30 transformer 发布 epoch 1 step=7610 而非全局 best step=38050，损失 0.0024 Val AUC ≈ leaderboard 0.002 AUC
 
 ## 实验纪律与训练配额

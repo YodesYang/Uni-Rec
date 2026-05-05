@@ -3,52 +3,49 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ═══════════════════════════════════════════════════════════════════
-# Job: disablefid47-icq-halftrain-swiglu-vr005-bs128
+# Job: rowgap15-icq-halftrain-swiglu-vr005-bs128
 #
-# T23 · Structural disable of seq_c feat47 (the 278M-vocab item_id).
+# C6 / T22-fix · row-level valid gap cutoff (fix EXP-026 failure).
 #
-# Single-variable ablation vs current LB SOTA:
+# Single-variable ablation vs icq-half SOTA:
 #   Baseline: icq-t13tf-halftrain-swiglu-vr005-bs128 (E4 LB 0.84637)
-#   Change:   +--disable_seq_fids 47
-#             (every row zeros out the seq_c/fid=47 slot at train /
-#              valid / inference; model sees no item_id sequence)
+#   Change:   +--enable_row_valid_gap --valid_gap_ratio 0.15
+#             (row-level double cutoff: [train | gap dropped | dev]
+#              split by row-wise timestamp quantiles, NOT RG-level)
 #
-# Motivation (community Seed LB 0.85+ main thread, problem 5):
-#   "长序列: seqc feat47 跟 itemid 是一样的, 做不做 match 特征都掉分"
-# And our P1 ablation (EXP-025, idmaskc15 LB 0.842176 vs SOTA 0.84637)
-# proved input-level random mask is mechanism-wrong: 85% unmasked
-# tokens still let the model overfit to id embedding. The next
-# logical step is a full structural removal of the id channel.
+# EXP-026 found RG-level gap ineffective because each RG spans ~4
+# days (gap and train time ranges completely overlap). This C6 fix
+# sorts every row by timestamp and picks the two boundary timestamps
+# by exact row quantiles, guaranteeing a clean time gap even when RG
+# internal time ordering is chaotic.
 #
-# Hypothesis: If item_id in seq_c is indeed noise (Seed's claim) and
-# the dev→LB gap is driven by id OOV on test, then removing the id
-# column entirely should:
-#   * leave dev AUC roughly flat or slightly down (~-0.0005 to 0.000)
-#   * shrink dev→LB gap (model no longer relies on fragile id signal)
-#   * produce LB ≥ 0.846 (parity) or > 0.847 (SOTA break)
+# Goal (funnel fix, not direct LB):
+#   * E4 dev AUC likely drops to [0.861, 0.866] (train lost 15% rows
+#     AND dev is now temporally further from train — both effects)
+#   * dev→LB gap should shrink to < +0.018 if the covariate-shift
+#     hypothesis is right; current gap is +0.022 (icq-half) to +0.030
+#     (various ablations)
+#   * LB itself may stay near 0.846 or drop; the value of this job
+#     is the gap change, not the absolute LB
 #
-# Decision thresholds (LB vs SOTA 0.84637):
-#   LB ≥ 0.847   → Accept, next round widen disable (add fid 29, 36)
-#   LB ∈ [0.845, 0.847) → direction good, continue widening
-#   LB ∈ [0.843, 0.845) → mixed signal, try seq_c full disable
-#   LB < 0.843   → direction wrong, escalate T22-fix (row-level gap)
+# Decision: if dev→LB gap drops below +0.018, adopt
+# enable_row_valid_gap as default for subsequent ablations — future
+# dev AUC will become a more reliable proxy for LB. If gap stays
+# >= +0.020, the covariate-shift hypothesis is refuted; try other
+# funnel fixes (triple-split, larger gap, etc).
 #
-# Not stacked (single-variable discipline):
-#   * --id_mask_prob         (P1 closed)
-#   * --target_item_seq_injection  (T16 additive closed)
-#   * --holdout_ratio        (independent cost unresolved)
-#   * --valid_gap_ratio      (P3 blocked)
-#
-# Early-stop: 4 epoch + patience=2 + LogLoss rebound guard p=2.
-# Expected wall-clock: ~5.5 hours (seq_c slot removed saves small
-# amount of embedding lookup).
+# Not stacked:
+#   * --id_mask_prob         (T21 closed)
+#   * --disable_seq_fids     (T23 separate ablation running)
+#   * --target_item_seq_injection  (T16 closed)
+#   * --holdout_ratio        (mutually exclusive with enable_row_valid_gap)
 #
 # ⚠️ Platform submission note:
-# --disable_seq_fids is written to train_config.json. Platform's
-# default infer.py will NOT parse this key, causing train/inference
-# mismatch (inference sees full seq_c while training zero'd fid=47).
-# **Must upload baseline/infer.py** (this repo's version, which
-# contains _parse_disable_seq_fids).
+# --enable_row_valid_gap / --valid_gap_ratio are dataset-level flags
+# (not model __init__ kwargs), so platform default infer.py is fully
+# compatible. However, we still recommend uploading baseline/infer.py
+# to keep the evaluation-side code path identical to train (avoid
+# version drift with the platform's infer.py).
 # ═══════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -64,83 +61,11 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --enable_time_of_day_features \
     --valid_split_strategy time \
     --valid_ratio 0.05 \
+    --valid_gap_ratio 0.15 \
+    --enable_row_valid_gap \
     --item_conditioned_query \
-    --disable_seq_fids 47 \
     --logloss_rebound_patience 2 \
     --logloss_rebound_delta 0.0 \
     --batch_size 128 \
     --num_epochs 4 \
     "$@"
-
-# ═══════════════════════════════════════════════════════════════════
-# Fallback · P3 gap15-icq-halftrain (Blocked, RG-level gap failed)
-# ═══════════════════════════════════════════════════════════════════
-#
-# python3 -u "${SCRIPT_DIR}/train.py" \
-#     --ns_tokenizer_type rankmixer \
-#     --user_ns_tokens 5 \
-#     --item_ns_tokens 2 \
-#     --num_queries 2 \
-#     --ns_groups_json "" \
-#     --emb_skip_threshold 1000000 \
-#     --num_workers 8 \
-#     --seq_encoder_type swiglu \
-#     --seq_hash_vocab 500000 \
-#     --enable_time_of_day_features \
-#     --valid_split_strategy time \
-#     --valid_ratio 0.05 \
-#     --valid_gap_ratio 0.15 \
-#     --item_conditioned_query \
-#     --logloss_rebound_patience 2 \
-#     --logloss_rebound_delta 0.0 \
-#     --batch_size 128 \
-#     --num_epochs 4 \
-#     "$@"
-#
-# ═══════════════════════════════════════════════════════════════════
-# Fallback · P1 id_mask c=15 (EXP-025, closed, LB 0.842176)
-# ═══════════════════════════════════════════════════════════════════
-#
-# python3 -u "${SCRIPT_DIR}/train.py" \
-#     --ns_tokenizer_type rankmixer \
-#     --user_ns_tokens 5 \
-#     --item_ns_tokens 2 \
-#     --num_queries 2 \
-#     --ns_groups_json "" \
-#     --emb_skip_threshold 1000000 \
-#     --num_workers 8 \
-#     --seq_encoder_type swiglu \
-#     --seq_hash_vocab 500000 \
-#     --enable_time_of_day_features \
-#     --valid_split_strategy time \
-#     --valid_ratio 0.05 \
-#     --item_conditioned_query \
-#     --id_mask_prob 0.15 \
-#     --id_mask_seq_domains c \
-#     --logloss_rebound_patience 2 \
-#     --logloss_rebound_delta 0.0 \
-#     --batch_size 128 \
-#     --num_epochs 4 \
-#     "$@"
-#
-# ═══════════════════════════════════════════════════════════════════
-# Fallback · original icq-half (LB 0.84637 SOTA)
-# ═══════════════════════════════════════════════════════════════════
-#
-# python3 -u "${SCRIPT_DIR}/train.py" \
-#     --ns_tokenizer_type rankmixer \
-#     --user_ns_tokens 5 \
-#     --item_ns_tokens 2 \
-#     --num_queries 2 \
-#     --ns_groups_json "" \
-#     --emb_skip_threshold 1000000 \
-#     --num_workers 8 \
-#     --seq_encoder_type swiglu \
-#     --seq_hash_vocab 500000 \
-#     --enable_time_of_day_features \
-#     --valid_split_strategy time \
-#     --valid_ratio 0.05 \
-#     --item_conditioned_query \
-#     --batch_size 128 \
-#     --num_epochs 4 \
-#     "$@"

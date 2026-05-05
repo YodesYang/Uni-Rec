@@ -1324,6 +1324,104 @@ def _row_ts_cutoff(
     return cutoff, int(len(all_ts)), train_rows_after, valid_rows_after, n_valid
 
 
+def _row_ts_double_cutoff(
+    row_groups: List[Tuple[str, int, int]],
+    valid_ratio: float,
+    gap_ratio: float,
+) -> Tuple[int, int, int, int, int, int, int]:
+    """Return two row-level timestamp cutoffs for train / gap / valid.
+
+    Targets row-level quantiles so the resulting split counts match
+    ``valid_ratio`` / ``gap_ratio`` exactly (down to ties at the cutoff
+    timestamps). This is the row-level analogue of the RG-level gap
+    that EXP-026 found ineffective: because each RG in this dataset
+    spans ~4 days, sorting RGs by ``max(timestamp)`` does not isolate
+    a clean time window; sorting every row by ``timestamp`` does.
+
+    Layout on the time axis::
+
+        [...... train (rows with ts < gap_start_ts) ......]
+        [..... gap (gap_start_ts <= ts < valid_start_ts) .....]  (dropped)
+        [..... valid (ts >= valid_start_ts) .....]
+
+    Returns:
+        Tuple of ``(gap_start_ts, valid_start_ts, total_rows,
+        train_rows_after, gap_rows_after, valid_rows_after,
+        target_valid_rows)``. Rows equal to ``gap_start_ts`` go to gap;
+        rows equal to ``valid_start_ts`` go to valid. Duplicate
+        timestamps at the boundaries therefore shift rows forward
+        rather than back.
+    """
+    if valid_ratio <= 0 or gap_ratio <= 0:
+        raise ValueError(
+            f"_row_ts_double_cutoff requires valid_ratio > 0 and "
+            f"gap_ratio > 0; got valid_ratio={valid_ratio}, "
+            f"gap_ratio={gap_ratio}")
+    ts_parts: List["npt.NDArray[np.int64]"] = []
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+    for file_path, rg_idx, _ in row_groups:
+        pf = pf_cache.get(file_path)
+        if pf is None:
+            pf = pq.ParquetFile(file_path)
+            pf_cache[file_path] = pf
+        arr = pf.read_row_group(
+            rg_idx, columns=['timestamp']).column('timestamp').to_numpy()
+        if len(arr) > 0:
+            ts_parts.append(arr.astype(np.int64, copy=False))
+    if not ts_parts:
+        raise ValueError(
+            "enable_row_valid_gap found no timestamp rows in the provided "
+            "row_groups")
+    all_ts = np.concatenate(ts_parts)
+    n_total = int(len(all_ts))
+    n_valid = max(1, int(n_total * valid_ratio))
+    n_gap = max(1, int(n_total * gap_ratio))
+    if n_valid + n_gap >= n_total:
+        raise ValueError(
+            f"valid_ratio ({valid_ratio}) + gap_ratio ({gap_ratio}) "
+            f"consume all {n_total} rows; reduce them.")
+    # Row-level quantiles: valid = rightmost n_valid rows;
+    # gap = the n_gap rows immediately before valid; train = the rest.
+    valid_start_idx = max(0, n_total - n_valid)
+    gap_start_idx = max(0, valid_start_idx - n_gap)
+    # np.partition is O(n); pick the two cutoff values by position.
+    sorted_prefix = np.partition(all_ts, [gap_start_idx, valid_start_idx])
+    gap_start_ts = int(sorted_prefix[gap_start_idx])
+    valid_start_ts = int(sorted_prefix[valid_start_idx])
+    if gap_start_ts >= valid_start_ts:
+        # Tie case: many rows share the same ts at the quantile. Fall
+        # back to the unique-ts fallback that still preserves strict
+        # ordering of the three slices.
+        uniq = np.unique(all_ts)
+        if len(uniq) < 3:
+            raise ValueError(
+                "Not enough unique timestamps to form a 3-way split; "
+                f"got {len(uniq)} unique ts values")
+        # Map ratios to quantile indices on the unique-ts axis.
+        gap_q = max(0, len(uniq) - max(2, int(len(uniq) * (valid_ratio + gap_ratio))))
+        valid_q = max(gap_q + 1, len(uniq) - max(1, int(len(uniq) * valid_ratio)))
+        valid_q = min(valid_q, len(uniq) - 1)
+        gap_start_ts = int(uniq[gap_q])
+        valid_start_ts = int(uniq[valid_q])
+        if gap_start_ts >= valid_start_ts:
+            raise ValueError(
+                f"Could not form a clean 3-way time split; "
+                f"gap_start_ts={gap_start_ts}, valid_start_ts={valid_start_ts}")
+    train_rows_after = int((all_ts < gap_start_ts).sum())
+    gap_rows_after = int(
+        ((all_ts >= gap_start_ts) & (all_ts < valid_start_ts)).sum())
+    valid_rows_after = int((all_ts >= valid_start_ts).sum())
+    return (
+        gap_start_ts,
+        valid_start_ts,
+        n_total,
+        train_rows_after,
+        gap_rows_after,
+        valid_rows_after,
+        n_valid,
+    )
+
+
 def _row_groups_ts_range(
     row_groups: List[Tuple[str, int, int]],
 ) -> Optional[Tuple[int, int]]:
@@ -1627,6 +1725,7 @@ def get_pcvr_data(
     limit_train_rgs: int = 0,
     limit_valid_rgs: int = 0,
     enable_row_time_cutoff: bool = False,
+    enable_row_valid_gap: bool = False,
     enable_count_features: bool = False,
     enable_seq_stats_features: bool = False,
     enable_history_cvr_features: bool = False,
@@ -1713,9 +1812,31 @@ def get_pcvr_data(
             "Groups are ordered by timestamp.")
     if valid_gap_ratio > 0.0 and enable_row_time_cutoff:
         raise ValueError(
-            "valid_gap_ratio > 0 is not yet compatible with "
-            "enable_row_time_cutoff (would need a second row-level cut "
-            "point). Disable one of them.")
+            "valid_gap_ratio > 0 with enable_row_time_cutoff=True is "
+            "not supported (two row-level cut points would collide). "
+            "Use enable_row_valid_gap=True instead to get the double "
+            "row-level cutoff designed for this case.")
+    if enable_row_valid_gap:
+        if not enable_row_time_cutoff and valid_gap_ratio <= 0.0:
+            raise ValueError(
+                "enable_row_valid_gap=True requires valid_gap_ratio > 0 "
+                "(C6 / T22-fix row-level gap). The gap ratio controls "
+                "how many rows between the train tail and dev head are "
+                "dropped entirely.")
+        if enable_row_time_cutoff:
+            raise ValueError(
+                "enable_row_valid_gap and enable_row_time_cutoff are "
+                "mutually exclusive; enable_row_valid_gap already "
+                "subsumes the single-cutoff row-level split.")
+        if valid_split_strategy != 'time':
+            raise ValueError(
+                "enable_row_valid_gap=True requires "
+                "valid_split_strategy='time'.")
+        if holdout_ratio > 0.0:
+            raise ValueError(
+                "enable_row_valid_gap=True is not yet compatible with "
+                "holdout_ratio > 0 (would require a third row-level "
+                "cut). Disable one of them.")
     if holdout_ratio > 0.0:
         if valid_split_strategy != 'time':
             raise ValueError(
@@ -1815,7 +1936,7 @@ def get_pcvr_data(
     # away from the train tail so the "dev vs LB" covariate-shift pattern
     # observed in EXP-024 (dev↑ / LB↓) has a proxy we can measure locally.
     n_gap_rgs = 0
-    if valid_gap_ratio > 0.0:
+    if valid_gap_ratio > 0.0 and not enable_row_valid_gap:
         n_gap_rgs = max(1, int(post_holdout_total * valid_gap_ratio))
         if n_gap_rgs + base_n_valid_rgs >= post_holdout_total:
             raise ValueError(
@@ -2052,6 +2173,79 @@ def get_pcvr_data(
             f"(target_valid_rows={cutoff_target_valid_rows})")
         logging.info(
             "[T8.5] Row Groups touching row-level split: "
+            f"{len(train_rgs)} train ({train_rows} pre-filter rows), "
+            f"{len(valid_rgs)} valid ({valid_rows} pre-filter rows)")
+
+    if enable_row_valid_gap:
+        # T22-fix / C6 · row-level double cutoff. Unlike RG-level gap
+        # (EXP-026 showed it is ineffective because each RG spans ~4
+        # days), this walks every row in the candidate range, sorts by
+        # timestamp, and picks two cutoffs that exactly slice
+        # [train | gap (dropped) | dev] by row count.
+        #
+        # Layout:
+        #   ts < gap_start_ts       → train
+        #   gap_start_ts <= ts < valid_start_ts → gap (dropped, no loader)
+        #   ts >= valid_start_ts    → dev
+        #
+        # Gap rows are excluded by the combination of
+        # train_timestamp_max = gap_start_ts and valid_timestamp_min =
+        # valid_start_ts — the interval between them is never loaded
+        # by any DataLoader.
+        candidate_start_idx = train_start_idx
+        candidate_end_idx = valid_end_idx
+        candidate_rgs = rg_info[candidate_start_idx:candidate_end_idx]
+        (
+            gap_start_ts,
+            valid_start_ts,
+            cutoff_total_rows,
+            cutoff_train_rows,
+            cutoff_gap_rows,
+            cutoff_valid_rows,
+            cutoff_target_valid_rows,
+        ) = _row_ts_double_cutoff(
+            candidate_rgs, valid_ratio, valid_gap_ratio)
+        train_timestamp_max = gap_start_ts
+        valid_timestamp_min = valid_start_ts
+
+        train_rgs = [
+            rg for rg, ts in zip(
+                candidate_rgs,
+                rg_ts_ranges[candidate_start_idx:candidate_end_idx])
+            if ts is not None and ts[0] < gap_start_ts
+        ]
+        valid_rgs = [
+            rg for rg, ts in zip(
+                candidate_rgs,
+                rg_ts_ranges[candidate_start_idx:candidate_end_idx])
+            if ts is not None and ts[1] >= valid_start_ts
+        ]
+        if not train_rgs or not valid_rgs:
+            raise ValueError(
+                "Row-level valid gap cutoff produced an empty train or "
+                "valid Row Group view; adjust valid_ratio / "
+                "valid_gap_ratio or disable enable_row_valid_gap.")
+        train_rows = sum(r[2] for r in train_rgs)
+        valid_rows = sum(r[2] for r in valid_rgs)
+        logging.info(
+            "[C6] row-level valid gap enabled: "
+            f"gap_start_ts={gap_start_ts}, valid_start_ts={valid_start_ts}; "
+            "train keeps timestamp < gap_start_ts, "
+            "gap (dropped) keeps gap_start_ts <= timestamp < valid_start_ts, "
+            "valid keeps timestamp >= valid_start_ts")
+        logging.info(
+            "[C6] exact row-level target after filtering: "
+            f"candidate_rows={cutoff_total_rows}, "
+            f"train_rows={cutoff_train_rows}, "
+            f"gap_rows={cutoff_gap_rows}, "
+            f"valid_rows={cutoff_valid_rows} "
+            f"(target_valid_rows={cutoff_target_valid_rows})")
+        logging.info(
+            "[C6] effective train→valid time distance (valid_start_ts - "
+            f"gap_start_ts) = {valid_start_ts - gap_start_ts} sec "
+            "(> 0 is clean, matches real future gap)")
+        logging.info(
+            "[C6] Row Groups touching row-level split: "
             f"{len(train_rgs)} train ({train_rows} pre-filter rows), "
             f"{len(valid_rgs)} valid ({valid_rows} pre-filter rows)")
 

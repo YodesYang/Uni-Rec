@@ -168,6 +168,16 @@ def parse_args() -> argparse.Namespace:
                              'by the validation minimum timestamp so train keeps '
                              'timestamp < cutoff and valid keeps timestamp >= cutoff '
                              '(default off)')
+    parser.add_argument('--enable_row_valid_gap', action='store_true', default=False,
+                        help='C6 / T22-fix switch: row-level double cutoff so '
+                             'train / gap (dropped) / dev are separated by '
+                             'exact row-wise timestamp quantiles. Fixes the '
+                             'RG-level gap failure documented in EXP-026 '
+                             '(where each RG spans ~4 days and RG-ordering '
+                             'cannot isolate a clean time window). Requires '
+                             '--valid_split_strategy time + --valid_gap_ratio '
+                             '> 0. Mutually exclusive with '
+                             '--enable_row_time_cutoff and --holdout_ratio.')
     parser.add_argument('--enable_count_features', action='store_true', default=False,
                         help='P0-A switch: append user/item non-zero feature counts '
                              'to user dense features (default off)')
@@ -517,6 +527,7 @@ def main() -> None:
         limit_train_rgs=args.limit_train_rgs,
         limit_valid_rgs=args.limit_valid_rgs,
         enable_row_time_cutoff=args.enable_row_time_cutoff,
+        enable_row_valid_gap=args.enable_row_valid_gap,
         enable_count_features=args.enable_count_features,
         enable_seq_stats_features=args.enable_seq_stats_features,
         enable_history_cvr_features=args.enable_history_cvr_features,
