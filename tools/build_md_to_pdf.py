@@ -1,15 +1,18 @@
-"""Convert the two flight-reading markdown docs to printable PDF.
+"""Convert the two flight-reading markdown docs to iPad-friendly PDF.
 
 Produces:
   - docs/99-raw/flight-pdfs/00-flight-reading-list.pdf
   - docs/99-raw/flight-pdfs/00-model-py-section-map.pdf
 
-Uses a simple line-based renderer rather than full markdown parsing. Supports:
-  - Headers (# ## ### #### -> font size steps)
-  - Bullet lists (`-` / `*` / `1.` lines)
-  - Inline emphasis/code is rendered as plain text (we keep `**bold**` and
-    `` `code` `` markers visible as literal punctuation; that is acceptable
-    for an offline reading aid).
+Pipeline:
+  markdown --(pandoc)--> typst --(typst compile)--> pdf
+
+Uses the shared iPad-optimized template `tools/flight-reading-template.typ`
+and the pandoc wrapper `tools/pandoc-typst-template.typ`.
+
+Requirements:
+  - pandoc >= 3.1 (with typst writer)  -- already present on most systems
+  - typst >= 0.12  -- `brew install typst`
 
 Usage:
     python tools/build_md_to_pdf.py
@@ -17,256 +20,176 @@ Usage:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 import re
+from dataclasses import dataclass
 from pathlib import Path
-
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (
-    PageBreak,
-    Paragraph,
-    Preformatted,
-    SimpleDocTemplate,
-    Spacer,
-)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TOOLS_DIR = PROJECT_ROOT / "tools"
 OUTPUT_DIR = PROJECT_ROOT / "docs" / "99-raw" / "flight-pdfs"
+PANDOC_TEMPLATE = TOOLS_DIR / "pandoc-typst-template.typ"
+TYPST_TEMPLATE = TOOLS_DIR / "flight-reading-template.typ"
 
-SOURCES: list[tuple[Path, Path, str]] = [
-    (
-        PROJECT_ROOT / "docs" / "10-research" / "flight-reading-list-2026-05-06.md",
-        OUTPUT_DIR / "00-flight-reading-list.pdf",
-        "Flight Reading List · 2026-05-06 出差",
+
+@dataclass(frozen=True)
+class MdSource:
+    """A single markdown → PDF conversion job."""
+
+    md_path: Path
+    out_pdf: Path
+    title: str
+    subtitle: str | None = None
+    date: str | None = None
+
+
+SOURCES: tuple[MdSource, ...] = (
+    MdSource(
+        md_path=PROJECT_ROOT / "docs" / "10-research" / "flight-reading-list-2026-05-06.md",
+        out_pdf=OUTPUT_DIR / "00-flight-reading-list.pdf",
+        title="Flight Reading List",
+        subtitle="16 小时飞机论文精读清单 · 2026-05-06 出差",
+        date="2026-05-06",
     ),
-    (
-        PROJECT_ROOT / "docs" / "00-context" / "model-py-section-map.md",
-        OUTPUT_DIR / "00-model-py-section-map.pdf",
-        "model.py ↔ 论文 Section Map",
+    MdSource(
+        md_path=PROJECT_ROOT / "docs" / "00-context" / "model-py-section-map.md",
+        out_pdf=OUTPUT_DIR / "00-model-py-section-map.pdf",
+        title="model.py ↔ 论文 Section Map",
+        subtitle="源码 vs 论文对照阅读地图",
+        date="2026-05-04",
     ),
-]
+)
 
 
-_CJK_FONT_CANDIDATES = [
-    ("STHeiti", "/System/Library/Fonts/STHeiti Medium.ttc"),
-    ("STHeitiLight", "/System/Library/Fonts/STHeiti Light.ttc"),
-    ("Songti", "/System/Library/Fonts/Supplemental/Songti.ttc"),
-]
-
-CJK_FONT_NAME: str | None = None
-for name, path in _CJK_FONT_CANDIDATES:
-    if Path(path).exists():
-        try:
-            pdfmetrics.registerFont(TTFont(name, path))
-            CJK_FONT_NAME = name
-            break
-        except Exception:  # noqa: BLE001
-            continue
+def _check_tool(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        raise RuntimeError(
+            f"'{name}' not found in PATH. Install it before running this script "
+            f"(e.g. `brew install {name}` for pandoc/typst)."
+        )
+    return path
 
 
-def _strip_inline_markdown(text: str) -> str:
-    """Remove markdown emphasis tokens so they don't clutter the printed page."""
-    text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"`([^`]+)`", r"<font face='Courier'>\1</font>", text)
-    # reportlab paragraphs interpret `<` `>` `&`. Be sure we don't accidentally
-    # break markup by checking for unmatched angle brackets.
-    return text
+# Tuned column-width presets for common markdown table shapes on A5 pages.
+# Pandoc's typst writer defaults to even-width columns; we override for
+# "wide prose column, narrow numeric columns" which matches our sources.
+_TABLE_WIDTH_OVERRIDES: dict[int, str] = {
+    4: "(18%, 52%, 15%, 15%)",  # e.g. time-window | content | hours | cumulative
+    3: "(25%, 50%, 25%)",        # e.g. label | description | value
+    2: "(35%, 65%)",             # e.g. term | definition
+}
+
+_TABLE_COLUMNS_RE = re.compile(
+    r"columns:\s*\(\s*(\d+%)(\s*,\s*\1){1,}\s*\)",
+)
 
 
-def _make_styles():
-    base = getSampleStyleSheet()
-    font = CJK_FONT_NAME or "Helvetica"
+def _rebalance_table_columns(typst_path: Path) -> None:
+    """Rewrite equal-width `columns: (x%, x%, ...)` to our A5-tuned presets."""
+    text = typst_path.read_text(encoding="utf-8")
 
-    styles = {
-        "title": ParagraphStyle(
-            "Title", parent=base["Heading1"], fontName=font,
-            fontSize=18, leading=22, spaceAfter=8,
-        ),
-        "h1": ParagraphStyle(
-            "H1", parent=base["Heading1"], fontName=font,
-            fontSize=15, leading=19, spaceBefore=10, spaceAfter=6,
-            textColor=colors.HexColor("#0b5cad"),
-        ),
-        "h2": ParagraphStyle(
-            "H2", parent=base["Heading2"], fontName=font,
-            fontSize=12.5, leading=16, spaceBefore=8, spaceAfter=4,
-            textColor=colors.HexColor("#1f6bbf"),
-        ),
-        "h3": ParagraphStyle(
-            "H3", parent=base["Heading3"], fontName=font,
-            fontSize=11, leading=14, spaceBefore=6, spaceAfter=3,
-            textColor=colors.HexColor("#444444"),
-        ),
-        "h4": ParagraphStyle(
-            "H4", parent=base["Heading4"], fontName=font,
-            fontSize=10, leading=13, spaceBefore=5, spaceAfter=2,
-        ),
-        "body": ParagraphStyle(
-            "Body", parent=base["BodyText"], fontName=font,
-            fontSize=9, leading=12, spaceAfter=3,
-        ),
-        "bullet": ParagraphStyle(
-            "Bullet", parent=base["BodyText"], fontName=font,
-            fontSize=9, leading=12, leftIndent=14, bulletIndent=4,
-        ),
-        "code": ParagraphStyle(
-            "Code", parent=base["Code"], fontName="Courier",
-            fontSize=8, leading=10,
-        ),
-        "meta": ParagraphStyle(
-            "Meta", parent=base["BodyText"], fontName=font,
-            fontSize=8, leading=10, textColor=colors.HexColor("#777777"),
-        ),
-    }
-    return styles
+    def _replace(match: re.Match[str]) -> str:
+        # Count the `%` occurrences to infer column count (avoid overcounting
+        # commas since Typst tuples may have trailing commas).
+        n_cols = match.group(0).count("%")
+        override = _TABLE_WIDTH_OVERRIDES.get(n_cols)
+        if override is None:
+            return match.group(0)
+        return f"columns: {override}"
+
+    rewritten = _TABLE_COLUMNS_RE.sub(_replace, text)
+    if rewritten != text:
+        typst_path.write_text(rewritten, encoding="utf-8")
 
 
-def _render_markdown(md_text: str, styles: dict, title: str):
-    """Convert markdown text to a list of flowables.
+def _convert_one(src: MdSource) -> None:
+    if not src.md_path.exists():
+        raise FileNotFoundError(f"Source markdown not found: {src.md_path}")
 
-    Supported constructs (line-based):
-      # ~ ####   heading levels
-      - item    bullet list
-      * item    bullet list
-      1. item   ordered list (rendered same as bullets)
-      ```...``` fenced code blocks
-      | a | b |  table rows (rendered as preformatted text, still readable)
-      paragraph breaks on blank line
-    """
-    story: list = [Paragraph(title, styles["title"])]
-    story.append(Spacer(1, 4 * mm))
+    src.out_pdf.parent.mkdir(parents=True, exist_ok=True)
 
-    lines = md_text.splitlines()
-    i = 0
-    in_code = False
-    code_buf: list[str] = []
+    # Strip the leading `# H1` line from the source — the template renders
+    # the paper title as a cover header already, and re-emitting it as an
+    # H1 in the body creates visual duplication on page 1.
+    processed_md = src.out_pdf.parent / f".processed-{src.md_path.name}"
+    raw = src.md_path.read_text(encoding="utf-8").splitlines()
+    if raw and raw[0].startswith("# "):
+        raw = raw[1:]
+        while raw and raw[0].strip() == "":
+            raw = raw[1:]
+    processed_md.write_text("\n".join(raw), encoding="utf-8")
 
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.rstrip()
+    # Intermediate typst source lives next to the final PDF for easier debug.
+    typst_out = src.out_pdf.with_suffix(".typ")
 
-        if stripped.startswith("```"):
-            if in_code:
-                story.append(Preformatted("\n".join(code_buf), styles["code"]))
-                code_buf = []
-                in_code = False
-            else:
-                in_code = True
-            i += 1
-            continue
+    pandoc_cmd = [
+        _check_tool("pandoc"),
+        "--standalone",
+        "--from=gfm",
+        "--to=typst",
+        f"--template={PANDOC_TEMPLATE}",
+        f"--metadata=title:{src.title}",
+        "-o",
+        str(typst_out),
+        str(processed_md),
+    ]
+    if src.subtitle:
+        pandoc_cmd.insert(-3, f"--metadata=subtitle:{src.subtitle}")
+    if src.date:
+        pandoc_cmd.insert(-3, f"--metadata=date:{src.date}")
 
-        if in_code:
-            code_buf.append(line)
-            i += 1
-            continue
+    subprocess.run(pandoc_cmd, check=True)
 
-        if stripped == "":
-            story.append(Spacer(1, 2 * mm))
-            i += 1
-            continue
+    # Post-process: rebalance equal-width table columns on A5.
+    # Pandoc emits `columns: (25%, 25%, 25%, 25%)` by default; that wastes
+    # width on numeric columns and squeezes prose columns. For 4-col tables
+    # that follow a "time | content | number | number" shape, allocate more
+    # width to the second (content) column.
+    _rebalance_table_columns(typst_out)
 
-        # Horizontal rule
-        if stripped in ("---", "***"):
-            story.append(Spacer(1, 3 * mm))
-            i += 1
-            continue
+    # typst compile needs the imported template to resolve relative to the
+    # .typ file. We already point pandoc-typst-template.typ to import from
+    # `flight-reading-template.typ`, so copy that alongside the output.
+    sibling_template = typst_out.parent / TYPST_TEMPLATE.name
+    shutil.copyfile(TYPST_TEMPLATE, sibling_template)
 
-        # Headings
-        m = re.match(r"^(#{1,4})\s+(.*)$", stripped)
-        if m:
-            level = len(m.group(1))
-            text = _strip_inline_markdown(m.group(2))
-            style = {1: "h1", 2: "h2", 3: "h3", 4: "h4"}.get(level, "h4")
-            story.append(Paragraph(text, styles[style]))
-            i += 1
-            continue
+    typst_cmd = [
+        _check_tool("typst"),
+        "compile",
+        "--root",
+        str(typst_out.parent),
+        str(typst_out),
+        str(src.out_pdf),
+    ]
+    subprocess.run(typst_cmd, check=True)
 
-        # Bullet / ordered list item
-        m = re.match(r"^(\s*)[-*]\s+(.*)$", line)
-        if m:
-            indent = len(m.group(1)) // 2
-            text = _strip_inline_markdown(m.group(2))
-            bullet_style = ParagraphStyle(
-                f"b{indent}", parent=styles["bullet"], leftIndent=14 + indent * 10,
-            )
-            story.append(Paragraph(f"• {text}", bullet_style))
-            i += 1
-            continue
+    # Clean up the processed markdown intermediary. Keep the .typ + sibling
+    # template around so a human can re-tweak the layout without touching
+    # the python pipeline.
+    processed_md.unlink(missing_ok=True)
 
-        m = re.match(r"^(\s*)(\d+)\.\s+(.*)$", line)
-        if m:
-            indent = len(m.group(1)) // 2
-            num = m.group(2)
-            text = _strip_inline_markdown(m.group(3))
-            bullet_style = ParagraphStyle(
-                f"n{indent}", parent=styles["bullet"], leftIndent=14 + indent * 10,
-            )
-            story.append(Paragraph(f"{num}. {text}", bullet_style))
-            i += 1
-            continue
-
-        # Simple table row: render as monospace table for readability. Use a
-        # CJK-capable font when available so Chinese cells don't render as
-        # boxes. (reportlab's default Courier is ASCII-only.)
-        if stripped.startswith("|") and stripped.endswith("|"):
-            table_buf = [line]
-            i += 1
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                table_buf.append(lines[i])
-                i += 1
-            table_font = CJK_FONT_NAME or "Courier"
-            table_style = ParagraphStyle(
-                "Table", parent=styles["code"], fontName=table_font,
-                fontSize=8, leading=10,
-            )
-            story.append(Preformatted("\n".join(table_buf), table_style))
-            continue
-
-        # Default paragraph
-        text = _strip_inline_markdown(stripped)
-        # Handle unescaped angle brackets for reportlab: only convert when they
-        # don't look like our inline <b> / <font> tags.
-        text = re.sub(r"<(?!/?(?:b|font\b))", "&lt;", text)
-        story.append(Paragraph(text, styles["body"]))
-        i += 1
-
-    if in_code and code_buf:
-        story.append(Preformatted("\n".join(code_buf), styles["code"]))
-
-    return story
-
-
-def build_pdf(md_path: Path, pdf_path: Path, title: str) -> None:
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    md_text = md_path.read_text(encoding="utf-8")
-    styles = _make_styles()
-    story = _render_markdown(md_text, styles, title)
-    doc = SimpleDocTemplate(
-        str(pdf_path),
-        pagesize=A4,
-        leftMargin=15 * mm,
-        rightMargin=12 * mm,
-        topMargin=14 * mm,
-        bottomMargin=14 * mm,
-        title=title,
-    )
-    doc.build(story)
-    size_kb = pdf_path.stat().st_size / 1024
-    print(f"Generated: {pdf_path.relative_to(PROJECT_ROOT)}  ({size_kb:.1f} KB)")
+    size_kb = src.out_pdf.stat().st_size / 1024
+    print(f"  Generated: {src.out_pdf.relative_to(PROJECT_ROOT)} ({size_kb:.1f} KB)")
 
 
 def main() -> None:
-    for md_path, pdf_path, title in SOURCES:
-        if not md_path.exists():
-            print(f"SKIP (not found): {md_path}")
-            continue
-        build_pdf(md_path, pdf_path, title)
+    print("Building iPad-friendly PDFs from markdown sources ...")
+    for src in SOURCES:
+        print(f"- {src.md_path.relative_to(PROJECT_ROOT)}")
+        _convert_one(src)
+    print("Done.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (RuntimeError, FileNotFoundError) as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.CalledProcessError as err:
+        print(f"ERROR: subcommand failed with exit code {err.returncode}", file=sys.stderr)
+        sys.exit(err.returncode)

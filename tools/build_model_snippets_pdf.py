@@ -1,9 +1,13 @@
 """Build a printable PDF of key `baseline/model.py` sections for offline reading.
 
-Produces `docs/99-raw/flight-pdfs/08-model-py-key-sections.pdf` containing the
-class/function ranges most relevant to the 5 core papers on the flight reading
-list. Each section has a header page with "which paper it corresponds to" and
-a "what to look for" checklist, followed by the actual source lines.
+Produces `docs/99-raw/flight-pdfs/08-model-py-key-sections.pdf`. Each section
+has a header with "which paper it corresponds to" and a "what to look for"
+checklist, followed by the actual source lines as a code block.
+
+Pipeline:
+  SECTIONS (below) --> generated markdown --> pandoc --> typst --> pdf
+
+Shares the iPad-optimized template with `build_md_to_pdf.py`.
 
 Usage:
     python tools/build_model_snippets_pdf.py
@@ -11,49 +15,25 @@ Usage:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (
-    PageBreak,
-    Paragraph,
-    Preformatted,
-    SimpleDocTemplate,
-    Spacer,
-)
-
-
-# Register CJK fonts so Chinese text in the doc can render. macOS ships
-# STHeiti and Songti in standard locations. Falls back gracefully if fonts
-# are missing (text will show as boxes but PDF still generates).
-_CJK_FONT_CANDIDATES = [
-    ("STHeiti", "/System/Library/Fonts/STHeiti Medium.ttc"),
-    ("STHeitiLight", "/System/Library/Fonts/STHeiti Light.ttc"),
-    ("Songti", "/System/Library/Fonts/Supplemental/Songti.ttc"),
-]
-
-CJK_FONT_NAME: str | None = None
-for name, path in _CJK_FONT_CANDIDATES:
-    if Path(path).exists():
-        try:
-            pdfmetrics.registerFont(TTFont(name, path))
-            CJK_FONT_NAME = name
-            break
-        except Exception:  # noqa: BLE001 — reportlab raises generic Exception
-            continue
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TOOLS_DIR = PROJECT_ROOT / "tools"
 MODEL_PY = PROJECT_ROOT / "baseline" / "model.py"
 OUTPUT_PDF = PROJECT_ROOT / "docs" / "99-raw" / "flight-pdfs" / "08-model-py-key-sections.pdf"
+PANDOC_TEMPLATE = TOOLS_DIR / "pandoc-typst-template.typ"
+TYPST_TEMPLATE = TOOLS_DIR / "flight-reading-template.typ"
 
 
 # Each tuple: (section_title, start_line, end_line, paper_ref, focus_bullets)
-# Line ranges are 1-indexed, inclusive.
+# Line ranges are 1-indexed, inclusive. Uses plain ASCII stars (*) in titles
+# so the markdown-level emphasis handling stays predictable; emoji-level
+# emphasis is redundant once the template highlights `strong`.
 SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
     (
         "§1 ModelInput (数据结构)",
@@ -84,7 +64,7 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
         ],
     ),
     (
-        "§4 RoPEMultiheadAttention ⭐",
+        "§4 RoPEMultiheadAttention ★",
         117,
         243,
         "论文 1 Attention + 论文 2 RoFormer",
@@ -106,13 +86,13 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
         ],
     ),
     (
-        "§6 RankMixerBlock ⭐ (Token Mixing 灵魂)",
+        "§6 RankMixerBlock ★ (Token Mixing 灵魂)",
         315,
         414,
         "论文 4 RankMixer",
         [
             "token_mixing: (B,T,D)→(B,T,T,d_sub)→transpose→(B,T,D) 无参数",
-            "⚠️ 仓库用 shared FFN (fc1/fc2 各一份)，论文原版是 Per-token FFN",
+            "⚠ 仓库用 shared FFN (fc1/fc2 各一份)，论文原版是 Per-token FFN",
             "手画 T=4, d_sub=2 的 reshape 过程验证理解",
         ],
     ),
@@ -159,7 +139,7 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
         ],
     ),
     (
-        "§11 MultiSeqHyFormerBlock ⭐⭐ (HyFormer 核心 block)",
+        "§11 MultiSeqHyFormerBlock ★★ (HyFormer 核心 block)",
         906,
         1043,
         "论文 3 HyFormer §3.2-3.4",
@@ -171,14 +151,14 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
         ],
     ),
     (
-        "§12 OneTransMixedAttn ⭐⭐ (Mixed Parameterization)",
+        "§12 OneTransMixedAttn ★★ (Mixed Parameterization)",
         1044,
         1217,
         "论文 5 OneTrans §Mixed Attn",
         [
             "W_Q_s/W_K_s/W_V_s/W_O_s: S-tokens 共享 4×d² 参数",
             "W_Q_ns[j]/.../W_O_ns[j]: 每个 NS token 独立 4×d²×M 参数",
-            "⚠️ 仓库 S-S 用 BIDIRECTIONAL 不用 causal（多 domain 按字母序拼，无时序）",
+            "⚠ 仓库 S-S 用 BIDIRECTIONAL 不用 causal（多 domain 按字母序拼，无时序）",
             "_build_causal_mixed_mask: 手画 L=4, M=3 的 7x7 mask 矩阵",
         ],
     ),
@@ -193,7 +173,7 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
         ],
     ),
     (
-        "§14 OneTransNSConditioner ⭐⭐⭐ (EXP-013 +0.010 AUC 源头)",
+        "§14 OneTransNSConditioner ★★★ (EXP-013 +0.010 AUC 源头)",
         1281,
         1349,
         "仓库自研扩展（有创新奖潜质）",
@@ -201,7 +181,7 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
             "在 OneTrans 主 block 前，给 NS token 加序列 mean-pool 信息",
             "每个 NS 独立 conditioning FFN（mixed-param 一致）",
             "v2 无此模块: 0.848712 full train；v3 有: 0.859408 (+0.010)",
-            "⭐ 飞机上想清楚：为什么这个能带来 +0.010？类比 HyFormer 的 MultiSeqQueryGenerator（都是给跨特征交互提供 warm-start）",
+            "飞机上想清楚：为什么这个能带来 +0.010？类比 HyFormer 的 MultiSeqQueryGenerator（都是给跨特征交互提供 warm-start）",
         ],
     ),
     (
@@ -233,7 +213,7 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
         ],
     ),
     (
-        "§18 PCVRHyFormer ⭐ (顶层装配)",
+        "§18 PCVRHyFormer ★ (顶层装配)",
         1689,
         2396,
         "整体装配（所有论文的综合体现）",
@@ -246,16 +226,56 @@ SECTIONS: list[tuple[str, int, int, str, list[str]]] = [
 ]
 
 
-def read_lines(path: Path, start: int, end: int) -> str:
-    """Read inclusive 1-indexed line range as a single string with line numbers."""
-    all_lines = path.read_text(encoding="utf-8").splitlines()
-    selected = all_lines[start - 1 : end]
-    max_lineno_width = len(str(end))
-    numbered = [
-        f"{str(start + i).rjust(max_lineno_width)} | {line}"
-        for i, line in enumerate(selected)
-    ]
-    return "\n".join(numbered)
+def _read_code_range(path: Path, start: int, end: int) -> str:
+    """Return the inclusive 1-indexed line range as code, with line numbers."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if start < 1 or end > len(lines) or start > end:
+        raise ValueError(f"Invalid range {start}-{end} for {path} ({len(lines)} lines)")
+    selected = lines[start - 1 : end]
+    width = len(str(end))
+    return "\n".join(f"{str(start + i).rjust(width)} | {line}" for i, line in enumerate(selected))
+
+
+def _build_markdown() -> str:
+    parts: list[str] = []
+    parts.append(
+        "> 配套文档：`docs/10-research/flight-reading-list-2026-05-06.md` · "
+        "`docs/00-context/model-py-section-map.md`  \n"
+        "> ★ 重点段落；★★ 核心必读；★★★ EXP-013 关键差异源头\n"
+    )
+
+    parts.append("## 目录\n")
+    for idx, (title, start, end, paper, _focus) in enumerate(SECTIONS, start=1):
+        parts.append(f"{idx}. **{title}** · L{start}-L{end} · 对应 {paper}")
+    parts.append("")
+
+    for idx, (title, start, end, paper, focus) in enumerate(SECTIONS, start=1):
+        parts.append(f"## {idx:02d}. {title}\n")
+        parts.append(
+            f"**行号范围**：L{start}-L{end}（{end - start + 1} 行） · "
+            f"**对应论文**：{paper}\n"
+        )
+        parts.append("**飞机上读的时候重点关注**：\n")
+        for bullet in focus:
+            parts.append(f"- {bullet}")
+        parts.append("")
+
+        code = _read_code_range(MODEL_PY, start, end)
+        parts.append("```python")
+        parts.append(code)
+        parts.append("```\n")
+
+    return "\n".join(parts)
+
+
+def _check_tool(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        raise RuntimeError(
+            f"'{name}' not found in PATH. Install it first "
+            f"(e.g. `brew install {name}`)."
+        )
+    return path
 
 
 def build_pdf() -> None:
@@ -263,111 +283,53 @@ def build_pdf() -> None:
         raise FileNotFoundError(f"model.py not found: {MODEL_PY}")
 
     OUTPUT_PDF.parent.mkdir(parents=True, exist_ok=True)
+    md_body = _build_markdown()
 
-    doc = SimpleDocTemplate(
-        str(OUTPUT_PDF),
-        pagesize=A4,
-        leftMargin=12 * mm,
-        rightMargin=10 * mm,
-        topMargin=12 * mm,
-        bottomMargin=12 * mm,
-        title="baseline/model.py — Flight Reading Key Sections",
-        author="TAAC 2026 offline prep",
-    )
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        md_file = tmp_path / "snippets.md"
+        md_file.write_text(md_body, encoding="utf-8")
 
-    styles = getSampleStyleSheet()
-    base_font = CJK_FONT_NAME or "Helvetica"
-    title_style = ParagraphStyle(
-        "TitleBig",
-        parent=styles["Heading1"],
-        fontName=base_font,
-        fontSize=16,
-        leading=20,
-        spaceAfter=6,
-    )
-    section_style = ParagraphStyle(
-        "SectionHead",
-        parent=styles["Heading2"],
-        fontName=base_font,
-        fontSize=12,
-        leading=15,
-        textColor=colors.HexColor("#0b5cad"),
-        spaceBefore=4,
-        spaceAfter=4,
-    )
-    meta_style = ParagraphStyle(
-        "Meta",
-        parent=styles["BodyText"],
-        fontName=base_font,
-        fontSize=9,
-        leading=12,
-        textColor=colors.HexColor("#555555"),
-    )
-    bullet_style = ParagraphStyle(
-        "Bullet",
-        parent=styles["BodyText"],
-        fontName=base_font,
-        fontSize=9,
-        leading=11,
-        leftIndent=12,
-        bulletIndent=2,
-    )
-    code_style = ParagraphStyle(
-        "Code",
-        parent=styles["Code"],
-        fontName="Courier",
-        fontSize=7.2,
-        leading=8.4,
-    )
+        typst_out = OUTPUT_PDF.with_suffix(".typ")
+        pandoc_cmd = [
+            _check_tool("pandoc"),
+            "--standalone",
+            "--from=gfm",
+            "--to=typst",
+            f"--template={PANDOC_TEMPLATE}",
+            "--metadata=title:baseline/model.py — 飞行精读关键段",
+            "--metadata=subtitle:Paper↔Code side-by-side",
+            "--metadata=date:2026-05-04",
+            "-o",
+            str(typst_out),
+            str(md_file),
+        ]
+        subprocess.run(pandoc_cmd, check=True)
 
-    story: list = []
+        sibling_template = typst_out.parent / TYPST_TEMPLATE.name
+        shutil.copyfile(TYPST_TEMPLATE, sibling_template)
 
-    story.append(
-        Paragraph("baseline/model.py — Flight Reading Key Sections", title_style)
-    )
-    story.append(
-        Paragraph(
-            "配套文档: docs/10-research/flight-reading-list-2026-05-06.md "
-            "+ docs/00-context/model-py-section-map.md<br/>"
-            "⭐ 重点段落；⭐⭐ 核心必读；⭐⭐⭐ EXP-013 关键差异源头",
-            meta_style,
-        )
-    )
-    story.append(Spacer(1, 8 * mm))
+        typst_cmd = [
+            _check_tool("typst"),
+            "compile",
+            "--root",
+            str(typst_out.parent),
+            str(typst_out),
+            str(OUTPUT_PDF),
+        ]
+        subprocess.run(typst_cmd, check=True)
 
-    toc_items = []
-    for idx, (title, start, end, paper, _focus) in enumerate(SECTIONS, start=1):
-        toc_items.append(
-            f"{idx:02d}. {title}  (L{start}-L{end})  ← {paper}"
-        )
-    story.append(Paragraph("Table of Contents", section_style))
-    for item in toc_items:
-        story.append(Paragraph(item, bullet_style))
-    story.append(PageBreak())
-
-    for idx, (title, start, end, paper, focus) in enumerate(SECTIONS, start=1):
-        story.append(Paragraph(f"{idx:02d}. {title}", section_style))
-        story.append(
-            Paragraph(
-                f"Lines {start}-{end} ({end - start + 1} lines) &nbsp;·&nbsp; "
-                f"Paper ref: {paper}",
-                meta_style,
-            )
-        )
-        story.append(Paragraph("<b>飞机上读的时候重点关注：</b>", meta_style))
-        for bullet in focus:
-            story.append(Paragraph(f"• {bullet}", bullet_style))
-        story.append(Spacer(1, 2 * mm))
-
-        code = read_lines(MODEL_PY, start, end)
-        story.append(Preformatted(code, code_style))
-        story.append(PageBreak())
-
-    doc.build(story)
     size_kb = OUTPUT_PDF.stat().st_size / 1024
-    print(f"Generated: {OUTPUT_PDF}")
-    print(f"Size: {size_kb:.1f} KB")
+    print(f"Generated: {OUTPUT_PDF.relative_to(PROJECT_ROOT)}")
+    print(f"Size: {size_kb:.1f} KB, sections: {len(SECTIONS)}")
 
 
 if __name__ == "__main__":
-    build_pdf()
+    try:
+        build_pdf()
+    except (RuntimeError, FileNotFoundError, ValueError) as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.CalledProcessError as err:
+        print(f"ERROR: subcommand failed with exit code {err.returncode}", file=sys.stderr)
+        sys.exit(err.returncode)

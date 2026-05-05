@@ -17,6 +17,9 @@ docs/99-raw/platform-pdf/*.pdf
 # --- Lexiang community raw JSON snapshots (oversized; 情报已沉淀到 docs/10-research/community-intel.md) ---
 docs/99-raw/community-snapshots/lexiang_questions_*.json
 
+# --- Flight-pdfs Typst intermediaries (regenerate via tools/build_md_to_pdf.py) ---
+docs/99-raw/flight-pdfs/*.typ
+
 # --- External reference repos (clone-for-inspection; 情报已沉淀到 docs/10-research/) ---
 docs/99-raw/external-refs/
 
