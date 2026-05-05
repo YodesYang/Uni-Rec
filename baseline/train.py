@@ -220,24 +220,49 @@ def parse_args() -> argparse.Namespace:
                         help='Disable the time-bucket embedding')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
-                        help='RankMixerBlock mode: '
-                             'full = token mixing + per-token FFN (requires d_model divisible by T), '
-                             'ffn_only = per-token FFN only, '
+                        help='RankMixer mode: full = token mixing + FFN, '
+                             'ffn_only = FFN only (no token mixing), '
                              'none = identity passthrough')
+    parser.add_argument('--rank_mixer_ffn_mode', type=str, default='shared',
+                        choices=['shared', 'per_token'],
+                        help='T19 / ADR-007: RankMixer FFN parameterization. '
+                             'shared = one Linear pair shared across T tokens '
+                             '(legacy, default, back-compat). '
+                             'per_token = independent FFN weights per token '
+                             '(RankMixer paper original: avoid dominant '
+                             'feature flooding long-tail tokens). '
+                             'Parameters grow ~T× per block (T=15 @ d=64, '
+                             'hidden_mult=4 ≈ +495k dense params per block).')
     parser.add_argument('--use_rope', action='store_true', default=False,
                         help='Enable RoPE positional encoding in sequence attention')
     parser.add_argument('--rope_base', type=float, default=10000.0,
                         help='RoPE base frequency (default 10000)')
 
     # Loss function.
-    parser.add_argument('--loss_type', type=str, default='bce', choices=['bce', 'focal'],
-                        help='Loss type: bce = BCEWithLogits, focal = Focal Loss')
+    parser.add_argument('--loss_type', type=str, default='bce', choices=['bce', 'focal', 'auc'],
+                        help='Loss type: bce = BCEWithLogits, focal = Focal Loss, '
+                             'auc = CombinedAUCLoss = (1-w)*BCE + w*PairwiseBPR '
+                             '(T18 / ADR-006, directly optimizes AUC)')
     parser.add_argument('--focal_alpha', type=float, default=0.1,
                         help='Focal Loss positive-class weight alpha '
                              '(effective only when --loss_type=focal)')
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--auc_loss_weight', type=float, default=0.5,
+                        help='CombinedAUCLoss mixing weight w in [0, 1]: '
+                             'total = (1-w)*BCE + w*PairwiseBPR. '
+                             '0.0 = pure BCE, 1.0 = pure BPR. '
+                             'Effective only when --loss_type=auc')
+    parser.add_argument('--auc_margin', type=float, default=0.0,
+                        help='BPR margin subtracted from (s_pos - s_neg) '
+                             'before sigmoid. Larger margin pushes positives '
+                             'harder above negatives. UniRec default 0.5. '
+                             'Effective only when --loss_type=auc')
+    parser.add_argument('--auc_max_pairs', type=int, default=256,
+                        help='Cap on positives / negatives sampled per step '
+                             'for BPR; memory is O(auc_max_pairs^2). '
+                             'Effective only when --loss_type=auc')
     parser.add_argument('--multi_task_loss', action='store_true', default=False,
                         help='P1 switch: train action_num=2 heads as '
                              'click(label_type>=1) + conversion(label_type==2); '
@@ -521,6 +546,7 @@ def main() -> None:
         "action_num": args.action_num,
         "num_time_buckets": NUM_TIME_BUCKETS if args.use_time_buckets else 0,
         "rank_mixer_mode": args.rank_mixer_mode,
+        "rank_mixer_ffn_mode": args.rank_mixer_ffn_mode,
         "use_rope": args.use_rope,
         "rope_base": args.rope_base,
         "emb_skip_threshold": args.emb_skip_threshold,
@@ -543,7 +569,7 @@ def main() -> None:
     num_sequences = len(pcvr_dataset.seq_domains)
     num_ns = model.num_ns
     T = args.num_queries * num_sequences + num_ns
-    logging.info(f"PCVRHyFormer model created: num_ns={num_ns}, T={T}, d_model={args.d_model}, rank_mixer_mode={args.rank_mixer_mode}")
+    logging.info(f"PCVRHyFormer model created: num_ns={num_ns}, T={T}, d_model={args.d_model}, rank_mixer_mode={args.rank_mixer_mode}, rank_mixer_ffn_mode={args.rank_mixer_ffn_mode}")
     logging.info(f"User NS groups: {user_ns_groups}")
     logging.info(f"Item NS groups: {item_ns_groups}")
     total_params = sum(p.numel() for p in model.parameters())
@@ -577,6 +603,9 @@ def main() -> None:
         loss_type=args.loss_type,
         focal_alpha=args.focal_alpha,
         focal_gamma=args.focal_gamma,
+        auc_loss_weight=args.auc_loss_weight,
+        auc_margin=args.auc_margin,
+        auc_max_pairs=args.auc_max_pairs,
         multi_task_loss=args.multi_task_loss,
         click_loss_weight=args.click_loss_weight,
         conversion_loss_weight=args.conversion_loss_weight,

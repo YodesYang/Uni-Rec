@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
 
-from utils import sigmoid_focal_loss, EarlyStopping
+from utils import sigmoid_focal_loss, combined_auc_loss, EarlyStopping
 from model import ModelInput
 
 
@@ -49,6 +49,9 @@ class PCVRHyFormerRankingTrainer:
         loss_type: str = 'bce',
         focal_alpha: float = 0.1,
         focal_gamma: float = 2.0,
+        auc_loss_weight: float = 0.5,
+        auc_margin: float = 0.0,
+        auc_max_pairs: int = 256,
         multi_task_loss: bool = False,
         click_loss_weight: float = 1.0,
         conversion_loss_weight: float = 2.0,
@@ -114,6 +117,19 @@ class PCVRHyFormerRankingTrainer:
         self.loss_type: str = loss_type
         self.focal_alpha: float = focal_alpha
         self.focal_gamma: float = focal_gamma
+        # CombinedAUCLoss parameters (T18 / ADR-006). Only consulted when
+        # loss_type == 'auc'; silently ignored otherwise.
+        self.auc_loss_weight: float = float(auc_loss_weight)
+        self.auc_margin: float = float(auc_margin)
+        self.auc_max_pairs: int = int(auc_max_pairs)
+        if loss_type == 'auc' and not (0.0 <= self.auc_loss_weight <= 1.0):
+            raise ValueError(
+                f"--auc_loss_weight must be in [0, 1], got {self.auc_loss_weight}"
+            )
+        if loss_type == 'auc' and self.auc_max_pairs <= 0:
+            raise ValueError(
+                f"--auc_max_pairs must be > 0, got {self.auc_max_pairs}"
+            )
         self.multi_task_loss: bool = multi_task_loss
         self.click_loss_weight: float = click_loss_weight
         self.conversion_loss_weight: float = conversion_loss_weight
@@ -152,6 +168,8 @@ class PCVRHyFormerRankingTrainer:
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
+                     f"auc_loss_weight={auc_loss_weight}, "
+                     f"auc_margin={auc_margin}, auc_max_pairs={auc_max_pairs}, "
                      f"multi_task_loss={multi_task_loss}, "
                      f"click_loss_weight={click_loss_weight}, "
                      f"conversion_loss_weight={conversion_loss_weight}, "
@@ -349,6 +367,8 @@ class PCVRHyFormerRankingTrainer:
                 "d_model", "num_queries",
                 "dropout_rate", "loss_type", "multi_task_loss",
                 "click_loss_weight", "conversion_loss_weight",
+                "auc_loss_weight", "auc_margin", "auc_max_pairs",
+                "rank_mixer_mode", "rank_mixer_ffn_mode",
                 "action_num", "batch_size", "num_workers", "seed",
             )
             summary["key_train_config"] = {
@@ -800,6 +820,17 @@ class PCVRHyFormerRankingTrainer:
             loss_vec = sigmoid_focal_loss(
                 logits, label, alpha=self.focal_alpha,
                 gamma=self.focal_gamma, reduction='none')
+        elif self.loss_type == 'auc':
+            # CombinedAUCLoss returns a scalar directly (BCE + PairwiseBPR).
+            # BPR is inherently pairwise and doesn't accept per-sample weights;
+            # sample_weight is applied to the BCE component only.
+            return combined_auc_loss(
+                logits, label,
+                auc_weight=self.auc_loss_weight,
+                margin=self.auc_margin,
+                max_pairs=self.auc_max_pairs,
+                sample_weight=sample_weight,
+            )
         else:
             loss_vec = F.binary_cross_entropy_with_logits(
                 logits, label, reduction='none')

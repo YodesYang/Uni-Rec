@@ -250,6 +250,7 @@ def main() -> None:
         "action_num": int(cfg.get("action_num", 1)),
         "num_time_buckets": NUM_TIME_BUCKETS if cfg.get("use_time_buckets", True) else 0,
         "rank_mixer_mode": cfg.get("rank_mixer_mode", "full"),
+        "rank_mixer_ffn_mode": cfg.get("rank_mixer_ffn_mode", "shared"),
         "use_rope": bool(cfg.get("use_rope", False)),
         "rope_base": float(cfg.get("rope_base", 10000.0)),
         "emb_skip_threshold": int(cfg.get("emb_skip_threshold", 0)),

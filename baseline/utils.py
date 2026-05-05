@@ -292,3 +292,124 @@ def sigmoid_focal_loss(
     elif reduction == 'sum':
         return loss.sum()
     return loss
+
+
+def pairwise_bpr_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    margin: float = 0.0,
+    max_pairs: int = 256,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """Pairwise BPR loss — directly optimizes the AUC definition.
+
+    AUC = P(score(positive) > score(negative)). For each (pos, neg) pair
+    in the batch we compute ``-log sigmoid(s_pos - s_neg - margin)``, which
+    is the Bayesian Personalized Ranking loss (Rendle et al. 2009) and is
+    monotone with the pairwise ranking interpretation of AUC.
+
+    Reference: Twitter "Understanding the Ranking Loss for Recommendation with
+    Sparse User Feedback" (arXiv 2403.14144) reported +0.70%~+1.26% GMV at
+    Tencent after adding BPR as an auxiliary loss on top of BCE.
+
+    Args:
+        logits: (N,) raw logits (before sigmoid).
+        targets: (N,) binary labels {0, 1} (float or long).
+        margin: additive margin subtracted from ``s_pos - s_neg`` before the
+            sigmoid. Larger margin pushes positives harder above negatives;
+            0.0 matches the vanilla BPR formulation, 0.5 matches UniRec's
+            default (which empirically stabilized training at Tencent).
+        max_pairs: cap on the number of positives and negatives sampled
+            from the batch. The actual pair count is ``n_pos * n_neg``
+            (both capped), so memory is O(max_pairs^2). Defaults to 256.
+        generator: optional torch.Generator for deterministic pair sampling
+            during smoke tests; pass ``None`` in production.
+
+    Returns:
+        Scalar loss tensor. Returns a zero tensor (still attached to the
+        graph via a trivial ``0 * logits.sum()``) when the batch contains
+        no positives or no negatives, so the caller's .backward() still
+        works without a graph disconnection error.
+    """
+    targets = targets.float()
+    scores = logits.reshape(-1)
+    mask = targets.reshape(-1)
+
+    pos_scores = scores[mask > 0.5]
+    neg_scores = scores[mask <= 0.5]
+
+    if pos_scores.numel() == 0 or neg_scores.numel() == 0:
+        # No pairs available this step. Return a zero tensor that is still
+        # attached to the autograd graph so .backward() stays valid.
+        return scores.sum() * 0.0
+
+    # Cap to avoid O(P * N) blow-up on highly imbalanced batches.
+    if pos_scores.numel() > max_pairs:
+        idx = torch.randperm(
+            pos_scores.numel(), device=scores.device, generator=generator,
+        )[:max_pairs]
+        pos_scores = pos_scores[idx]
+    if neg_scores.numel() > max_pairs:
+        idx = torch.randperm(
+            neg_scores.numel(), device=scores.device, generator=generator,
+        )[:max_pairs]
+        neg_scores = neg_scores[idx]
+
+    # (P, N) pairwise score differences.
+    diff = pos_scores.unsqueeze(1) - neg_scores.unsqueeze(0) - margin
+    return -F.logsigmoid(diff).mean()
+
+
+def combined_auc_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    auc_weight: float = 0.5,
+    margin: float = 0.0,
+    max_pairs: int = 256,
+    sample_weight: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """CombinedAUCLoss = (1 - auc_weight) * BCE + auc_weight * PairwiseBPR.
+
+    Industry best practice (Tencent / Alibaba production ranking):
+      * BCE keeps probability calibration (gradient everywhere, well-defined
+        marginal distribution).
+      * PairwiseBPR directly optimizes the AUC objective, which injects
+        larger gradients on hard negatives when positives are sparse — the
+        exact regime of post-click CVR (~4% positive rate on TAAC 2026).
+
+    Args:
+        logits: (N,) raw logits.
+        targets: (N,) binary labels.
+        auc_weight: α in (0, 1). 0.0 = pure BCE, 1.0 = pure BPR. Tencent's
+            ranking-loss paper used α in [0.1, 0.5].
+        margin: BPR margin (see ``pairwise_bpr_loss``).
+        max_pairs: BPR pair sampling cap.
+        sample_weight: optional per-sample weights applied to the BCE
+            component only. BPR is inherently pair-wise and does not
+            accept per-sample weights; downstream callers wanting class
+            re-weighting should rely on the BCE path.
+        generator: optional torch.Generator for deterministic sampling.
+
+    Returns:
+        Scalar loss tensor suitable for ``.backward()``.
+    """
+    if not (0.0 <= auc_weight <= 1.0):
+        raise ValueError(f"auc_weight must be in [0, 1], got {auc_weight}")
+
+    bce_vec = F.binary_cross_entropy_with_logits(
+        logits, targets.float(), reduction='none',
+    )
+    if sample_weight is None:
+        bce_loss = bce_vec.mean()
+    else:
+        sample_weight = sample_weight.to(bce_vec.dtype)
+        bce_loss = (bce_vec * sample_weight).sum() / sample_weight.sum().clamp_min(1.0)
+
+    if auc_weight == 0.0:
+        return bce_loss
+
+    bpr_loss = pairwise_bpr_loss(
+        logits, targets, margin=margin, max_pairs=max_pairs, generator=generator,
+    )
+    return (1.0 - auc_weight) * bce_loss + auc_weight * bpr_loss

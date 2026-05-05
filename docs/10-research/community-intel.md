@@ -742,3 +742,69 @@ However, Round 1 uses a Delayed Feedback mechanism: some submission results wil
 **问题正文**: [图片]
 
 ---
+
+## 同赛题公开开源方案情报（2026-05-04 晚深调研）
+
+> **来源**：GitHub 搜索 "TAAC 2026" 找到 3 个公开 repo，深读前两个的代码与 README。原始 repo 已 `git clone --depth=1` 到 `docs/99-raw/external-refs/{hojiahao,suyanli,lc1332}/`（`.gitignore` 屏蔽，不 push）。
+> **本节只装"方法学级可借鉴点"**；具体数字 / 代码细节见原 repo。
+
+### 方案 1：UniRec · `hojiahao/TAAC2026`（⭐ 41 stars，最详细）
+
+**整体架构**：融合 6 篇论文的统一 backbone
+- OneTrans (WWW 2026)：Mixed Parameterization（S-tokens 共享 / NS-tokens 独立）
+- InterFormer (Meta CIKM 2025)：Feature Cross Layer（预骨干 NS self-attn）
+- HSTU 2.0 (Meta arXiv 2026-02)：SiLU Gated Attention + Semi-Local Attention + Attention Truncation + MoT
+- HyFormer：MoT 多序列独立建模
+- DIN (Alibaba 2018)：Target-aware Interest Extraction（item_pool query 全序列 cross-attn）
+- Kimi (arXiv 2026)：Block Attention Residuals（per-layer pseudo-query + softmax over block summaries）
+
+**本仓库可直接借鉴的方法学级单点**（按 ROI 排序）：
+
+1. **CombinedAUCLoss = WeightedBCE + PairwiseBPR** (`model/heads.py`)
+    - 腾讯自己 arXiv 2403.14144 生产数据：+0.70%~1.26% GMV
+    - 我们完全没做 ranking loss，loss 家族是未消化的工业级杠杆
+    - **→ T18 / ADR-006 已落地（2026-05-04 晚）**
+
+2. **DIN-style 显式 target-query cross-attention**（生成 `interest_token` 独立 NS-token）
+    - 我们的 ICQ 只做 query 端 gate；DIN 做 target 对全序列的完整 attention，信息量级不同
+    - 与 T16 方案 A（seq token 侧加性注入）正交，理论可叠加
+
+3. **Block Attention Residuals (Kimi)**
+    - per-layer pseudo-query + softmax over block summaries，~60 行
+    - 论文宣称 "1.25× compute 等效" scaling 优势，<2% 推理开销
+
+4. **RankMixer Per-token FFN 正确实现**
+    - 我们的 `RankMixerBlock` 用 shared FFN，与论文原版差异
+    - Per-token FFN 专门对抗 dominant feature 淹没长尾，本赛题 item 长尾极端
+
+5. **Muon 优化器（Linear 层专用）**
+    - MuonRec (arXiv 2603.00416) 实测 NDCG@10 +12.6%, 收敛步数 −32%
+    - 与现有 Adagrad(sparse) + AdamW(dense) 架构兼容（把 AdamW(dense) 换为 Muon+AdamW 混合）
+
+**不可直接借鉴**：
+- UniRec 的 `data/dataset.py` 按 list<dict> 原始格式消费（57 user + 16 item + 3 seq），与本仓库扁平 120 列 parquet 不兼容；**方法学可移植，数据层代码不能**
+- HSTU 2.0 SiLU Gated Attention 替换 backbone attention：骨干级重写，时间成本过高
+- Attention Truncation / Semi-Local Attention：需 Triton kernel，与现有 SDPA + RoPE 路径耦合大
+
+### 方案 2：DeepContextNet · `suyanli220/TAAC-2026-Baseline`（⭐ 10 stars，轻量）
+
+**核心**：HSTU core + Muon optimizer，346 行单文件
+- 亮点：Muon 实现可直接抄（~40 行 `MatrixUnitaryOptimizer`）
+- 其余架构（HSTU block）对本仓库启发不大
+
+### 方案 3：`LC1332/TAAC_2026-ref1`（⭐ 2 stars）
+
+仅含框架脚手架，无独立方法学贡献，不详细分析。
+
+### 外部论文数字锚（用于本仓库 ROI 估算）
+
+| 方法 | 来源 | 官方数字 | 本赛题适配预期 |
+|---|---|---|---|
+| BCE + PairwiseBPR | Tencent production (arXiv 2403.14144) | GMV +0.70%~1.26% | LB +0.002~0.005 |
+| InterFormer Feature Cross | Meta CIKM 2025 | +0.14% AUC 基准 / +0.15% Meta 生产 | LB +0.001~0.002 |
+| DIN target attention | Alibaba KDD 2018 | 离线 AUC +0.5~1% | LB +0.002~0.004 |
+| CAN Co-Action | Alibaba WSDM 2022 | CTR +12% / RPM +8% | LB +0.002~0.004（T16 方案 C 预埋） |
+| Muon 替 AdamW | MuonRec arXiv 2603.00416 | NDCG@10 +12.6%, 收敛 −32% | 收敛提速 + AUC 持平~+0.001 |
+| HSTU 2.0 全量 | Meta arXiv 2602.16986 | 训练 5×, 推理 21×, 业务 4~8% | 骨干级改造，本赛季时间不够 |
+
+**关键纪律提示**：上述数字是各自论文 / 生产环境的结果，在本赛题（post-click CVR、1.9M 行、test 远未来 valid→LB gap 0.023）的**转化率不可等比外推**。历史经验是 local AUC → LB AUC 约 **30~40% 转化率**（EXP-018 观测）。所以上表"本赛题适配预期"都按保守 30% 系数折算。

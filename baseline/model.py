@@ -317,8 +317,19 @@ class RankMixerBlock(nn.Module):
 
     Performs three steps:
     1. Token Mixing: Parameter-free tensor reshaping.
-    2. Per-token FFN: Shared-parameter feedforward network.
+    2. FFN: Two modes (see ``ffn_mode``).
     3. Residual connection: Q_boost = Q + Q_e.
+
+    FFN modes (T19 / ADR-007):
+      - ``shared`` (default, back-compat): one ``nn.Linear`` per layer, all
+        T tokens share the same FFN weights. Mirrors the legacy behavior
+        of this block prior to T19.
+      - ``per_token``: each of the T tokens has its own independent FFN
+        weight matrix. This matches the original RankMixer paper's
+        "Per-token FFN" definition: allocating independent parameters per
+        feature subspace to avoid dominant features flooding long-tail
+        tokens. Parameters grow ~T× vs shared mode (T=15 @ d_model=64,
+        hidden_mult=4 → ~495k extra dense params per block).
 
     Constraint: d_model must be divisible by n_total in 'full' mode.
     """
@@ -329,12 +340,18 @@ class RankMixerBlock(nn.Module):
         n_total: int,  # T = Nq + Nns
         hidden_mult: int = 4,
         dropout: float = 0.0,
-        mode: str = 'full'  # 'full' | 'ffn_only' | 'none'
+        mode: str = 'full',  # 'full' | 'ffn_only' | 'none'
+        ffn_mode: str = 'shared',  # 'shared' | 'per_token'  (T19 / ADR-007)
     ) -> None:
         super().__init__()
         self.T = n_total
         self.D = d_model
         self.mode = mode
+        self.ffn_mode = ffn_mode
+        if ffn_mode not in ('shared', 'per_token'):
+            raise ValueError(
+                f"ffn_mode must be 'shared' or 'per_token', got {ffn_mode!r}"
+            )
 
         if mode == 'none':
             # Pure identity mapping, no submodules created
@@ -347,13 +364,45 @@ class RankMixerBlock(nn.Module):
                 )
             self.d_sub = d_model // n_total
 
-        # Per-token FFN (shared parameters) — used by both 'full' and 'ffn_only'
+        # FFN — used by both 'full' and 'ffn_only'.
         self.norm = nn.LayerNorm(d_model)
-        self.fc1 = nn.Linear(d_model, d_model * hidden_mult)
-        self.fc2 = nn.Linear(d_model * hidden_mult, d_model)
         self.dropout = nn.Dropout(dropout)
         # Post-LN after residual to stabilize stacked block outputs
         self.post_norm = nn.LayerNorm(d_model)
+
+        hidden_dim = d_model * hidden_mult
+        self._hidden_dim = hidden_dim
+
+        if ffn_mode == 'shared':
+            # Legacy path: single Linear pair shared across all T tokens.
+            self.fc1 = nn.Linear(d_model, hidden_dim)
+            self.fc2 = nn.Linear(hidden_dim, d_model)
+        else:
+            # Per-token FFN: independent weight matrices for every token,
+            # implemented as grouped linear via torch.einsum so it stays
+            # vectorized (no Python-level for-loop, torch.compile friendly).
+            # Weight shapes:
+            #   fc1_weight: (T, D, hidden_dim)   fc1_bias: (T, hidden_dim)
+            #   fc2_weight: (T, hidden_dim, D)   fc2_bias: (T, D)
+            # We do not use nn.ModuleList[Linear]*T because that forces a
+            # Python for-loop on forward and defeats GPU parallelism.
+            self.fc1_weight = nn.Parameter(torch.empty(n_total, d_model, hidden_dim))
+            self.fc1_bias = nn.Parameter(torch.zeros(n_total, hidden_dim))
+            self.fc2_weight = nn.Parameter(torch.empty(n_total, hidden_dim, d_model))
+            self.fc2_bias = nn.Parameter(torch.zeros(n_total, d_model))
+            # Mirror nn.Linear default initialization (Kaiming uniform on
+            # weight, uniform bias in [-1/sqrt(fan_in), +1/sqrt(fan_in)]).
+            # Doing it per-token keeps each token's FFN statistically
+            # equivalent to a fresh nn.Linear at init.
+            for t in range(n_total):
+                nn.init.kaiming_uniform_(self.fc1_weight[t], a=math.sqrt(5))
+                nn.init.kaiming_uniform_(self.fc2_weight[t], a=math.sqrt(5))
+                fan_in_1 = d_model
+                fan_in_2 = hidden_dim
+                bound_1 = 1.0 / math.sqrt(fan_in_1)
+                bound_2 = 1.0 / math.sqrt(fan_in_2)
+                nn.init.uniform_(self.fc1_bias[t], -bound_1, bound_1)
+                nn.init.uniform_(self.fc2_bias[t], -bound_2, bound_2)
 
     def token_mixing(self, Q: torch.Tensor) -> torch.Tensor:
         """Performs parameter-free token mixing via reshape and transpose.
@@ -381,6 +430,29 @@ class RankMixerBlock(nn.Module):
         Q_hat = Q_rewired.view(B, T, D)
         return Q_hat
 
+    def _apply_ffn(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply FFN block. Dispatches to shared or per-token path.
+
+        Args:
+            x: (B, T, D) normalized input.
+
+        Returns:
+            (B, T, D) FFN output (pre-residual).
+        """
+        if self.ffn_mode == 'shared':
+            h = self.fc1(x)
+            h = F.gelu(h)
+            h = self.dropout(h)
+            return self.fc2(h)
+        # per_token: each token indexes its own (D, hidden) / (hidden, D) matrix.
+        # x: (B, T, D) · fc1_weight: (T, D, H) → (B, T, H)
+        # einsum does not allocate intermediate (B, T, D, H) tensors.
+        h = torch.einsum('btd,tdh->bth', x, self.fc1_weight) + self.fc1_bias
+        h = F.gelu(h)
+        h = self.dropout(h)
+        # (B, T, H) · fc2_weight: (T, H, D) → (B, T, D)
+        return torch.einsum('bth,thd->btd', h, self.fc2_weight) + self.fc2_bias
+
     def forward(self, Q: torch.Tensor) -> torch.Tensor:
         """Applies query boosting: token mixing, FFN, and residual connection.
 
@@ -399,12 +471,9 @@ class RankMixerBlock(nn.Module):
         else:  # 'ffn_only'
             Q_hat = Q
 
-        # Per-token FFN
+        # FFN block (shared or per-token)
         x = self.norm(Q_hat)
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.dropout(x)
-        Q_e = self.fc2(x)
+        Q_e = self._apply_ffn(x)
 
         # Residual from original Q
         Q_boost = Q + Q_e
@@ -1002,7 +1071,8 @@ class MultiSeqHyFormerBlock(nn.Module):
         dropout: float = 0.0,
         top_k: int = 50,
         causal: bool = False,
-        rank_mixer_mode: str = 'full'
+        rank_mixer_mode: str = 'full',
+        rank_mixer_ffn_mode: str = 'shared',
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -1041,7 +1111,8 @@ class MultiSeqHyFormerBlock(nn.Module):
             n_total=n_total,
             hidden_mult=hidden_mult,
             dropout=dropout,
-            mode=rank_mixer_mode
+            mode=rank_mixer_mode,
+            ffn_mode=rank_mixer_ffn_mode,
         )
 
     def forward(
@@ -1797,6 +1868,11 @@ class PCVRHyFormer(nn.Module):
         action_num: int = 1,
         num_time_buckets: int = 65,
         rank_mixer_mode: str = 'full',
+        # T19 / ADR-007: FFN parameterization inside RankMixerBlock.
+        #   'shared'    = one FFN shared across T tokens (legacy, default).
+        #   'per_token' = independent FFN weights per token (RankMixer paper
+        #                 original definition). ~T× dense params per block.
+        rank_mixer_ffn_mode: str = 'shared',
         use_rope: bool = False,
         rope_base: float = 10000.0,
         emb_skip_threshold: int = 0,
@@ -1835,6 +1911,7 @@ class PCVRHyFormer(nn.Module):
         self.num_sequences = len(self.seq_domains)
         self.num_time_buckets = num_time_buckets
         self.rank_mixer_mode = rank_mixer_mode
+        self.rank_mixer_ffn_mode = rank_mixer_ffn_mode
         self.use_rope = use_rope
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
@@ -2052,6 +2129,7 @@ class PCVRHyFormer(nn.Module):
                     top_k=seq_top_k,
                     causal=seq_causal,
                     rank_mixer_mode=rank_mixer_mode,
+                    rank_mixer_ffn_mode=rank_mixer_ffn_mode,
                 )
                 for _ in range(num_hyformer_blocks)
             ])

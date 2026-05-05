@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-04 晚 5（PDT · T17 S3 proxy 回流 · T16 half-train 进行中）· 结论：① **T17 S3 proxy 完成**（job `t17-holdout-s3-t13tf-proxy...s1500`）：dev AUC 0.839843 / holdout AUC 0.839957 / **gap = −0.000114**（近零），落在"无法证实也无法证伪"档；② **gap≈0 机制明确**：proxy 仅 1500 steps ≈ E1 的 1/14，未进入过拟合区（EXP-018 那 0.023 gap 是 E5 后产物），5%+5% 切分时间跨度小于 train→test 真实跳跃；③ **ADR-005 维持 Proposed**，S4 是真正判决点；④ **S4 搭车策略**（零 training quota 成本）：下一个 half-train 默认加 `--holdout_ratio 0.05`，观察 E1~E3 每 epoch 四指标 `(dev/holdout × AUC/LogLoss)` 轨迹；⑤ **T16 half-train 进行中**（另一会话推荐并启动）；⑥ **今日 evaluation quota**：已用 1（t13tf-loss-full），剩 3；⑦ **training quota**：已用 2（T16 proxy + T17 S3 proxy），1 个被 T16 half-train 占用。
+**最近一次审视**：2026-05-04 晚 8（PDT · T16 E3=0.868061 达标 · 四合一 half-train run.sh 就位待提交）· 结论：① **T16 E3=0.868061**（E1 0.8645 → E2 0.8664 → E3 0.868061），超 ADR-004 S3 阈值 `E3 ≥ t13tf E3 + 0.0002` 约 +0.00086，信号强度是 ICQ（+0.000096）的 **10×**，证明 target-item seq 侧注入真实有效；② **方案选定四合一 half-train**（T16 + T18 + T19 + T17 holdout 搭车），Job Name `t16-add-a01-t18-auc-w02-t19-ptffn-ho005-halftrain-swiglu-vr005-bs128`；③ **auc_weight 从草稿 0.3 降到 0.2 + margin 0.5 降到 0.0**（vanilla BPR），理由：T19 per-token FFN 已加 +993k dense 参数容量 ~15×，与 T18 BPR 组合首次先保守探路；④ **本地四合一 smoke 通过**：Args 完整 / 四路切分正确 / holdout_loader attached / Dense params 3.46M（基线 2.47M，+993k 符合 T19 预期）/ trainer loss_type=auc + 正确读入 auc_loss_weight=0.2；⑤ **run.sh 已覆写**，需上传 5 个改动文件（model/train/trainer/utils/infer.py），不能 Copy 旧 job；⑥ **四合一 E3 判决阈值**：≥0.872 进 full train（强信号），0.869~0.870 full train（中性），<0.868 拆路径归因；⑦ **training quota 剩 1 个**（T16 halftrain/ICQ-full/t13tf-loss-full 三占仍在），可立即提交四合一；⑧ **evaluation quota 剩 3**。
 
 ---
 
@@ -158,6 +158,67 @@
 
 ---
 
+### T18 `[~]` CombinedAUCLoss = WeightedBCE + PairwiseBPR（ADR-006 Accepted）
+
+**决策推理外移至 [ADR-006](../30-decisions/ADR-006-combined-auc-loss.md)**。本节只记任务状态与 next action。
+
+**背景一句话**：本 repo `trainer.py` 仅支持 BCE / Focal，完全没有 ranking 成分；而评估指标就是 AUC，**工业级标准做法**（腾讯自己 arXiv 2403.14144 生产数据 +0.70~1.26% GMV；UniRec 同赛题开源参考默认 loss）都是 `(1-w)·BCE + w·PairwiseBPR`。与 T16 / T17 完全正交，可叠加。
+
+**已完成**：
+- ✅ **S1 单元级数值验证全过**（2026-05-04 晚）：8 项检查（BPR 极端 case / 加权恒等 / 空正负保护 / 可复现性 / 错误处理 / `sample_weight` 作用域 / 向后兼容）
+- ✅ **S1 集成 smoke 通过**：3 路径对比 `bce` / `auc-w=0` / `auc-w=0.3`；关键验证点 `loss_type=auc --auc_loss_weight=0.0` **与 `loss_type=bce` bit-identical**（向后兼容红线通过）
+- ✅ `train_config.json` 正确落盘 `loss_type/auc_loss_weight/auc_margin/auc_max_pairs` 4 字段；`infer.py` 零改动
+- ✅ ADR-006 Draft → Accepted；EXP-022 草稿就位
+
+**待验证**（ADR-006 §Verification 表 S2~S5）：
+
+| 阶段 | 环境 | 期望信号 | 决策阈值 |
+|---|---|---|---|
+| S2 fast proxy | 128/32 RG + 1500 steps + `--loss_type auc --auc_loss_weight 0.3 --auc_margin 0.5` | dev AUC 相对 t13tf proxy 不退超过 0.002 | ≥ −0.002 进 S3；< −0.002 试 `auc_weight=0.1, margin=0.0` 再回滚 |
+| S3 half-train | 2~4 epoch 全 RG + `--holdout_ratio 0.05`（ADR-005 搭车） | E3 dev AUC ≥ t13tf E3 + 0.0003 | 达标进 S4 |
+| S4 full train | 10 epoch + batch 128 + `--logloss_rebound_patience 2`（放宽） | best dev AUC ≥ 0.870 | 达标进 S5 |
+| S5 leaderboard | 1 evaluation slot | LB ≥ 0.847（t13tf LB + 0.002） | 达标 commit ADR-006 |
+
+**下一步**：
+1. 等 quota 释放（T16 halftrain / ICQ-full / t13tf-loss-full 三占中任一回流），启 `t18-auc-w03-t13tf-proxy-swiglu-vr005-rg128x32-s1500`
+2. 若 T16 half-train 结果达标且需启 full train，**三合一 half-train 先行**：`t16-add-a01+t18-auc-w03+holdout005-halftrain-swiglu-vr005-bs128`（把 T16 / T18 / T17 搭车三个子弹同时过 2~3 epoch 探针）
+3. 若 T16 不达标，T18 独立走 proxy → half-train 漏斗（最小代价）
+
+**当前优先级**：高。T18 是与 T16 完全正交的方法学杠杆，代码已落地，proxy 启动成本 < 2h。评估额度策略：S4 full train 回流后再决定是否消耗 LB slot；**LB 阈值 ≥ 0.847** 否则不评。
+
+---
+
+### T19 `[~]` RankMixer Per-token FFN（ADR-007 Accepted · 修正仓库 vs 论文偏差）
+
+**决策推理外移至 [ADR-007](../30-decisions/ADR-007-rank-mixer-per-token-ffn.md)**。本节只记任务状态与 next action。
+
+**背景一句话**：`docs/00-context/model-py-section-map.md` §RankMixer 已明确标注仓库 `RankMixerBlock` 用的是 shared FFN（所有 T 个 token 共用一套 Linear 对），而 RankMixer 原论文（arXiv 2507.15551）定义是 **per-token FFN**（T 个 token 各自独立 FFN 参数）。此差异专治"dominant feature 淹没长尾 token"的表达瓶颈，本赛题 `domain_c_seq_47` vocab=278M 的极端长尾场景直接对口。与 T16 / T17 / T18 完全正交。
+
+**已完成**：
+- ✅ **S1 单元级数值验证全过**（2026-05-04 晚）：10 项检查（参数量 **15.88× = T-1** / forward shape / per-token 独立性：扰动 token 3 fc1_weight ×1000 **只 token 3 变 188，其他严格 0** / 数值等价独立 `nn.Linear` **max|Δ| = 0.00e+00** / 非法参数抛错 / 三种 mode × 两种 ffn_mode 矩阵兼容性 / `MultiSeqHyFormerBlock` 透传 +496k dense/block）
+- ✅ **S1 集成 smoke 通过**：`--rank_mixer_ffn_mode shared`（默认）与 T18 backward-compat 完全一致 AUC 0.8737376434（bit-identical）；`per_token` 路径 train loss 0.3147 vs shared 0.3740 显著降低，10 步 AUC +0.0021
+- ✅ `train_config.json` 正确落盘 `rank_mixer_ffn_mode` 字段；`infer.py` 向后兼容 fallback 到 `'shared'`
+- ✅ ADR-007 Draft → Accepted；EXP-023 草稿就位
+
+**待验证**（ADR-007 §Verification 表 S2~S5）：
+
+| 阶段 | 环境 | 期望信号 | 决策阈值 |
+|---|---|---|---|
+| S2 fast proxy | 128/32 RG + 1500 steps + `--rank_mixer_ffn_mode per_token` | 相对 t13tf proxy 不退 > 0.003 | ≥ −0.003 进 S3；< −0.003 仍进 S3（大参数 dense 分支 proxy 假负向规律，ICQ/hash500k 先例） |
+| S3 half-train | 2~4 epoch 全 RG + `--holdout_ratio 0.05` | E3 dev AUC ≥ t13tf E3 + 0.0005 | 达标进 S4 |
+| S4 full train | 10 epoch + batch 128 + `--logloss_rebound_patience 2` | best dev AUC ≥ 0.870 | 达标进 S5 |
+| S5 leaderboard | 1 evaluation slot | LB ≥ 0.847 | 达标 commit ADR-007 |
+
+**下一步**：
+
+1. **推荐路径：四合一 half-train 搭车** —— 把 T16 additive + T18 auc-loss + T19 per-token FFN + T17 holdout 打包一次 4 epoch half-train 验证。Job Name: `t16-add-a01-t18-auc-w03-t19-ptffn-ho005-halftrain-swiglu-vr005-bs128`。一次性验证三条正交子弹 + 搭车 holdout gap 采集。
+2. **备选路径：T19 独立 S2 proxy** —— 若四合一 half-train 因 quota 竞争推后，先独立跑 `t19-ptffn-t13tf-proxy-swiglu-vr005-rg128x32-s1500` 探路。
+3. **平台 evaluation 上传要求**：`rank_mixer_ffn_mode` 是 `PCVRHyFormer.__init__` 新 kwarg，首次 evaluation **必须上传自定义 `infer.py`**（team-memory 铁律）；且 per_token ckpt 的 state_dict（`fc1_weight: (T, D, H)`）与 shared 路径（`fc1.weight: (H, D)`）不兼容，**必须用 per_token 版 infer.py 加载**。
+
+**当前优先级**：高。T19 论文背书 +0.002~0.005 AUC，代码量最小，且 S1 smoke 已见 train loss 大幅下降（容量 +15×），和 T16/T18 叠加的理论天花板最高。evaluation 额度策略同 T18：LB 阈值 ≥ 0.847 否则不评。
+
+---
+
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
 **决策（2026-04-26）**：暂缓启动。理由：
@@ -264,6 +325,12 @@
 ---
 
 ## Changelog
+
+- **2026-05-04 PDT 晚 8（T16 E3=0.868061 达标 → 四合一 half-train run.sh 就位）**：T16 half-train E3 回流 0.868061,E1 0.8645 → E2 0.8664 → E3 0.868061（ΔE2→E3 +0.00166 健康斜率）。判决：**超 ADR-004 S3 阈值 +0.00086**,信号强度是 ICQ（+0.000096）的 **10×**,确认 target-item seq 侧注入（additive α=0.1）在 half-train 规模上是真实的方法学级收益。决策走"方案 A 四合一 half-train",把 T16 / T18 / T19 三条正交子弹 + T17 holdout 搭车打包一次 4 epoch half-train。① **保守参数调整**：T18 `auc_loss_weight` 从草稿 0.3 → **0.2**,`auc_margin` 从 0.5 → **0.0**(vanilla BPR),理由: T19 per-token FFN 已加 +993k dense 参数（Dense 2.47M → 3.46M, 容量 ~15×）+ BPR 梯度叠加可能放大噪声,首次组合保守探路,E3 回流后再根据信号决定是否 α=0.3 / margin=0.5 乐观升级。② **run.sh 覆写为四合一版本**（`baseline/run.sh`）,保留 T16-only + baseline-only 两个 fallback 注释块便于回滚。③ **本地四合一 smoke 全过**：Args 完整带 `target_item_seq_injection='additive' + alpha_init=0.1` + `loss_type=auc, auc_loss_weight=0.2, auc_margin=0.0, auc_max_pairs=32` + `rank_mixer_ffn_mode='per_token'` + `holdout_ratio=0.15`；`Row Group split (time): 9 train, 1 valid, 1 holdout` 四路切分正确;`[ADR-005] holdout_loader attached`;Dense params **3.46M**（基线 2.47M,+993k 符合 T19 预期）;trainer banner 正确读入 `loss_type=auc, auc_loss_weight=0.2, auc_margin=0.0`;best_model + summary.json 落盘;epoch 末 holdout eval 正常算 gap_auc。④ **平台提交格式**：Job Name `t16-add-a01-t18-auc-w02-t19-ptffn-ho005-halftrain-swiglu-vr005-bs128`;上传 **5 个改动文件**（model/train/trainer/utils/infer.py）**必须** Create New Training Job（不能 Copy）。⑤ **E3 判决阈值**：≥0.872 强信号进 full train / 0.870~0.872 中性进 / 0.869~0.870 ≈ T16-only,T18/T19 零贡献 / <0.868 拆路径归因。⑥ **EXP-022 / EXP-023 更新**记录实际提交参数。
+
+- **2026-05-04 PDT 晚 7（T19 Per-token FFN 落地 + 四合一 half-train 策略成型）**：接 T18 之后,用户拍板走"选项 2":15 min 准备四合一 half-train run.sh,剩余时间写 T19。外部 anchor：`docs/00-context/model-py-section-map.md` §RankMixer 已明确标注 1 个月"仓库 shared FFN vs 论文 per-token FFN 偏差是 +0.002~0.005 AUC 子弹",RankMixer 原论文（arXiv 2507.15551 §3.2）动机是"feature subspace heterogeneity, allocating independent parameters ... rather than allowing domination by a single shared model",对口本赛题 `domain_c_seq_47` vocab=278M 极端长尾。① **代码落地**：`baseline/model.py` `RankMixerBlock.__init__` 加 `ffn_mode: str = 'shared'` 参数,per_token 路径用 `nn.Parameter` 创建 `fc1_weight/fc2_weight (T, D, H)/(T, H, D)` + 对应 bias,forward 用 `torch.einsum('btd,tdh->bth', x, fc1_weight)` 向量化实现（避免 Python for-loop,保持 GPU 并行 + torch.compile 兼容）；初始化按 T 个独立 Kaiming uniform,数值上等价 T 个独立 `nn.Linear`。`MultiSeqHyFormerBlock` 和 `PCVRHyFormer.__init__` 加 `rank_mixer_ffn_mode` 透传;`train.py` CLI 注册 `--rank_mixer_ffn_mode {shared, per_token}` 默认 shared;`infer.py` fallback `cfg.get(..., 'shared')`;`trainer.py [summary]` 白名单加字段。共 ~100 行。② **S0/S1 验证全过**：`py_compile` 6 文件 exit 0；10 项单元级数值检查（参数量 D=64/T=16/hm=4 下 **shared 33,344 vs per_token 529,664 = 15.88×** / forward shape / **per-token 独立性**：扰动 token 3 fc1_weight *1000 只 token 3 变 188 其他严格 0 / **数值等价独立 nn.Linear max|Δ| = 0.00e+00** / 非法 ffn_mode 抛 ValueError / 三种 mode × 两种 ffn_mode 矩阵兼容 / `MultiSeqHyFormerBlock` 透传 +496k dense/block）；2 路径 demo smoke `shared` vs `per_token`,**shared 默认 AUC 0.8737376434 与 T18 backward-compat case bit-identical**（向后兼容零破坏）,`per_token` train loss 显著降低 0.31 vs 0.37 证明容量生效。③ **ADR-007 Accepted**,30-decisions README 索引更新。④ **T19 `[~]` 新增** active.md 节点,S2~S5 漏斗明确。⑤ **EXP-023 建立**。⑥ **四合一 half-train 策略成型**：`t16-add-a01-t18-auc-w03-t19-ptffn-ho005-halftrain-swiglu-vr005-bs128`,把 T16/T18/T19 三条正交子弹 + T17 holdout 搭车打包一次 4 epoch half-train,一次 training quota 采集三条独立子弹信号 + 搭车 holdout 判决数据,保守预期 E3 +0.002~0.005 AUC。⑦ **下一步**：等 T16 E3（当前 E1 0.8645 / E2 0.8664）决定走四合一 half-train 还是拆路径。⑧ **.gitignore 补 docs/99-raw/external-refs/** 屏蔽外部 repo clone。
+
+- **2026-05-04 PDT 晚 6（T18 CombinedAUCLoss 落地 + 外部情报深读 + 同赛题 UniRec 参考吸收）**：用户发起"尽快超 SOTA"战略讨论 → Agent 深度搜集外部学界/工业界情报（GitHub `hojiahao/TAAC2026` UniRec 41 stars 同赛题方案完整深读 + arXiv 2403.14144 Tencent 生产数据 + CIKM 2025 InterFormer + Meta HSTU 2.0 + MuonRec + CAN 2022 + PWiseR 2024）。关键发现：**CombinedAUCLoss = (1-w)·BCE + w·PairwiseBPR** 是唯一同时满足"同赛题开源默认 loss + 腾讯自己 production +0.70~1.26% GMV 数据背书 + 本 repo 完全未消化 + 与 T16/T17 正交"四条的**工业级杠杆**，ROI 最高。① **代码落地**：`baseline/utils.py` 新增 `pairwise_bpr_loss` + `combined_auc_loss` ~130 行纯函数（含 `max_pairs` P×N 爆炸保护 + 空正负 batch 零梯度保护 + `auc_weight=0` 短路等价 BCE 的向后兼容分支）；`baseline/trainer.py::_binary_loss` 加 `elif loss_type == 'auc'` 分支直接 return scalar；`baseline/train.py` CLI 加 `--auc_loss_weight / --auc_margin / --auc_max_pairs` 3 参数，`--loss_type` choices 扩为 `{bce, focal, auc}`，默认 `bce` 不变。`baseline/infer.py` 零改动。共 ~180 行代码改动。② **S0/S1 验证全过**：`py_compile` 6 文件 exit 0；8 项单元级数值检查（BPR 正样本全高 loss→0 / 正样本全低 loss→10 / 空正负保护 / `combined=(1-w)·BCE+w·BPR` 加权恒等 / `auc_weight=0` 等价 BCE / 同 seed 可复现 / 非法参数抛错 / `sample_weight` 仅影响 BCE）；3 路径 demo 集成 smoke `bce` vs `auc w=0` vs `auc w=0.3`，前两者 **bit-identical**（auc=0.8737376434, logloss=0.3066050708），向后兼容红线通过；`train_config.json` 正确落盘 4 新字段。③ **ADR-006 Accepted**，30-decisions README 索引更新。④ **T18 `[~]` 新增** active.md 节点，S2~S5 漏斗与阈值明确（S2 proxy ≥ −0.002 / S3 halftrain ≥ +0.0003 / S4 full ≥ 0.870 / S5 LB ≥ 0.847）。⑤ **EXP-022 建立**，完整记录 S1 数据与 S2 配置。⑥ 下一步：等 quota 释放启 `t18-auc-w03-t13tf-proxy` 或与 T16 full train 打包成三合一 half-train（T16 + T18 + holdout）。
 
 - **2026-05-04 PDT 晚 5（T17 S3 proxy 回流 · ADR-005 暂缓判决 · S4 搭车策略）**：`t17-holdout-s3-t13tf-proxy` 跑完，dev AUC 0.839843 / holdout AUC 0.839957 / **gap = −0.000114**（近零）。按 S3 事先判据落在"无法证实也无法证伪"档。三点机制解释写入 EXP-021：① proxy 仅 1500 steps ≈ E1 的 1/14 未进过拟合区（EXP-018 的 0.023 gap 是 E5 后产物），dev/holdout 本就不该分叉；② 5%+5% 内部切分时间跨度远小于 train→test 真实跳跃（至少周级），信号稀释；③ proxy 阶段 dev/holdout LogLoss 方向一致说明同质分布区。**ADR-005 维持 Proposed**，判决权移到 S4。**S4 搭车策略**（节省 1 training quota）：下一个 half-train 默认加 `--holdout_ratio 0.05`，观察 E1~E3 四指标轨迹；若中后期出现 `dev AUC 继续涨 + holdout 滞涨` 或 dev LogLoss 提前反弹 → Accept；若 E1~E3 全程 gap<0.003 → Reject 方案 B 切方案 C。新增 EXP-021 完整记录 proxy 配置/结果/机制/S4 判据。
 
