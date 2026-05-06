@@ -12,9 +12,13 @@
 
 | # | 文件 | 用途 |
 |---|---|---|
-| 0a | [`../../10-research/flight-reading-list-2026-05-06.md`](../../10-research/flight-reading-list-2026-05-06.md) | **阅读总指南** — 时间分配 + 每篇论文的精读问题 + 验收标准 |
+| 0a | [`../../10-research/flight-reading-list-2026-05-06.md`](../../10-research/flight-reading-list-2026-05-06.md) | **阅读总指南（论文为主版）** — 原版，按论文顺序读 |
+| 0a′ | [`../../10-research/flight-reading-list-blog-video-2026-05-06.md`](../../10-research/flight-reading-list-blog-video-2026-05-06.md) | **阅读总指南（blog+视频为主版）** ⭐ — 新版，针对"论文读不懂"诊断 |
 | 0b | [`../../00-context/model-py-section-map.md`](../../00-context/model-py-section-map.md) | **代码对照地图** — 读完论文翻到哪行代码 |
 | 08 | [`08-model-py-key-sections.md`](08-model-py-key-sections.md) | **仓库代码精读** — 18 个关键类 + 每段读前提示 + Python 代码块 |
+| 10 | [`10-background-primer.md`](10-background-primer.md) ⭐ | **广告 + LLM 背景速通** — 30 分钟补齐广告/LLM 常识骨架 |
+| 11 | [`11-paper-roadmap.md`](11-paper-roadmap.md) ⭐ | **7 篇论文演进地图** — 理清 HyFormer/RankMixer/OneTrans 三者关系 |
+| 12 | [`12-code-qa.md`](12-code-qa.md) ⭐⭐ | **代码反问式讲义** — 10 个关键 class 的中文口语讲解（最核心） |
 
 ### B. 论文 PDF（arxiv 原文，iPad 任何 PDF 阅读器）
 
@@ -72,3 +76,4 @@ curl -sL -o 07-LONGER.pdf                   "https://arxiv.org/pdf/2505.04421.pd
 - **2026-05-04**：首次生成（reportlab 出 PDF 版本）
 - **2026-05-05 上午**：换 Pandoc + Typst 出 A5 PDF（`flight-pdfs/` → `flight-reading/`，代码段带语法高亮）
 - **2026-05-05 下午**：放弃 PDF 流水线，回归 markdown；iPad markdown 阅读器本身排版已足够好，避免在中英文字体、分页、emoji 渲染上重复造轮子
+- **2026-05-06（飞行中增补）**：新增 10/11/12 三份讲义 + blog+视频版阅读计划。起因：用户反馈"论文读不懂"。对症下药：先建背景骨架，再读代码讲义，论文作为字典而非主读物
