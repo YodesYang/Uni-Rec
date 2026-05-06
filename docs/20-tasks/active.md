@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-05 晚 21:40（PDT · 🔥 "SOTA seed luck" 假说提出 / T23 归档 / T24 架构级创新开启）· 结论：① **今晚 3 次 evaluation 震撼**: T23 disablefid47 **LB 0.840344** (Δ−0.006) / C1 disablefid47_29 **LB 0.836736** (Δ−0.010) / **C12 icq_seed2 LB 0.841294** (同 SOTA config 只换 seed, Δ−0.005); ② 🔥 **EXP-028 关键发现**: SOTA 0.84637 可能包含 seed luck —— C12 和 icq-half **dev 几乎相同** (Δ=−0.00004) 但 **LB 差 0.005**, 用户确认 evaluation system 是 deterministic (同 ckpt 两次 eval LB 一模一样) → LB 0.005 差异 **100% 来自训练轨迹** (seed / sparse reinit / optimizer state); ③ **LB 真实能力带**估算 **[0.840, 0.846]**, 中位约 0.843, SOTA 是 outlier; ④ **过去 4 天的 "负向证伪" 判决需要缓和**: Δ−0.004~−0.006 可能是 seed 噪声 + 轻度方法学负向的叠加,只有 Δ−0.010+ 才能确认纯方法学损害; ⑤ **T23 归档** (LB −0.006 部分证伪), **C1 间接证伪** (LB −0.010 真信号), **T22 gap15 仍 Blocked** (E3 触发 guard, dev 不可比); ⑥ **T24 新增**: EDA + 架构级创新 (DIN / UE 分离 / FaFE) 三选一; ⑦ **quota**: evaluation 今晚已用 2 (T23 + C1 + C12 ... wait 3 次, 加上昨夜 idmask + 今晨 T23 共 4/4 已用?); training 4 slot, 3 已完 + C6 仍在跑 E4; ⑧ 判决阈值全线调整: 破 SOTA 从 "LB ≥ 0.847" 升到 **"LB ≥ 0.849"**。
+**最近一次审视**：2026-05-05 晚 22:30（PDT · EDA 完成 · F1 hash100k 定位为下轮最高优先级 · 额外 2 training slot 分配给 seed3/seed7）· 结论：① **M1 icq_seed3 + M2 icq_seed7 已启动**（和 icq-half 完全同 config 只换 seed, 0 代码改动, 为验证 seed luck 假说建立 multi-seed LB 分布）; ② **EDA (EXP-029) 60 分钟完成**, 核心发现: **顶层 user_int/item_int 无大 vocab (全 <25k)**, "item_id OOV 问题" 只在 seq 域 → **UE 分离 / 顶层 disable 方向作废**; 模型在"信息丰富"样本上 AUC 低 **0.04~0.05** (稀疏 user AUC 0.89 vs 丰富 0.85) → **Seed 主楼问题-1 的机制真实存在**; 大 vocab 全集中在 seq (seq_c/47=2.8亿, seq_b/69=8600万 等); ③ **T24 基于 EDA 重新排 ROI**: 🥇 F1 **seq hash vocab 更激进** (500k→100k 或 50k, **0 代码**) / 🥇 F2 DIN target attention (80 行) / 🥈 F3 样本加权 / 🥉 F4 FaFE; ④ **下一个实验定位**: F1 `hash100k-icq-halftrain` (后天西班牙落地后启动, 今晚 training slot 已占满); ⑤ **今晚 collection**: 不再提交新 training (E + EDA 策略), 收尾文档 + 休息; ⑥ **quota 展望**: 明天飞机期间 seed3/seed7 回流 + C6 E4 出, 后天西班牙 02-06 (PDT 17-21) 将有 2-3 eval quota 可用。
 
 ---
 
@@ -256,19 +256,31 @@ effective train→valid distance = -341046 sec
 
 **触发**：T21/T22/T23 三个方向全部证伪或 Blocked, EXP-028 "SOTA seed luck" 发现后, 战略切换到**架构级创新 + EDA 驱动**。
 
-**计划**：
-1. **EDA 优先** (~30 min, 不占 training quota)：
-   - test user_id / item_id 在 train 中的 OOV 率 (验证 Seed 问题-1 假设)
-   - 每个 user_int / item_int fid 的单特征 AUC (找"强特征")
-   - label_type 随时间分布
-2. **架构级创新**（根据 EDA 结果选 1 个，~80~150 行代码）：
-   - **DIN target attention**: target item query 对全序列 cross-attention 生成 interest_token (P2, 与 T16 正交)
-   - **UE 分离 + int pairwise cross**: Seed 主楼方案 1, user embedding 单独一路 + user_int × item_int outer product
-   - **FaFE (Feature-aware Feature Embedding)**: InterFormer 式每个 fid 单独 MLP transform
+**✅ EDA 已完成（2026-05-05 晚 · EXP-029）**：
+- **结论 1**：platform 顶层 user_int / item_int 最大 vocab 只有 25k，**"item_id OOV 问题" 只在 seq 里**，不在顶层 → UE 分离 / 顶层 disable 方向**作废**
+- **结论 2**：模型在"信息丰富"样本上 AUC 低 0.04~0.05（**稀疏 user AUC 0.89 vs 丰富 0.85**）→ Seed 主楼问题-1 "id 特征线下虚高线上掉" 的**机制在我们模型里真实存在**
+- **结论 3**：大 vocab 全部在 seq 域（seq_c/47 = 2.8 亿, seq_b/69 = 8600万, seq_c/29 = 820万 等）→ **hash vocab 更激进是最对口方向**
 
-**暂缓**：T22-fix row-level gap（C6）除非今晚 C6 E4 dev 表现异常，否则 "funnel 修复" 不是短期破局方向。
+**重新排 ROI（基于 EDA）**：
+
+| # | 方向 | EDA 适配度 | 代码量 | 优先级 |
+|---|---|---|---|---|
+| 🥇 **F1 Seq hash vocab 更激进**（500k → 100k 或 50k）| **极高** | **0 行**（CLI 已有）| **最高** |
+| 🥇 F2 DIN target attention | 高 | ~80 行 | 高 |
+| 🥈 F3 样本丰富度加权 | 中 | ~50 行 | 中 |
+| 🥉 F4 FaFE feature-aware embedding | 中 | ~100 行 | 中 |
+| ❌ UE 分离 | 低 | ~120 行 | **抛弃**（EDA 证 user_int 无 UE 层级）|
+| ❌ 顶层 item_id disable | 低 | ~10 行 | **抛弃**（EDA 证顶层无大 vocab）|
+
+**next action（等 seed3/seed7 + C6 回流后）**：
+
+1. 优先 eval seed3 + seed7 （确认/证伪 seed luck）
+2. 启动 **F1 `hash100k-icq-halftrain`**（0 代码, 只改 `--seq_hash_vocab 100000`）
+3. 根据 F1 LB 决定下一步（破 0.849 = Accept，持平 = 试 hash50k，负向 = 换 F2 DIN）
 
 **判决阈值**: LB ≥ **0.849** (明显高于 seed 噪声上界) 才算真信号; LB ∈ [0.844, 0.849] 持平; LB < 0.844 方法学损害。
+
+详见 [`EXP-029`](../40-experiments/EXP-029-eda-report-2026-05-05.md)。
 
 ---
 
@@ -378,6 +390,8 @@ effective train→valid distance = -341046 sec
 ---
 
 ## Changelog
+
+- **2026-05-05 PDT 晚 22:30（EDA 完成 · EXP-029 · F1 hash100k 定位下轮最高优先级 · seed3/seed7 training 启动）**：① 启动 2 training job: M1 `icq_seed3-icq-halftrain` + M2 `icq_seed7-icq-halftrain` (seed=3/7, 其他与 icq-half SOTA 完全相同, 0 代码改动), 为 **seed luck 假说**建立 multi-seed LB 数据点; ② **EDA 60 分钟完成** (EXP-029), **3 大发现**: (a) platform 顶层 user_int/item_int 最大 vocab 25k (fid=9 item_int), "item_id OOV 问题" **只在 seq 域** → UE 分离 / 顶层 disable 方向**作废**; (b) C1 E1 valid 切片表 (`[diag] slice by`): user_int_nonzero **稀疏 AUC 0.8915 vs 丰富 0.8471** (Δ0.045), seq_total_len **短 0.8991 vs 长 0.8453** (Δ0.054), item_int_nonzero 类似 → **模型在信息丰富样本上真实过拟合 id**, 验证 Seed 主楼问题-1 机制; (c) 大 vocab 全在 seq 域 (seq_c/47=2.8亿, seq_b/69=8600万, seq_c/29=820万, seq_c/34=200万, seq_c/36=150万); ③ **T24 重新排 ROI**: 🥇 F1 `seq_hash_vocab 更激进` (500k→100k 或 50k, **0 代码**) / 🥇 F2 DIN target attention (~80 行) / 🥈 F3 样本丰富度加权 / 🥉 F4 FaFE / ❌ UE 分离 (EDA 作废) / ❌ 顶层 disable (EDA 作废); ④ **下个实验定位**: **`hash100k-icq-halftrain`** 是最对口 + 最简单的架构级方向, 后天落地西班牙启动; ⑤ **今晚 E+EDA 策略**: 不再提交新 training (quota 平衡与验证节奏), 让 M1/M2/C6 跑完, 文档收尾; ⑥ **quota 时间线**: 明天飞机上 seed3/seed7 回流 + C6 E4 出, 后天西班牙当地 02-06 (PDT 17-21) 将有 2-3 eval quota 可用, 优先 eval seed3/seed7 建立噪声带, 再 eval F1 hash100k。
 
 - **2026-05-05 PDT 晚 21:40（🔥 "SOTA seed luck" 假说提出 · T23 归档 · 3 次 evaluation · T24 架构级创新开启）**：今晚 eval 窗口重置后用 3 次 quota (剩 1): ① T23 `disablefid47-icq-halftrain` LB **0.840344** (Δ−0.006 vs SOTA); ② C1 `disablefid47_29` LB **0.836736** (Δ−0.010); ③ **C12 `icq_seed2-icq-halftrain` LB 0.841294** (**完全同 icq-half config 只换 `--seed 2`**, Δ−0.005, **Dev 几乎相同 Δ=−0.00004**)。**🔥 关键发现**: **Evaluation system deterministic** (用户确认同 ckpt 两次 eval LB 完全一致) → C12 的 LB 差异 **100% 来自训练轨迹** (seed → sparse reinit + optimizer state 分岔)。**推论**: SOTA 0.84637 很可能包含 seed luck, 真实 LB 能力带 **[0.840, 0.846]** 中位 0.843, SOTA 是 outlier。**铁律**: ① **Dev 0.868 附近完全不能作为 LB 代理**(LB/Dev 信息量比 10~126×); ② **"LB 负向证伪" 阈值调整**: Δ−0.010+ = 真方法学负向 / −0.004~−0.007 = 疑似(也可能 seed 噪声) / −0.003 内 = 纯 seed 噪声; ③ **不再追 0.846 单点 SOTA 作为基线**, 真实基线 ≈ multi-seed 均值 0.843~0.844; ④ **破 SOTA 判决阈值从 "LB ≥ 0.847" 升为 "LB ≥ 0.849"** (明显高于 seed 噪声上界); ⑤ **砍掉所有 small ablation**, 只做真正架构级创新 (DIN / UE 分离 / FaFE)。**文档**: EXP-028 落档详细推演 + 反面考虑 (反面 1: icq-half seed=42 可能真正触达罕见 LB minima, 反面 2: LB 差异可能主要来自 ckpt 时机而非 seed); EXP-025/026/027 全部加 "interpretation-revised" 脚注; team-memory 新铁律 (第 8 条 seed luck)。**T23 归档** (方法学负向 + seed 噪声叠加), **T24 新增** (EDA + 架构级创新 next batch)。**状态**: C6 rowgap15 仍在跑 E4, quota 剩 1, 明日用户飞行期间不方便操作, 计划今晚不再 evaluate (除非 C6 E4 异常高)。
 
