@@ -3,14 +3,31 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ═══════════════════════════════════════════════════════════════════
-# Job: icq_seed7-icq-halftrain-swiglu-vr005-bs128
+# Job: hash100k-gap05-icq-halftrain-swiglu-vr005-bs128
 #
-# Multi-seed verification · fourth data point for the "SOTA seed luck"
-# hypothesis (EXP-028). With seed=42/2/3/7 we'll have 4 LB points on
-# bit-identical config, enough to characterize the seed noise band.
+# T24 F1 · Aggressive seq hash vocab (500k → 100k) under the new
+# gap=0.05 funnel. Paired with icq-half-gap05-icq-halftrain as the
+# baseline; the pure methodological signal is
+#   LB(hash100k-gap05) − LB(icq-half-gap05)
 #
-# Change from M1: --seed 7 (instead of 3). Everything else identical
-# to icq-half SOTA config.
+# Rationale (EDA EXP-029 finding 3):
+#   seq_c fid=47 has vocab=278M (item_id). Current hash500k already
+#   maps 278M IDs into 500k buckets (~560 IDs/bucket collision). EDA
+#   also found: model AUC drops 0.04-0.05 on information-rich
+#   samples (sparse user AUC 0.89 vs rich 0.85), indicating the
+#   model overfits to specific train-period IDs. More aggressive
+#   hashing (100k buckets, ~2780 IDs/bucket) should force additional
+#   implicit regularisation via collision smoothing.
+#
+# Expected outcomes:
+#   * Dev under gap=0.05 ≈ [0.843, 0.851] (compared to
+#     icq-half-gap05's expected ~0.848)
+#   * Dev→LB gap should remain ~0.010 (same funnel as baseline)
+#   * LB target ≥ icq-half-gap05 LB + 0.003 for "real signal"
+#
+# ⚠️ Platform note: 100k hash vocab is a sparse embedding size
+# reduction. This may speed up training (less embedding lookup) by
+# ~10-15%. Quota budget ~5h.
 # ═══════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -22,12 +39,13 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --emb_skip_threshold 1000000 \
     --num_workers 8 \
     --seq_encoder_type swiglu \
-    --seq_hash_vocab 500000 \
+    --seq_hash_vocab 100000 \
     --enable_time_of_day_features \
     --valid_split_strategy time \
     --valid_ratio 0.05 \
+    --valid_gap_ratio 0.05 \
+    --enable_row_valid_gap \
     --item_conditioned_query \
-    --seed 7 \
     --logloss_rebound_patience 2 \
     --logloss_rebound_delta 0.0 \
     --batch_size 128 \
