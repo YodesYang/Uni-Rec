@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-05 中午 11:50（PDT · 4 并行 ablation 批次回流 + T21 证伪 + T22 Blocked + T23 落地 + 1 eval quota 用完）· 结论：① **4 个 parallel job 全部完成**: 四合一 (T16+T18+T19+ho) E4 dev 0.866133, T16-only full E2 best 0.865122（E3 触发 logloss guard 停）, idmaskc15 E3 dev 0.868288, gap15 E4 dev 0.867124 —— **全部低于 icq-half SOTA E4 0.868619 (LB 0.84637)**; ② **idmaskc15 evaluation**: LB **0.842176** vs SOTA **Δ−0.004194**, dev→LB gap **+0.0261** 放大 2× —— **T21 P1 证伪关闭**; 机制: input-level random mask 让 85% token 仍可见, 模型仍依赖 id embedding, 不是强度问题而是方法不对口; ③ **T22 P3 Blocked 诊断**: gap15 dev 降 0.0015 完全匹配"减 15% train data"纯预期,无"任务变难"加成; 日志 `effective train→valid distance = -341046 sec` 证明 RG-level 切分**无法真正隔离时间**（RG 内部时间跨 4 天）; 修方向 T22-fix = row-level gap cutoff, 排在 T23 之后; ④ **T23 seq_c feat47 disable 代码落地**: `baseline/dataset.py` + `train.py` + `infer.py` + smoke 5/5, 对口 Seed 主楼问题-5 "seqc feat47 跟 itemid 是一样的 做不做 match 特征都掉分", 明日 training quota 重置后启动 `disablefid47-icq-halftrain`; ⑤ **T16 additive α=0.1 独立证伪**: T16-only full E2 best 比 icq-half E4 低 0.003, E3 就 guard 停, ADR-004 方案 A 单独路线关闭 (除非换 concat / gated-sum 模式 B/C 重验); ⑥ **EXP-024 再次验证**: dev 涨 +0.0003 → LB 跌 −0.004 放大 14×, "dev 做决策" 的铁律铁证,下轮 T23 evaluation 仍会按"dev 不看绝对值,以 holdout→LB 估算 + LB direct"决策; ⑦ **quota**: evaluation 1/4 已用剩 3 slot; training 4 slot 全空闲,等 PDT 21:00 前可启动 T23 / T22-fix / 或其他新方向。
+**最近一次审视**：2026-05-05 晚 21:40（PDT · 🔥 "SOTA seed luck" 假说提出 / T23 归档 / T24 架构级创新开启）· 结论：① **今晚 3 次 evaluation 震撼**: T23 disablefid47 **LB 0.840344** (Δ−0.006) / C1 disablefid47_29 **LB 0.836736** (Δ−0.010) / **C12 icq_seed2 LB 0.841294** (同 SOTA config 只换 seed, Δ−0.005); ② 🔥 **EXP-028 关键发现**: SOTA 0.84637 可能包含 seed luck —— C12 和 icq-half **dev 几乎相同** (Δ=−0.00004) 但 **LB 差 0.005**, 用户确认 evaluation system 是 deterministic (同 ckpt 两次 eval LB 一模一样) → LB 0.005 差异 **100% 来自训练轨迹** (seed / sparse reinit / optimizer state); ③ **LB 真实能力带**估算 **[0.840, 0.846]**, 中位约 0.843, SOTA 是 outlier; ④ **过去 4 天的 "负向证伪" 判决需要缓和**: Δ−0.004~−0.006 可能是 seed 噪声 + 轻度方法学负向的叠加,只有 Δ−0.010+ 才能确认纯方法学损害; ⑤ **T23 归档** (LB −0.006 部分证伪), **C1 间接证伪** (LB −0.010 真信号), **T22 gap15 仍 Blocked** (E3 触发 guard, dev 不可比); ⑥ **T24 新增**: EDA + 架构级创新 (DIN / UE 分离 / FaFE) 三选一; ⑦ **quota**: evaluation 今晚已用 2 (T23 + C1 + C12 ... wait 3 次, 加上昨夜 idmask + 今晨 T23 共 4/4 已用?); training 4 slot, 3 已完 + C6 仍在跑 E4; ⑧ 判决阈值全线调整: 破 SOTA 从 "LB ≥ 0.847" 升到 **"LB ≥ 0.849"**。
 
 ---
 
@@ -236,31 +236,39 @@ effective train→valid distance = -341046 sec
 
 ---
 
-### T23 `[~]` seq_c feat47 Structural Disable（Seed 主楼问题-5 对口）
+### T23 `[x]` seq_c feat47 Structural Disable — ⚠️ 部分证伪关闭（LB 0.840344 vs SOTA 0.84637）
 
-**来源**：
-- 社区 Seed 主楼问题-5："长序列: seqc feat47 跟 itemid 是一样的，做不做 match 特征都掉分" —— 证实 `domain_c_seq_47` (vocab=278M) 作为 item_id 序列**本身信号稀薄 / 过拟合严重**
-- T21 P1 证伪（LB −0.004）证明 input-level random mask **机制上不对**，下一步是完全**去掉 item_id 通路**
+**2026-05-05 终结**：`disablefid47-icq-halftrain-swiglu-vr005-bs128` E4 dev **0.868192** (vs icq-half E4 0.868619 Δ−0.000427) → evaluation **LB 0.840344** (vs SOTA 0.84637 **Δ−0.006026**, dev→LB gap **+0.0279**, 历史最大档)。
 
-**代码落地（2026-05-05）**：
-- ✅ `baseline/dataset.py::PCVRParquetDataset`：新增 `disable_seq_fids` 参数；`_convert_batch` 中对指定 sideinfo fid 的 slot 整列置 0；lengths 向量不变（避免 SDPA all-padding NaN）
-- ✅ `baseline/dataset.py::get_pcvr_data`：透传到 train / valid / holdout 三个 dataset（uniform across splits）
-- ✅ `baseline/train.py`：新增 CLI `--disable_seq_fids`（comma-separated）
-- ✅ `baseline/infer.py`：新增 `_parse_disable_seq_fids` 辅助函数 + PCVRParquetDataset 构造透传 → **训推一致**
-- ✅ **本地 smoke 5/5 通过**：None/[] bit-identical / `[47]` 只归零 seq_c 的 slot=10 (fid=47) 14138 个 ids / shuffle=True/False 同效果 / lengths 未变 / 非法输入抛 ValueError
+**C1 `disablefid47_29` evaluation 同晚回流**: LB **0.836736** (Δ−0.009634) → 证实 disable 范围扩大 → LB 进一步下降。
 
-**判决阈值**（次轮 job `disablefid47-icq-halftrain`）：
+**⚠️ 判决复杂化**：同晚 C12 icq_seed2 (完全同 SOTA config 只换 seed) LB = **0.841294**（Δ−0.005076 vs SOTA）,说明 **SOTA 0.84637 本身可能包含 seed luck**。按新铁律解读: T23 单独 −0.006 可能是 **seed 噪声 (±0.003) + 真实方法学负向 (−0.003)** 的叠加,而非纯方法学损害 0.006。C1 的 −0.010 超出 seed 噪声上界,方法学真实负向证据更强。
 
-| 场景 | LB vs SOTA 0.84637 | 行动 |
-|---|---|---|
-| 破 SOTA | ≥ 0.847 | 路线 Accept，下轮扩大 disable 范围（fid=47+29 等）|
-| 持平 | [0.845, 0.847] | 方向对，继续尝试 disable 更多 id fid |
-| 微负 | [0.843, 0.845] | 扩大范围再试一次 |
-| 大负 | < 0.843 | 方向也错，触发战略转向（T22-fix 升优先级或换方向）|
+**解读**：Seed 主楼问题-5 "seqc feat47 跟 itemid 是一样的,做不做 match 特征都掉分" 不等于"删掉 feat47 安全"。Seed 没说过"删除后持平",我们误推导。结构化 disable 在 test 上伤害约 0.003~0.006,证明 `seq_c feat47` 在 test 上**有真实 signal**(即使它对 dev 贡献 ≈ 0)。
 
-**当前优先级**：**最高**（剩余方向 ROI 最高 + 代码已就位 + 最小单变量 ablation）。
+详见 [`EXP-028`](../40-experiments/EXP-028-seed-luck-hypothesis-2026-05-05.md)。
 
-**⚠️ 平台提交注意**：T23 引入 `disable_seq_fids` 参数会写入 `train_config.json`。平台默认 infer.py 如果不读这个 key 会导致**训推不一致**（推理看到完整 seq_c 而训练已去 fid=47）。**首次平台 evaluation 必须勾选"上传自定义 infer.py"**（我们本地已改好）。
+代码保留（`--disable_seq_fids` 默认空），不回滚。未来若回到 "disable 路线" 需要搭配 structural replacement (例如同时加 seq_c 的 action-type embedding 重组)。
+
+---
+
+### T24 `[~]` EDA 与架构级创新（next batch）
+
+**触发**：T21/T22/T23 三个方向全部证伪或 Blocked, EXP-028 "SOTA seed luck" 发现后, 战略切换到**架构级创新 + EDA 驱动**。
+
+**计划**：
+1. **EDA 优先** (~30 min, 不占 training quota)：
+   - test user_id / item_id 在 train 中的 OOV 率 (验证 Seed 问题-1 假设)
+   - 每个 user_int / item_int fid 的单特征 AUC (找"强特征")
+   - label_type 随时间分布
+2. **架构级创新**（根据 EDA 结果选 1 个，~80~150 行代码）：
+   - **DIN target attention**: target item query 对全序列 cross-attention 生成 interest_token (P2, 与 T16 正交)
+   - **UE 分离 + int pairwise cross**: Seed 主楼方案 1, user embedding 单独一路 + user_int × item_int outer product
+   - **FaFE (Feature-aware Feature Embedding)**: InterFormer 式每个 fid 单独 MLP transform
+
+**暂缓**：T22-fix row-level gap（C6）除非今晚 C6 E4 dev 表现异常，否则 "funnel 修复" 不是短期破局方向。
+
+**判决阈值**: LB ≥ **0.849** (明显高于 seed 噪声上界) 才算真信号; LB ∈ [0.844, 0.849] 持平; LB < 0.844 方法学损害。
 
 ---
 
@@ -370,6 +378,8 @@ effective train→valid distance = -341046 sec
 ---
 
 ## Changelog
+
+- **2026-05-05 PDT 晚 21:40（🔥 "SOTA seed luck" 假说提出 · T23 归档 · 3 次 evaluation · T24 架构级创新开启）**：今晚 eval 窗口重置后用 3 次 quota (剩 1): ① T23 `disablefid47-icq-halftrain` LB **0.840344** (Δ−0.006 vs SOTA); ② C1 `disablefid47_29` LB **0.836736** (Δ−0.010); ③ **C12 `icq_seed2-icq-halftrain` LB 0.841294** (**完全同 icq-half config 只换 `--seed 2`**, Δ−0.005, **Dev 几乎相同 Δ=−0.00004**)。**🔥 关键发现**: **Evaluation system deterministic** (用户确认同 ckpt 两次 eval LB 完全一致) → C12 的 LB 差异 **100% 来自训练轨迹** (seed → sparse reinit + optimizer state 分岔)。**推论**: SOTA 0.84637 很可能包含 seed luck, 真实 LB 能力带 **[0.840, 0.846]** 中位 0.843, SOTA 是 outlier。**铁律**: ① **Dev 0.868 附近完全不能作为 LB 代理**(LB/Dev 信息量比 10~126×); ② **"LB 负向证伪" 阈值调整**: Δ−0.010+ = 真方法学负向 / −0.004~−0.007 = 疑似(也可能 seed 噪声) / −0.003 内 = 纯 seed 噪声; ③ **不再追 0.846 单点 SOTA 作为基线**, 真实基线 ≈ multi-seed 均值 0.843~0.844; ④ **破 SOTA 判决阈值从 "LB ≥ 0.847" 升为 "LB ≥ 0.849"** (明显高于 seed 噪声上界); ⑤ **砍掉所有 small ablation**, 只做真正架构级创新 (DIN / UE 分离 / FaFE)。**文档**: EXP-028 落档详细推演 + 反面考虑 (反面 1: icq-half seed=42 可能真正触达罕见 LB minima, 反面 2: LB 差异可能主要来自 ckpt 时机而非 seed); EXP-025/026/027 全部加 "interpretation-revised" 脚注; team-memory 新铁律 (第 8 条 seed luck)。**T23 归档** (方法学负向 + seed 噪声叠加), **T24 新增** (EDA + 架构级创新 next batch)。**状态**: C6 rowgap15 仍在跑 E4, quota 剩 1, 明日用户飞行期间不方便操作, 计划今晚不再 evaluate (除非 C6 E4 异常高)。
 
 - **2026-05-05 PDT 中午 11:50（4 并行 ablation 批次回流 + T21 证伪 + T22 Blocked + T23 落地）**：4 个 parallel job 全部回流, 1 次 evaluation 消耗后 LB 红线 0.84637 未破。① **四合一 E4 dev 0.866133** (vs icq-half 0.868619 Δ−0.0025), holdout 0.867182 预估 LB ≈ 0.845, 不 eval; ② **T16-only full E2 best 0.865122** (vs icq-half E4 Δ−0.0035), E3 触发 logloss rebound guard 停, T16 additive α=0.1 full train 下更早过拟合, **ADR-004 方案 A 单独路线关闭**; ③ **idmaskc15 E3 dev 0.868288** (vs icq-half E3 +0.000323, 唯一正向 dev 信号) → **evaluation LB 0.842176** (vs SOTA 0.84637 **Δ−0.004194**, dev→LB gap +0.0261 放大 2×), **T21 P1 证伪关闭**; 机制: input-level random mask 85% token 仍可见,模型仍依赖 id embedding,dev 近 train 略涨, test 远 train 失效; ④ **gap15 E4 dev 0.867124** (Δ−0.0015 完全匹配"减 15% train data"纯预期), 日志 `effective train→valid distance = -341046 sec` 证明 **RG-level 切分无法隔离时间** (RG 内部时间跨 4 天), **T22 P3 Blocked**, 修方向 = row-level gap cutoff (T22-fix 暂不启动); ⑤ **T23 seq_c feat47 structural disable 代码落地**: `baseline/dataset.py` PCVRParquetDataset `disable_seq_fids` 字段 + `_convert_batch` slot 置零 + `get_pcvr_data` 传三路 / `train.py` CLI `--disable_seq_fids` / `baseline/infer.py` `_parse_disable_seq_fids` 透传 → **训推一致**; 本地 smoke 5/5 通过 (None/[] bit-identical / `[47]` 只归零 seq_c slot=10 14138 ids / shuffle=True/False 同效果 / lengths 未变 / 非法输入抛 ValueError); 对口 Seed 主楼问题-5 "seqc feat47 跟 itemid 是一样的 做不做 match 特征都掉分"; ⑥ **EXP-024 "dev 不是 LB 单调代理" 铁律再次验证**: idmaskc15 dev +0.000323 → LB −0.004194, 反向放大 14×; ⑦ **EXP-025 / EXP-026 / EXP-027 落档**, EXP-027 汇总表 + 机制小结 + 剩余方向 ROI; ⑧ **quota**: evaluation 1/4 用剩 3; training 4 slot 全空闲等 PDT 21:00 前启动下一轮 `disablefid47-icq-halftrain` (T23 首个实测)。**LB 红线 0.84637 未破, 距 ddl ~20 天, 剩余方向 ROI 排序: T23 seq_c disable (最高, 代码已就位) > T22-fix row-level gap (修 funnel 不直接贡献 LB) > T16 方案 B/C > DIN / UE 分离**。
 
