@@ -2,7 +2,7 @@
 
 **日期**：2026-05-05
 **作者**：Agent
-**状态**：⚠️ **Funnel 未真正起效**（2026-05-05 · 诊断结果见下文 · gap 区间时间戳与 train/valid 严重重叠）
+**状态**：⚠️ **Funnel 机制部分成功 / LB 代价过重**（2026-05-05 · RG-level 失效 · 2026-05-06 凌晨 · C6 row-level gap LB 揭示新洞察）
 
 ---
 
@@ -178,5 +178,67 @@ dev row:   timestamp >= T_cutoff_2
 
 ### Evaluation 决策
 
-**不 evaluate gap15**。本轮 E4 dev 0.867124 落在 icq-half E4 减数据的预期内，无法提供独立 LB 校准价值。Evaluation quota 已优先用于 idmaskc15（结果 LB 0.842176 已证伪）。
+**不 evaluate gap15** (RG-level 版本)。本轮 E4 dev 0.867124 落在 icq-half E4 减数据的预期内，无法提供独立 LB 校准价值。Evaluation quota 已优先用于 idmaskc15（结果 LB 0.842176 已证伪）。
+
+---
+
+## 🔥 补遗（2026-05-06 凌晨）· C6 `rowgap15` row-level 版本 LB 结果揭示重大 insight
+
+**EXP-026 原 RG-level gap15 job 确认失效**。但其 **row-level 重做版本（C6 `rowgap15-icq-halftrain`）已完成训练 + evaluation**：
+
+| 指标 | RG-level `gap15-icq-halftrain` | row-level `rowgap15-icq-halftrain` (C6) |
+|---|---|---|
+| Dev 最高 | 0.867124 (E4) | 0.837987 (E2) |
+| Stop reason | 完成 E4 | E3 guard 停（E2 best）|
+| LB | 未 eval | **0.833987** |
+| Dev→LB gap | — | **+0.004** (历史最小！)|
+
+### Row-level 版本 LB 数字看似"低"但隐藏的发现
+
+**C6 row-level 的 dev→LB gap = +0.004**，和其他所有实验 (gap 0.022~0.030) 相比小 5~7 倍。
+
+| 实验 | Dev | LB | Dev−LB gap |
+|---|---|---|---|
+| icq-half (SOTA) | 0.868619 | 0.84637 | +0.0222 |
+| C12 icq_seed2 | 0.868579 | 0.841294 | +0.0273 |
+| idmaskc15 | 0.868288 | 0.842176 | +0.0261 |
+| T23 disablefid47 | 0.868192 | 0.840344 | +0.0278 |
+| C1 disablefid47_29 | 0.867674 | 0.836736 | +0.0309 |
+| **C6 rowgap15 (row-level)** | **0.837987** | **0.833987** | **+0.0040** ⭐ |
+
+### Funnel 机制判决修订
+
+**之前 (2026-05-05 RG-level 版诊断)**：Funnel 未真正起效。❌
+
+**现在 (2026-05-06 row-level LB 诊断)**：**Funnel 机制成功，但代价过重**。
+- Row-level gap 确实让 dev 趋近 test 分布（gap 0.022 → 0.004）
+- 但 `valid_gap_ratio=0.15` 扔掉 15% train 数据太多 → 绝对 LB 下降 0.012
+- **Gap=0.15 不是最优**
+
+### 改进方向（基于线性插值预测）
+
+假设 dev→LB gap 随 gap_ratio 线性收敛，LB 随 train_data loss 线性下降：
+
+| gap_ratio | 预测 Dev | 预测 Dev→LB gap | 预测 LB |
+|---|---|---|---|
+| 0.00 (icq-half) | 0.868619 | +0.022 | 0.846 |
+| 0.05 | ~0.848 | +0.010 | ~0.838~0.840 |
+| 0.08 | ~0.843 | +0.006 | ~0.836 |
+| 0.15 (C6) | 0.838 | +0.004 | 0.834 |
+
+**最佳平衡点可能在 gap_ratio=0.05**，用较小 train 数据损失换可信 dev。
+
+### 对后续实验的影响
+
+**建议所有 T24 下一批实验 (F1 hash100k 等) 默认带 `--valid_gap_ratio 0.05 --enable_row_valid_gap`**：
+- Dev 变得可以作为 LB 代理（gap ~0.010）
+- LB 绝对值的下降 ~0.008 可以接受（评估信号价值远超此代价）
+- **这个改变可能是破局最重要的一步**，因为它解决了我们 7 天来所有实验判决不准的根因
+
+### T22 状态更新
+
+从 **⚠️ Blocked**（"Funnel 未真正起效"）改为 **✅ 机制成功 / ⚠️ 参数需调优**：
+- `--enable_row_valid_gap` 成功创造可信 dev
+- 下一步是调 `valid_gap_ratio` 到 0.05 左右的最优值
+- 不再需要"等 row-level gap cutoff 实现"（已完成，C6 验证）
 

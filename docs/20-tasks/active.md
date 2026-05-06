@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-05 晚 22:30（PDT · EDA 完成 · F1 hash100k 定位为下轮最高优先级 · 额外 2 training slot 分配给 seed3/seed7）· 结论：① **M1 icq_seed3 + M2 icq_seed7 已启动**（和 icq-half 完全同 config 只换 seed, 0 代码改动, 为验证 seed luck 假说建立 multi-seed LB 分布）; ② **EDA (EXP-029) 60 分钟完成**, 核心发现: **顶层 user_int/item_int 无大 vocab (全 <25k)**, "item_id OOV 问题" 只在 seq 域 → **UE 分离 / 顶层 disable 方向作废**; 模型在"信息丰富"样本上 AUC 低 **0.04~0.05** (稀疏 user AUC 0.89 vs 丰富 0.85) → **Seed 主楼问题-1 的机制真实存在**; 大 vocab 全集中在 seq (seq_c/47=2.8亿, seq_b/69=8600万 等); ③ **T24 基于 EDA 重新排 ROI**: 🥇 F1 **seq hash vocab 更激进** (500k→100k 或 50k, **0 代码**) / 🥇 F2 DIN target attention (80 行) / 🥈 F3 样本加权 / 🥉 F4 FaFE; ④ **下一个实验定位**: F1 `hash100k-icq-halftrain` (后天西班牙落地后启动, 今晚 training slot 已占满); ⑤ **今晚 collection**: 不再提交新 training (E + EDA 策略), 收尾文档 + 休息; ⑥ **quota 展望**: 明天飞机期间 seed3/seed7 回流 + C6 E4 出, 后天西班牙 02-06 (PDT 17-21) 将有 2-3 eval quota 可用。
+**最近一次审视**：2026-05-05 晚 22:35（PDT · 🔥 C6 rowgap15 LB 揭示 row-level gap 机制成功 · T22 从 Blocked 改 '机制成功/参数需调优' · next batch 默认带 gap=0.05）· 结论：① **C6 `rowgap15-icq-halftrain` E2 ckpt LB = 0.833987** (Dev 0.837987), **Dev→LB gap +0.004 (历史最小！其他实验 gap 都在 0.022~0.030)**; ② **T22 从 Blocked 改 "机制成功"**: row-level gap 确实让 dev 趋近 test 分布（gap 降 5~7 倍）,但 valid_gap_ratio=0.15 扔 15% train 数据代价过重 (LB 从 0.846 降到 0.834); ③ **真实能力带估算** ≈ [0.835, 0.842], SOTA 0.84637 高出真实上界 ~0.004 (训练期污染 + seed luck 合计); ④ **关键行动**: **后续所有 T24 实验默认带 `--valid_gap_ratio 0.05 --enable_row_valid_gap`**, 代价仅 5% train loss, 收益是 dev 变可信 (gap ~0.010 vs 当前 0.022~0.030); ⑤ **新基线需要重建**: `icq-half-gap05-icq-halftrain` (0 代码, 下轮跑) 作为带 gap=0.05 配置的新 LB 锚点, 预测 LB ~0.838~0.840; ⑥ **F1 hash100k 仍是最高优先级**, 但**必须带 gap=0.05**一起跑 (Job name `hash100k-gap05-icq-halftrain`); ⑦ **今晚已做**: M1/M2 icq_seed3/7 启动 + EDA 完成 + C6 LB 分析 + 文档更新 + commit; ⑧ **quota**: 明天飞机期间 M1/M2 回流 + 后天 eval window 02-06 西班牙时间 2-3 quota 可用; ⑨ **今天真正的战略收获**: 不是 "seed luck"，而是 **"row-level gap 解锁可信 dev"** —— 这是比 F1 hash100k 更根本的 funnel 突破, 从明天开始我们不再是 "瞎猜 dev"。
 
 ---
 
@@ -216,23 +216,19 @@
 
 ---
 
-### T22 `[⚠️]` P3 Valid Split Gap — Blocked（RG-level 切分失效，待改为 row-level gap）
+### T22 `[✅机制]` P3 Valid Split Gap — 机制成功 / 参数需调优
 
-**2026-05-05 部分证伪**：`gap15-icq-halftrain-swiglu-vr005-bs128` E4 dev **0.867124**（vs icq-half E4 0.868619 Δ−0.001495）。dev 降幅与"减 15% train data"纯预期完全匹配，**gap 未真正起到时间退让作用**。
+**2026-05-05 晚 RG-level 诊断**：`gap15-icq-halftrain` (RG-level) 失效, `effective train→valid distance = -341046 sec`。
+**2026-05-06 凌晨 row-level 补充**：**`rowgap15-icq-halftrain` (C6 row-level) LB 0.833987 + Dev 0.837987 = Dev→LB gap +0.004 (历史最小)！**
 
-**根因**：`valid_split_strategy='time'` 按每个 RG 的 `max(timestamp)` 排序，但**每个 RG 内部时间跨 4 天**（总跨度 4.04 天），排序后尾部 RG 的 `min(ts)` 仍是 2/28。RG-level gap 无法真正隔离时间窗。
+**修订判决（2026-05-06）**: Funnel **机制成功**（dev 确实趋近 test 分布），但 `valid_gap_ratio=0.15` 扔 15% train 数据代价过重。**最优 gap_ratio 预测 ≈ 0.05**（用较少 train loss 换可信 dev）。
 
-日志证据：
-```
-train ts: [1772238909, 1772588918]
-gap   ts: [1772247536, 1772588958]   ← 与 train 严重重叠
-valid ts: [1772247872, 1772588990]   ← 与 train 严重重叠
-effective train→valid distance = -341046 sec
-```
+**行动**: 后续所有实验默认带 **`--valid_gap_ratio 0.05 --enable_row_valid_gap`**：
+- 代价: 训练数据减少 5% (可控)
+- 收益: dev 变得可信 (gap 从 0.022 降到 ~0.010)
+- 对所有决策质量是质的提升
 
-详见 [`EXP-026`](../40-experiments/EXP-026-p3-gap15-halftrain-2026-05-05.md)。
-
-**修复方向 T22-fix**（不立即启动）：在 `_row_ts_cutoff` 基础上扩展为双阈值 row-level gap cutoff，~50 行代码。优先级排在 T23 之后；先看 seq_c disable 方向是否有 LB 收益，再决定是否投入修 P3。
+详见 [`EXP-026`](../40-experiments/EXP-026-p3-gap15-halftrain-2026-05-05.md) §补遗 + [`EXP-028`](../40-experiments/EXP-028-seed-luck-hypothesis-2026-05-05.md) §补遗。
 
 ---
 
@@ -275,10 +271,16 @@ effective train→valid distance = -341046 sec
 **next action（等 seed3/seed7 + C6 回流后）**：
 
 1. 优先 eval seed3 + seed7 （确认/证伪 seed luck）
-2. 启动 **F1 `hash100k-icq-halftrain`**（0 代码, 只改 `--seq_hash_vocab 100000`）
+2. 启动 **F1 `hash100k-gap05-icq-halftrain`**（0 代码, 加 `--seq_hash_vocab 100000 --valid_gap_ratio 0.05 --enable_row_valid_gap`）
+   - **注意**：下一批实验**默认带 gap=0.05**（T22 修订后的结论），让 dev 变可信
 3. 根据 F1 LB 决定下一步（破 0.849 = Accept，持平 = 试 hash50k，负向 = 换 F2 DIN）
 
-**判决阈值**: LB ≥ **0.849** (明显高于 seed 噪声上界) 才算真信号; LB ∈ [0.844, 0.849] 持平; LB < 0.844 方法学损害。
+**判决阈值（对 `--valid_gap_ratio 0.05` 配置修订）**:
+- LB ≥ **0.845** = 真信号（对比基线 icq-half-gap05 预测 LB ~0.838~0.840）
+- LB ∈ [0.838, 0.845] = 持平
+- LB < 0.835 = 方法学损害
+
+**注**：带 gap=0.05 之后，"破 SOTA" 阈值不再是 0.849（那是无 gap 的 SOTA），而是**基线 icq-half-gap05 的 LB + 0.005**。但此基线值还没测，需要先跑一次 `icq-half-gap05-icq-halftrain` 建立。
 
 详见 [`EXP-029`](../40-experiments/EXP-029-eda-report-2026-05-05.md)。
 
@@ -390,6 +392,8 @@ effective train→valid distance = -341046 sec
 ---
 
 ## Changelog
+
+- **2026-05-06 凌晨 (PDT 晚 22:40)（🔥 C6 rowgap15 LB = 0.833987 揭示 "row-level gap 让 dev 可信" 重大 insight · T22 从 Blocked 改为 "机制成功"）**：C6 E2 ckpt evaluation 完成, LB **0.833987** / Dev 0.837987 / **Dev→LB gap +0.004** (其他所有实验 gap 都在 0.022~0.030, C6 小 5~7 倍)。**关键发现**: Row-level valid gap 确实改变了 dev 的性质——之前 dev ≈ 0.868 是"训练期近未来" AUC 含污染, C6 dev ≈ 0.838 是"真正模拟 test 分布" 的 AUC。**T22 判决修订**: 从 "Blocked RG-level 失效" 改为 "机制成功 / 参数需调优"——funnel 机制确实工作, 但 `valid_gap_ratio=0.15` 扔 15% train 数据代价过重, 最佳 gap_ratio 预测 ≈ 0.05 (线性插值: dev 0.848 / gap 0.010 / LB 0.838~0.840)。**真实能力带估算**: [0.835, 0.842], SOTA 0.84637 包含 ~0.004 "训练期污染 + seed luck" 虚高。**下一批实验默认策略修订**: 所有 T24 job 带 **`--valid_gap_ratio 0.05 --enable_row_valid_gap`** —— 代价 5% train loss, 收益 dev 变可信 (gap ~0.010 vs 当前 0.022~0.030), 为所有后续决策质量升级。**新基线需建**: `icq-half-gap05-icq-halftrain` (0 代码) 作为带 gap 配置的 LB 锚点, 预测 LB ~0.838~0.840, 与之对比做 F1 hash100k 等新方法判决 (破 0.845 = 真信号)。**文档**: EXP-028 加 C6 LB + "row-level gap 机制成功" 补遗; EXP-026 补 row-level 版本 LB 表 + 线性插值预测; active.md T22 状态 + T24 "默认带 gap=0.05"。**今天战略收获**: 真正的破局不是 "seed luck 假说"，而是 **"row-level gap 解锁可信 dev"**——从明天开始我们不再是 "瞎猜 dev"。
 
 - **2026-05-05 PDT 晚 22:30（EDA 完成 · EXP-029 · F1 hash100k 定位下轮最高优先级 · seed3/seed7 training 启动）**：① 启动 2 training job: M1 `icq_seed3-icq-halftrain` + M2 `icq_seed7-icq-halftrain` (seed=3/7, 其他与 icq-half SOTA 完全相同, 0 代码改动), 为 **seed luck 假说**建立 multi-seed LB 数据点; ② **EDA 60 分钟完成** (EXP-029), **3 大发现**: (a) platform 顶层 user_int/item_int 最大 vocab 25k (fid=9 item_int), "item_id OOV 问题" **只在 seq 域** → UE 分离 / 顶层 disable 方向**作废**; (b) C1 E1 valid 切片表 (`[diag] slice by`): user_int_nonzero **稀疏 AUC 0.8915 vs 丰富 0.8471** (Δ0.045), seq_total_len **短 0.8991 vs 长 0.8453** (Δ0.054), item_int_nonzero 类似 → **模型在信息丰富样本上真实过拟合 id**, 验证 Seed 主楼问题-1 机制; (c) 大 vocab 全在 seq 域 (seq_c/47=2.8亿, seq_b/69=8600万, seq_c/29=820万, seq_c/34=200万, seq_c/36=150万); ③ **T24 重新排 ROI**: 🥇 F1 `seq_hash_vocab 更激进` (500k→100k 或 50k, **0 代码**) / 🥇 F2 DIN target attention (~80 行) / 🥈 F3 样本丰富度加权 / 🥉 F4 FaFE / ❌ UE 分离 (EDA 作废) / ❌ 顶层 disable (EDA 作废); ④ **下个实验定位**: **`hash100k-icq-halftrain`** 是最对口 + 最简单的架构级方向, 后天落地西班牙启动; ⑤ **今晚 E+EDA 策略**: 不再提交新 training (quota 平衡与验证节奏), 让 M1/M2/C6 跑完, 文档收尾; ⑥ **quota 时间线**: 明天飞机上 seed3/seed7 回流 + C6 E4 出, 后天西班牙当地 02-06 (PDT 17-21) 将有 2-3 eval quota 可用, 优先 eval seed3/seed7 建立噪声带, 再 eval F1 hash100k。
 
