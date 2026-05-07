@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-05 晚 22:35（PDT · 🔥 C6 rowgap15 LB 揭示 row-level gap 机制成功 · T22 从 Blocked 改 '机制成功/参数需调优' · next batch 默认带 gap=0.05）· 结论：① **C6 `rowgap15-icq-halftrain` E2 ckpt LB = 0.833987** (Dev 0.837987), **Dev→LB gap +0.004 (历史最小！其他实验 gap 都在 0.022~0.030)**; ② **T22 从 Blocked 改 "机制成功"**: row-level gap 确实让 dev 趋近 test 分布（gap 降 5~7 倍）,但 valid_gap_ratio=0.15 扔 15% train 数据代价过重 (LB 从 0.846 降到 0.834); ③ **真实能力带估算** ≈ [0.835, 0.842], SOTA 0.84637 高出真实上界 ~0.004 (训练期污染 + seed luck 合计); ④ **关键行动**: **后续所有 T24 实验默认带 `--valid_gap_ratio 0.05 --enable_row_valid_gap`**, 代价仅 5% train loss, 收益是 dev 变可信 (gap ~0.010 vs 当前 0.022~0.030); ⑤ **新基线需要重建**: `icq-half-gap05-icq-halftrain` (0 代码, 下轮跑) 作为带 gap=0.05 配置的新 LB 锚点, 预测 LB ~0.838~0.840; ⑥ **F1 hash100k 仍是最高优先级**, 但**必须带 gap=0.05**一起跑 (Job name `hash100k-gap05-icq-halftrain`); ⑦ **今晚已做**: M1/M2 icq_seed3/7 启动 + EDA 完成 + C6 LB 分析 + 文档更新 + commit; ⑧ **quota**: 明天飞机期间 M1/M2 回流 + 后天 eval window 02-06 西班牙时间 2-3 quota 可用; ⑨ **今天真正的战略收获**: 不是 "seed luck"，而是 **"row-level gap 解锁可信 dev"** —— 这是比 F1 hash100k 更根本的 funnel 突破, 从明天开始我们不再是 "瞎猜 dev"。
+**最近一次审视**：2026-05-07 西班牙早 09:40（UTC+2 · 🔥 4 eval 结果回流 · SOTA 确认是 seed 上沿 · Gap=0.05 funnel 实测成功 · F1 hash 关闭 · G1 DIN 启动）· 结论：① **4 evaluation 结果**: `icq-half-gap05` LB **0.839223** (dev→LB gap +0.0032) / `hash100k-gap05` LB **0.838417** (gap +0.0020) / `icq_seed3` LB **0.845329** (第 2 高!) / `icq_seed7` LB **0.836413** (最低)。② **Seed 噪声确认 ±0.005**：5 seed (42/2/3/7 + gap05 重跑) LB 跨度 0.010, 均值 **0.8424**, SOTA 0.84637 几乎是 seed 上沿, **Dev/LB 在 seed 维度几乎独立** (seed=7 dev 最高 LB 最低, seed=3 dev 最低 LB 第 2 高)。③ **Gap=0.05 funnel 实测 dev→LB gap = +0.002~+0.003** (vs gap=0 的 +0.022~+0.032, **小 10×**!) → **dev 变成极可信 LB 代理**，未来方向级 ablation 不花 eval quota 就能筛方向，**实验迭代 10× 加速**。④ **F1 hash100k 关闭** (ΔLB vs 新基线 −0.0008, 在噪声内) → 不再试 hash50k/25k。⑤ **真实能力带修订**: [0.836, 0.846] 跨度 0.010, SOTA 不是天花板而是运气上沿 → **破 SOTA 新阈值 = "方法学使均值从 0.8424 提升 0.005+"** (即 LB ≥ 0.8474)。⑥ **T25 G1 DIN 启动**: Seed 主楼方案 2 "fafe+din" 对口, hard attention vs T16 additive (soft) 机制完全不同, ~80 行 model.py。⑦ **今天计划**: 文档落档(正在做) + DIN 代码 + smoke + 启 job。⑧ **quota**: 4 eval 全用, **今日剩 0**, training 4 slot 全空闲。
 
 ---
 
@@ -268,19 +268,34 @@
 | ❌ UE 分离 | 低 | ~120 行 | **抛弃**（EDA 证 user_int 无 UE 层级）|
 | ❌ 顶层 item_id disable | 低 | ~10 行 | **抛弃**（EDA 证顶层无大 vocab）|
 
-**next action（等 seed3/seed7 + C6 回流后）**：
+### T24 `[x]` F1 hash vocab 激进方向 — 持平关闭（LB 0.838417 vs 新基线 0.839223, ΔLB −0.0008）
 
-1. 优先 eval seed3 + seed7 （确认/证伪 seed luck）
-2. 启动 **F1 `hash100k-gap05-icq-halftrain`**（0 代码, 加 `--seq_hash_vocab 100000 --valid_gap_ratio 0.05 --enable_row_valid_gap`）
-   - **注意**：下一批实验**默认带 gap=0.05**（T22 修订后的结论），让 dev 变可信
-3. 根据 F1 LB 决定下一步（破 0.849 = Accept，持平 = 试 hash50k，负向 = 换 F2 DIN）
+**2026-05-07 终结**：`hash100k-gap05-icq-halftrain` LB **0.838417** vs `icq-half-gap05-icq-halftrain` LB **0.839223** = **ΔLB −0.000806**（seed 噪声 ±0.005 内）。
 
-**判决阈值（对 `--valid_gap_ratio 0.05` 配置修订）**:
-- LB ≥ **0.845** = 真信号（对比基线 icq-half-gap05 预测 LB ~0.838~0.840）
-- LB ∈ [0.838, 0.845] = 持平
-- LB < 0.835 = 方法学损害
+**结论**：F1 方向无 LB 信号。hash 从 500k 降到 100k 的效果: Dev 降 0.002 (容量变紧), LB 几乎不变。**不再试 hash50k/25k**。
 
-**注**：带 gap=0.05 之后，"破 SOTA" 阈值不再是 0.849（那是无 gap 的 SOTA），而是**基线 icq-half-gap05 的 LB + 0.005**。但此基线值还没测，需要先跑一次 `icq-half-gap05-icq-halftrain` 建立。
+### T25 `[~]` G1 DIN Target Attention（下一批唯一方向）
+
+**触发**：EXP-030 显示 small ablation / hash 调整全部持平，**架构级创新是唯一破局路径**。DIN 是 Seed 主楼方案 2 "fafe+din" 中对口最好的方向。
+
+**机制 vs 已证伪 T16 additive**:
+- T16 additive: target_embed **加性注入** seq 每个 token（soft, 低表达力）—— 已在 full train 证伪
+- G1 DIN: target_embed **作 query 对 seq cross-attention**（hard attention, 高表达力）—— **完全不同机制**
+
+**实施**：
+- `DINInterestExtractor` 模块 in `model.py`（~80 行）
+- Target item embedding 从 `item_int_feats` 聚合
+- 对 4 条 seq 分别 cross-attention 生成 `interest_token`
+- 拼入 NS tokens
+- CLI: `--enable_din_interest`
+
+**训练 config**：`--valid_gap_ratio 0.05 --enable_row_valid_gap`（新默认）
+
+**判决阈值**（ΔLB vs icq-half-gap05 0.839223）:
+- ≥ +0.005 → 🎯 真信号（超 seed 噪声），DIN Accept
+- ∈ [+0.002, +0.005) → 疑似正向，多 seed 验证
+- ∈ [−0.002, +0.002) → 持平，无信号
+- < −0.002 → 负向
 
 详见 [`EXP-029`](../40-experiments/EXP-029-eda-report-2026-05-05.md)。
 
@@ -392,6 +407,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-07 西班牙早 09:40 (UTC+2) / PDT 00:40（🔥 4 evaluation 回流 · SOTA 确认 seed luck 上沿 · Gap=0.05 funnel 实测成功 · F1 关闭 · T25 DIN 启动）**：**LB 数据**: `icq-half-gap05` **0.839223** / `hash100k-gap05` **0.838417** / `icq_seed3` **0.845329** (第 2 高！) / `icq_seed7` **0.836413** (最低)。**3 大发现**: (1) **Seed 噪声 ±0.005**（5 seed LB 跨度 0.010, 均值 0.8424, SOTA 是上沿）, **Dev 与 LB 在 seed 维度几乎独立** (seed=7 dev 最高 LB 最低, seed=3 反向), 实锤 "SOTA = seed luck" 假说; (2) **Gap=0.05 dev→LB gap 实测 +0.002~+0.003**(vs gap=0 的 +0.022~+0.032, 小 **10×**) → **dev 变极可信 LB 代理**, 精度 ±0.003, 未来方向级 ablation 不花 eval quota 就能筛方向; (3) **F1 hash100k 持平 (ΔLB −0.0008 在噪声内), 不再追 hash 激进方向**。**战略级转折**: (a) **真实能力带 [0.836, 0.846]**, SOTA 不是天花板而是 seed 上沿运气; (b) **破 SOTA 新阈值**: 不是 "单点 LB ≥ 0.849", 而是 "方法学使能力均值 0.8424 提升 0.005+" (即 **LB ≥ 0.8474 等价能力提升**); (c) **实验迭代 10× 加速**: 5h half-train + gap=0.05 看 dev 直接判决, 不用 eval quota; (d) 下一批唯一方向 = **G1 DIN target attention** (Seed 主楼方案 2 对口, hard attention 与 T16 additive 机制完全不同, ~80 行 model.py)。**T24 F1 归档** (持平关闭), **T25 G1 新建** (DIN)。**EXP-030 落档** 4 eval 完整分析 + 5 seed LB 分布图 + 判决阈值矩阵。**当日 quota**: evaluation 4 全用 (剩 0); training 4 slot 空闲, G1 DIN 代码完成后立刻启动。**注**: 用户今日下午/晚西班牙当地时间有空, Agent 文档 + 代码 + smoke 今日全部完成。
 
 - **2026-05-06 凌晨 (PDT 晚 22:40)（🔥 C6 rowgap15 LB = 0.833987 揭示 "row-level gap 让 dev 可信" 重大 insight · T22 从 Blocked 改为 "机制成功"）**：C6 E2 ckpt evaluation 完成, LB **0.833987** / Dev 0.837987 / **Dev→LB gap +0.004** (其他所有实验 gap 都在 0.022~0.030, C6 小 5~7 倍)。**关键发现**: Row-level valid gap 确实改变了 dev 的性质——之前 dev ≈ 0.868 是"训练期近未来" AUC 含污染, C6 dev ≈ 0.838 是"真正模拟 test 分布" 的 AUC。**T22 判决修订**: 从 "Blocked RG-level 失效" 改为 "机制成功 / 参数需调优"——funnel 机制确实工作, 但 `valid_gap_ratio=0.15` 扔 15% train 数据代价过重, 最佳 gap_ratio 预测 ≈ 0.05 (线性插值: dev 0.848 / gap 0.010 / LB 0.838~0.840)。**真实能力带估算**: [0.835, 0.842], SOTA 0.84637 包含 ~0.004 "训练期污染 + seed luck" 虚高。**下一批实验默认策略修订**: 所有 T24 job 带 **`--valid_gap_ratio 0.05 --enable_row_valid_gap`** —— 代价 5% train loss, 收益 dev 变可信 (gap ~0.010 vs 当前 0.022~0.030), 为所有后续决策质量升级。**新基线需建**: `icq-half-gap05-icq-halftrain` (0 代码) 作为带 gap 配置的 LB 锚点, 预测 LB ~0.838~0.840, 与之对比做 F1 hash100k 等新方法判决 (破 0.845 = 真信号)。**文档**: EXP-028 加 C6 LB + "row-level gap 机制成功" 补遗; EXP-026 补 row-level 版本 LB 表 + 线性插值预测; active.md T22 状态 + T24 "默认带 gap=0.05"。**今天战略收获**: 真正的破局不是 "seed luck 假说"，而是 **"row-level gap 解锁可信 dev"**——从明天开始我们不再是 "瞎猜 dev"。
 
