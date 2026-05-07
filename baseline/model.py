@@ -1825,6 +1825,7 @@ class RankMixerNSTokenizer(nn.Module):
         d_model: int,
         num_ns_tokens: int,
         emb_skip_threshold: int = 0,
+        enable_fafe: bool = False,
     ) -> None:
         """Initializes RankMixerNSTokenizer.
 
@@ -1835,6 +1836,17 @@ class RankMixerNSTokenizer(nn.Module):
             d_model: Output token dimension.
             num_ns_tokens: Number of NS tokens to produce (T segments).
             emb_skip_threshold: Skip embedding for features with vocab > threshold.
+            enable_fafe: T25 / H2 · Feature-aware Feature Embedding.
+                When True, a per-fid ``LayerNorm -> Linear(emb_dim, emb_dim)``
+                transform is applied to each raw fid embedding BEFORE
+                concatenation + chunking. Each fid gets its own learnable
+                transform so the downstream chunked projection sees
+                feature-specific signal rather than a shared-weight view.
+                Mirrors the "FeatureAware Feature Embedding" step in
+                InterFormer (CIKM 2025) + Seed主楼方案2. Adds
+                ``num_fids × (emb_dim² + 2·emb_dim)`` dense params (~130k
+                for 46 user fids @ emb_dim=64). When False (default),
+                behaviour is bit-identical to the pre-T25 tokenizer.
         """
         super().__init__()
         self.feature_specs = feature_specs
@@ -1881,6 +1893,22 @@ class RankMixerNSTokenizer(nn.Module):
             for _ in range(num_ns_tokens)
         ])
 
+        # T25 / H2 · FaFE feature-aware feature embedding.
+        self.enable_fafe = bool(enable_fafe)
+        if self.enable_fafe:
+            # Build one transform per fid-slot in the concatenated layout.
+            # The layout order is determined by iterating over groups and
+            # over fid_idx within each group (see forward()), so the
+            # transform list mirrors that exact order.
+            fafe_transforms: List[nn.Module] = []
+            for group in groups:
+                for _ in group:
+                    fafe_transforms.append(nn.Sequential(
+                        nn.LayerNorm(emb_dim),
+                        nn.Linear(emb_dim, emb_dim),
+                    ))
+            self.fafe_transforms = nn.ModuleList(fafe_transforms)
+
         logging.info(
             f"RankMixerNSTokenizer: {total_num_fids} fids, "
             f"total_emb_dim={total_emb_dim}, chunk_dim={self.chunk_dim}, "
@@ -1898,6 +1926,7 @@ class RankMixerNSTokenizer(nn.Module):
         """
         # 1. Embed all fids in group order → flat cat
         all_embs = []
+        fafe_slot = 0  # tracks position in fafe_transforms (only used if enabled)
         for group in self.groups:
             for fid_idx in group:
                 vs, offset, length = self.feature_specs[fid_idx]
@@ -1914,6 +1943,10 @@ class RankMixerNSTokenizer(nn.Module):
                         mask = (vals != 0).float().unsqueeze(-1)
                         count = mask.sum(dim=1).clamp(min=1)
                         fid_emb = (emb_all * mask).sum(dim=1) / count
+                # T25 / H2 · FaFE per-fid transform (before concatenation).
+                if self.enable_fafe:
+                    fid_emb = self.fafe_transforms[fafe_slot](fid_emb)
+                fafe_slot += 1
                 all_embs.append(fid_emb)
 
         cat_emb = torch.cat(all_embs, dim=-1)  # (B, total_emb_dim)
@@ -2001,6 +2034,14 @@ class PCVRHyFormer(nn.Module):
         # dense_bypass integration pattern). Zero effect on RankMixer token
         # count / divisibility constraint.
         enable_din_interest: bool = False,
+        # T25 / H2 · Feature-aware Feature Embedding. When True, each fid's
+        # raw embedding passes through a per-fid LayerNorm+Linear transform
+        # (in the RankMixer NS tokenizer only, as an MVP) before chunked
+        # concatenation. Shifts the representation from "shared-weight
+        # chunk projection" to "feature-specific pre-transform + shared
+        # projection". Adds ~130k-250k dense params. Zero effect when
+        # ns_tokenizer_type != 'rankmixer' (group tokenizer path).
+        enable_fafe: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2025,6 +2066,10 @@ class PCVRHyFormer(nn.Module):
         self.target_inject_alpha_init = target_inject_alpha_init
 
         # ================== NS Tokens Construction ==================
+
+        # T25 / H2 · FaFE flag is stored ahead of tokenizer construction
+        # so the rankmixer tokenizer can read it.
+        self.enable_fafe = bool(enable_fafe)
 
         if ns_tokenizer_type == 'group':
             # Original: one NS token per group
@@ -2059,6 +2104,7 @@ class PCVRHyFormer(nn.Module):
                 d_model=d_model,
                 num_ns_tokens=user_ns_tokens,
                 emb_skip_threshold=emb_skip_threshold,
+                enable_fafe=self.enable_fafe,
             )
             num_user_ns = user_ns_tokens
 
@@ -2069,6 +2115,7 @@ class PCVRHyFormer(nn.Module):
                 d_model=d_model,
                 num_ns_tokens=item_ns_tokens,
                 emb_skip_threshold=emb_skip_threshold,
+                enable_fafe=self.enable_fafe,
             )
             num_item_ns = item_ns_tokens
         else:

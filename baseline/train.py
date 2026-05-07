@@ -420,6 +420,14 @@ def parse_args() -> argparse.Namespace:
                              '--enable_dense_bypass integration pattern). Orthogonal to '
                              '--target_item_seq_injection (T16 additive, which modifies '
                              'seq encoder inputs). Default off (back-compat).')
+    parser.add_argument('--enable_fafe', action='store_true', default=False,
+                        help='T25 / H2: Feature-aware Feature Embedding. When set, '
+                             'each fid in the RankMixer NS tokenizer passes through '
+                             'a per-fid LayerNorm+Linear(emb_dim, emb_dim) transform '
+                             'before the shared chunked projection. Mirrors InterFormer '
+                             '(CIKM 2025) + Seed 主楼方案 2. Adds ~130k dense params '
+                             'for 46 user fids @ emb_dim=64. Zero effect on group '
+                             'tokenizer path (ns_tokenizer_type=group).')
 
     parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
                         help='Recency reweighting: give samples closer to the test period '
@@ -629,6 +637,7 @@ def main() -> None:
         "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
         "enable_din_interest": args.enable_din_interest,
+        "enable_fafe": args.enable_fafe,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

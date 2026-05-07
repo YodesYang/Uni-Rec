@@ -289,6 +289,7 @@ def main() -> None:
         "target_inject_alpha_init": float(cfg.get("target_inject_alpha_init", 0.0)),
         "enable_dense_bypass": bool(cfg.get("enable_dense_bypass", False)),
         "enable_din_interest": bool(cfg.get("enable_din_interest", False)),
+        "enable_fafe": bool(cfg.get("enable_fafe", False)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
