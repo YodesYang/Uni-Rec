@@ -560,6 +560,101 @@ class TargetItemSeqInjector(nn.Module):
         return out
 
 
+class DINInterestExtractor(nn.Module):
+    """DIN-style target-aware interest pooling (T25 / G1).
+
+    For each of the S sequence domains, computes a single interest token
+    by cross-attending a target-item query against that domain's sequence
+    tokens. The S interest vectors are concatenated and projected back to
+    ``d_model``, producing one composite "interest" representation.
+
+    This representation is emitted as a side output (B, D) and is later
+    concatenated to the backbone output before the classifier — exactly
+    the same pattern ``enable_dense_bypass`` already uses — so it does
+    NOT require re-wiring the RankMixer divisibility constraint
+    (``d_model % n_total == 0``) that makes inserting a new NS/Q token
+    painful. This is the minimum-risk "bypass" integration of DIN.
+
+    Compared to ``TargetItemSeqInjector`` (additive, already falsified
+    in T16):
+      * T16 additive adds a single projected target vector to EVERY
+        sequence token with a scalar α. Low expressiveness; limited to
+        uniformly-weighted contextual bias.
+      * DIN performs an ATTENTION pooling: the target query can
+        selectively weight which sequence positions are relevant. This
+        matches Alibaba's DIN KDD 2018 target-aware interest mechanism.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_sequences: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.num_sequences = num_sequences
+        # One cross-attention head per sequence domain. We use the shared
+        # CrossAttention class that already exists in this file to avoid
+        # re-implementing MHA + RoPE handling.
+        self.attn_per_seq = nn.ModuleList([
+            CrossAttention(
+                d_model=d_model,
+                num_heads=num_heads,
+                dropout=dropout,
+                ln_mode='pre',
+            )
+            for _ in range(num_sequences)
+        ])
+        # Merge S interest vectors (B, S, D) → (B, D).
+        self.merge = nn.Sequential(
+            nn.Linear(d_model * num_sequences, d_model),
+            nn.LayerNorm(d_model),
+            nn.SiLU(),
+        )
+
+    def forward(
+        self,
+        target_repr: torch.Tensor,
+        seq_tokens_list: List[torch.Tensor],
+        seq_padding_masks: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """Compute composite interest token via per-seq target attention.
+
+        Args:
+            target_repr: (B, D) target-item representation. Typically the
+                mean of item_ns_tokens (same source as TargetItemSeqInjector).
+            seq_tokens_list: List of S tensors, each (B, L_i, D).
+            seq_padding_masks: List of S boolean masks (B, L_i), True =
+                padding position.
+
+        Returns:
+            composite_interest: (B, D) — the merged DIN interest vector,
+            ready to be concatenated to the classifier input.
+        """
+        if len(seq_tokens_list) != self.num_sequences:
+            raise ValueError(
+                f"DINInterestExtractor expects {self.num_sequences} seq "
+                f"domains; got {len(seq_tokens_list)}.")
+        # Target as a single-token query: (B, D) → (B, 1, D).
+        query = target_repr.unsqueeze(1)
+        per_seq_interests: List[torch.Tensor] = []
+        for i in range(self.num_sequences):
+            seq_tokens = seq_tokens_list[i]           # (B, L_i, D)
+            mask = seq_padding_masks[i]               # (B, L_i)
+            # Single-query cross-attention → (B, 1, D).
+            attended = self.attn_per_seq[i](
+                query=query,
+                key_value=seq_tokens,
+                key_padding_mask=mask,
+            )
+            per_seq_interests.append(attended.squeeze(1))  # (B, D)
+        concat = torch.cat(per_seq_interests, dim=-1)  # (B, S*D)
+        merged = self.merge(concat)                     # (B, D)
+        return merged
+
+
 class MultiSeqQueryGenerator(nn.Module):
     """Multi-sequence query generation module.
 
@@ -1899,6 +1994,13 @@ class PCVRHyFormer(nn.Module):
         # token is removed from ns_tokens and the classifier input dimension is
         # extended by d_model (d_model + d_model = 2*d_model).
         enable_dense_bypass: bool = False,
+        # T25 / G1 · Enable DIN-style target-aware interest pooling. When
+        # True, a DINInterestExtractor runs after the seq encoders and
+        # produces a composite interest vector (B, D) that is concatenated
+        # to the backbone output before the classifier (mirrors the
+        # dense_bypass integration pattern). Zero effect on RankMixer token
+        # count / divisibility constraint.
+        enable_din_interest: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2012,6 +2114,16 @@ class PCVRHyFormer(nn.Module):
                 nn.Linear(user_dense_dim, d_model),
                 nn.LayerNorm(d_model),
                 nn.SiLU(),
+            )
+
+        # T25 / G1 · DIN-style target-aware interest pooling (bypass mode).
+        self.enable_din_interest = bool(enable_din_interest)
+        if self.enable_din_interest:
+            self.din_extractor = DINInterestExtractor(
+                d_model=d_model,
+                num_heads=num_heads,
+                num_sequences=self.num_sequences,
+                dropout=dropout_rate,
             )
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
@@ -2185,8 +2297,12 @@ class PCVRHyFormer(nn.Module):
         self.emb_dropout = nn.Dropout(dropout_rate)
 
         # Classifier input dimension: d_model normally; d_model*2 when dense
-        # bypass is active because the bypass vector is concatenated to output.
-        clsfier_in_dim = d_model * 2 if self.has_dense_bypass else d_model
+        # bypass is active because the bypass vector is concatenated to output;
+        # plus d_model when DIN interest is active (same pattern).
+        clsfier_in_dim = d_model * (
+            1 + (1 if self.has_dense_bypass else 0)
+              + (1 if self.enable_din_interest else 0)
+        )
 
         # Classifier
         self.clsfier = nn.Sequential(
@@ -2511,6 +2627,34 @@ class PCVRHyFormer(nn.Module):
         bypass = self.user_dense_bypass_proj(inputs.user_dense_feats)  # (B, D)
         return torch.cat([output, bypass], dim=-1)  # (B, 2D)
 
+    def _apply_din_interest_bypass(
+        self,
+        output: torch.Tensor,
+        seq_tokens_list: List[torch.Tensor],
+        seq_masks_list: List[torch.Tensor],
+        ns_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Concatenate DIN interest vector to the backbone output.
+
+        Only called when ``enable_din_interest`` is True. The target
+        representation is the mean of the item_ns_tokens slice, matching
+        TargetItemSeqInjector's convention (keeps the two target-aware
+        mechanisms on the same footing).
+        """
+        # Layout inside ns_tokens (from _build_ns_tokens):
+        #   [user_ns (num_user_ns) | optional user_dense | item_ns (num_item_ns) | optional item_dense]
+        # We slice out the item_ns block to get target_repr = mean(item_ns).
+        # This is robust to presence/absence of user_dense (it comes BEFORE
+        # item_ns in the layout).
+        user_dense_offset = 1 if self.has_user_dense else 0
+        item_ns_start = self.num_user_ns + user_dense_offset
+        item_ns_end = item_ns_start + self.num_item_ns
+        item_ns = ns_tokens[:, item_ns_start:item_ns_end, :]  # (B, num_item_ns, D)
+        target_repr = item_ns.mean(dim=1)  # (B, D)
+        din_interest = self.din_extractor(
+            target_repr, seq_tokens_list, seq_masks_list)  # (B, D)
+        return torch.cat([output, din_interest], dim=-1)
+
     def _build_seq_tokens(
         self, inputs: ModelInput
     ) -> Tuple[list, list]:
@@ -2574,6 +2718,10 @@ class PCVRHyFormer(nn.Module):
         if self.has_dense_bypass:
             output = self._apply_dense_bypass(output, inputs)
 
+        if self.enable_din_interest:
+            output = self._apply_din_interest_bypass(
+                output, seq_tokens_list, seq_masks_list, ns_tokens)
+
         logits = self.clsfier(output)
         return logits
 
@@ -2597,6 +2745,10 @@ class PCVRHyFormer(nn.Module):
 
         if self.has_dense_bypass:
             output = self._apply_dense_bypass(output, inputs)
+
+        if self.enable_din_interest:
+            output = self._apply_din_interest_bypass(
+                output, seq_tokens_list, seq_masks_list, ns_tokens)
 
         logits = self.clsfier(output)
         return logits, output

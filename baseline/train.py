@@ -410,6 +410,16 @@ def parse_args() -> argparse.Namespace:
                              'token path. The bypass vector is concatenated to the '
                              'output_proj output, making the classifier input 2*d_model. '
                              'This avoids dense signal dilution inside HyFormer blocks.')
+    parser.add_argument('--enable_din_interest', action='store_true', default=False,
+                        help='T25 / G1: DIN-style target-aware interest pooling. '
+                             'Per-domain cross-attention uses the mean of item_ns '
+                             'tokens as query against each seq, producing S interest '
+                             'vectors which are merged into a single (B, D) composite '
+                             'interest. This composite is concatenated to the backbone '
+                             'output before the classifier (bypass mode, identical to '
+                             '--enable_dense_bypass integration pattern). Orthogonal to '
+                             '--target_item_seq_injection (T16 additive, which modifies '
+                             'seq encoder inputs). Default off (back-compat).')
 
     parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
                         help='Recency reweighting: give samples closer to the test period '
@@ -618,6 +628,7 @@ def main() -> None:
         "target_item_seq_injection": args.target_item_seq_injection,
         "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
+        "enable_din_interest": args.enable_din_interest,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
