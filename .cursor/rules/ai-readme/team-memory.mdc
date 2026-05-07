@@ -6,8 +6,8 @@ alwaysApply: true
 ## 比赛流程与数据
 
 - 2026-04-30 16:00 AOE：Industrial Track 因 test 数据集 bug 重置榜单，所有历史分数作废；官方修复后会更新数据集，需重新下载并比对版本（建议比对 hash / 文件时间）
-- **评估配额（2026-05-04 晚澄清）**：每队 **4 quota**，评估为**24h 滚动窗口最多 4 次有效提交**（Failed / Stopped 不计入）。实测重置时间 ≈ **PDT 21:00**（每日额度重回 4）；官方榜单刷新时间 ≈ **PDT 24:00 = 00:00 次日**（≈ 北京时间次日 15:00）。实际操作含义: ① 不是"日历日 4 次"而是滚动窗口,如果今日已用 3 次,明日 24h 之前只能再用 1 次;② "今天 PDT 21 点前没用完的额度**不会丢**",会 roll 到下个 24h 窗口里继续可用;③ "Evaluation Success ≠ 已上榜", 需等 PDT 24:00 榜单刷新。建议建立实验追踪表避免浪费配额。
-- **⚠️ 时区处理（2026-05-05 晚补充）**：本项目涉及 **3~4 个时区** —— ① 训练/推理机器 log 时间 = **北京时间 UTC+8**（evaluation log 里 `2026-05-06 08:34:27` 是北京时间，不是 PDT 也不是 AOE）；② 平台 quota 24h 滚动窗口基准 = **AOE (UTC-12)**，PDT 21:00 = AOE 次日 00:00；③ 用户主时区 = **PDT (UTC-7)**；④ 用户 5/6 起飞往西班牙 (UTC+2 CEST)，届时需加一个时区。**Agent 在看平台 log 时间时务必注意：几乎所有 evaluation / infer 日志的时间戳是北京时间**，换算到 PDT 减 15 小时（冬令时减 16，夏令时减 15）。
+- **评估配额（2026-05-07 晚用户澄清 · 替代之前的 "24h 滚动" 记录）**：每队 **4 quota**，**每日北京时间 12:00 重置到 4**（日历日规则，不是滚动窗口）。"有且仅有 4 个，无论昨天是否有用完"—— 用不完**清零**，不累积。**时区换算**: 北京时间 12:00 = **CEST 06:00** = **PDT 21:00 / 前一日 20:00 PST（取决于夏令时）**。操作含义: ① 每天严格 4 次，用不完浪费; ② Failed / Stopped 不计入额度; ③ 官方榜单刷新时间 ≈ **北京时间次日 15:00**（evaluation 成功 ≠ 已上榜）; ④ 不用"今天用完/留着明天"思维,**按日历日 plan**。
+- **⚠️ 时区处理（2026-05-05 晚补充 · 2026-05-07 重订）**：本项目涉及 **3~4 个时区** —— ① 训练/推理机器 log 时间 = **北京时间 UTC+8**（evaluation log 里 `2026-05-06 08:34:27` 是北京时间，不是 PDT 也不是 AOE）；② **评估 quota 重置 = 北京 12:00**（= CEST 06:00 = PDT 21:00 前一日）; ③ 用户当前时区 = **西班牙 CEST (UTC+2)** / 之前是 PDT (UTC-7)。**Agent 在看平台 log 时间时务必注意：几乎所有 evaluation / infer 日志的时间戳是北京时间**，换算到 CEST 减 6 小时（北京 12:00 → CEST 06:00）；换算到 PDT 减 15 小时（夏令时）。
 - 重要假设：官方原文仅明确提及 test dataset 有问题，但措辞含 "update the dataset"，重新下载时务必同时核对 train 数据是否也变更
 - **Ensemble 红线**（`docs/00-context/competition.md` line 77 官方禁令 + 4/3 官方 Q&A 例外）：❌ multi-seed / multi-encoder prediction averaging、stacking、blending、TTA 全部禁止；✅ MoE / Sparse-MoE 端到端联合训练**不算** ensemble；✅ multi-task multi-head（同 forward pass）不算；✅ hyperparameter search 取最强单 ckpt publish 不算；⚠️ SWA（Stochastic Weight Averaging）属灰色地带 → 用之前**必须**到赛事群发问澄清，不要假设
 
