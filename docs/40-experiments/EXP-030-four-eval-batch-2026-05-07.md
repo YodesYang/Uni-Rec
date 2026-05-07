@@ -200,3 +200,42 @@ LB 全分布（从高到低）:
 - icq-half E4 LB **0.846370** (half-train best, 原 SOTA)
 
 **观察**：half-train 的 E3/E4 是"甜蜜点"，避开 full train 的过拟合拐点。所有 gap=0 + seed=42 的 dev ≈ 0.868，E4 附近 best。
+
+---
+
+## 补遗 · 2026-05-07 晚 · Same-Config 重跑信号（用户机动启动）
+
+### 数据点：icq-half 重跑 seed=42（**gap=0 原 config 第 2 次训练**）
+
+| 指标 | 原版 (05-04) | 重跑 (05-07) | Δ |
+|---|---|---|---|
+| E1 dev | 0.864992 | 0.864992 | 0 (bit-equal!) |
+| E2 dev | 0.867557 | **0.867584** | +0.000027 |
+| E3 dev | 0.867965 | **0.868067** | +0.000102 |
+| E4 dev | **0.868619** | **0.868769** | **+0.000150** |
+| LogLoss E4 | 0.22336 | 0.22332 | −0.00004 |
+
+**Config 完全相同（`--seed 42`）**，两次训练的 E4 dev 差 **+0.000150**（E1 相同，E2/E3/E4 依次分叉）。
+
+### 含义
+
+1. **训练不是 bit-reproducible**：同 seed 重跑的 dev 轨迹 E1 相同但 E2 起分叉。可能源：data shuffle / dropout / sparse embedding parallel update / CUDA non-determinism。
+2. **之前 EXP-028 "SOTA = seed luck ±0.005" 需要修订**：±0.005 的 LB 散布包含**所有训练非确定性源**，不仅是 `--seed` 值本身。
+3. **Same-config 重跑等价于 "免费 multi-seed"**：想刷 SOTA，**重跑相同 config 5-10 次**和 **跑 5-10 个不同 seed** 的 LB 分布应该类似（前者零代码零风险，后者需要额外参数管理）。
+
+### 明天 Eval 优先级更新
+
+**第 1 quota 建议给这个重跑 ckpt**（dev 0.868769 是历史最高）:
+- LB 可能落在 [0.840, 0.848] 范围（历史 5 seed 分布）
+- 若 ≥ 0.848 → "same-config 重训能刷 SOTA" 成为**官方刷分策略**
+- 若 [0.843, 0.848) → 期望值附近
+- 若 < 0.840 → 训练非确定性极大，单 ckpt 不可信
+
+### 用户下一步计划
+明天有空闲 training slot 时，**再跑第 3 次 icq-half seed=42**（同 config）。3 个 same-config rerun 的 LB 组成 "再现性分布"，比跨 seed 分布信息量更纯粹。
+
+### Ckpt 位置
+```
+global_step63756.layer=2.head=4.hidden=64.auc=0.868769.best_model
+(05-07 20:36 训练完成, E4 best)
+```
