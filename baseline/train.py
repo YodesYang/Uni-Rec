@@ -429,6 +429,31 @@ def parse_args() -> argparse.Namespace:
                              'for 46 user fids @ emb_dim=64. Zero effect on group '
                              'tokenizer path (ns_tokenizer_type=group).')
 
+    parser.add_argument('--enable_torch_compile', action='store_true', default=False,
+                        help='T27: wrap the model with torch.compile on the train '
+                             'path only (evaluate/predict use the un-compiled raw '
+                             'model, mirroring DECEM Rank-1 post 2026-05-08). '
+                             'Uses mode="default" and suppresses dynamo errors to '
+                             'tolerate recompiles triggered by sparse embeddings / '
+                             'variable batch shape. No-op on CPU device. The saved '
+                             'model.pt contains raw-model state_dict, so '
+                             'checkpoints remain compatible with platform default '
+                             'infer.py.')
+    parser.add_argument('--enable_amp', action='store_true', default=False,
+                        help='T27: enable torch.autocast for the forward+loss of '
+                             'the training step. bfloat16 (default) avoids '
+                             'loss-scaling overhead and is numerically stable for '
+                             'BCE/Focal losses; fp16 goes through GradScaler. '
+                             'Reduces memory traffic ~40% on modern GPUs. '
+                             'Inference path is never autocast (stays fp32).')
+    parser.add_argument('--amp_dtype', type=str, default='bfloat16',
+                        choices=['bfloat16', 'float16'],
+                        help='T27: AMP precision. bfloat16 recommended for '
+                             'Ampere+ GPUs (A100/V100 partial support); float16 '
+                             'requires GradScaler but has wider hardware support. '
+                             'Only consulted when --enable_amp is set.')
+
+
     parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
                         help='Recency reweighting: give samples closer to the test period '
                              'higher training weight via weight=exp(alpha*norm_ts). '
@@ -700,6 +725,9 @@ def main() -> None:
         logloss_rebound_patience=args.logloss_rebound_patience,
         logloss_rebound_delta=args.logloss_rebound_delta,
         holdout_loader=holdout_loader,
+        enable_torch_compile=args.enable_torch_compile,
+        enable_amp=args.enable_amp,
+        amp_dtype=args.amp_dtype,
     )
 
     trainer.train()

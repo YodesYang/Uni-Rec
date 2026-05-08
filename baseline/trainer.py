@@ -69,8 +69,18 @@ class PCVRHyFormerRankingTrainer:
         logloss_rebound_patience: int = 0,
         logloss_rebound_delta: float = 0.0,
         holdout_loader: Optional[DataLoader] = None,
+        enable_torch_compile: bool = False,
+        enable_amp: bool = False,
+        amp_dtype: str = 'bfloat16',
     ) -> None:
         self.model: nn.Module = model
+        # ``_raw_model`` always points at the un-compiled instance. Used
+        # for evaluation / predict paths (DECEM 2026-05-08 explicitly
+        # recommends NOT compiling inference), for calls to
+        # ``reinit_high_cardinality_params`` / ``get_sparse_params``
+        # which rely on the original Python attributes, and for
+        # re-wrapping compile after sparse reinit.
+        self._raw_model: nn.Module = model
         self.train_loader: DataLoader = train_loader
         self.valid_loader: DataLoader = valid_loader
         # ADR-005 holdout loader. Evaluated end-of-epoch for a covariate-shift
@@ -113,6 +123,54 @@ class PCVRHyFormerRankingTrainer:
         self.num_epochs: int = num_epochs
         self.device: str = device
         self.save_dir: str = save_dir
+
+        # T27 · torch.compile + AMP (training-only).
+        # DECEM (Industrial Track Rank 1, LB 0.852181, small-book post
+        # 2026-05-08) states that torch.compile is a must on training
+        # and explicitly NOT applied to inference. AMP cuts memory
+        # traffic by ~40% on GPU; bfloat16 (default) avoids loss-scaling
+        # and is numerically stable for sparse-embedding lookups.
+        self.enable_torch_compile: bool = bool(enable_torch_compile)
+        self.enable_amp: bool = bool(enable_amp)
+        if amp_dtype not in ('bfloat16', 'float16'):
+            raise ValueError(
+                f"amp_dtype must be 'bfloat16' or 'float16', "
+                f"got {amp_dtype!r}")
+        self.amp_dtype: torch.dtype = (
+            torch.bfloat16 if amp_dtype == 'bfloat16' else torch.float16
+        )
+        # fp16 needs a loss scaler; bf16 does not.
+        self._amp_needs_scaler: bool = (self.amp_dtype == torch.float16)
+        self.amp_scaler: Optional["torch.amp.GradScaler"] = None
+        if self.enable_amp and self._amp_needs_scaler:
+            self.amp_scaler = torch.amp.GradScaler('cuda')
+        # Wrap model with torch.compile if requested. Sparse Embeddings
+        # + dynamic batch shape can trigger recompilations; keep the
+        # default 'default' mode (not 'reduce-overhead') so dynamo falls
+        # back gracefully. Suppress errors to prevent dynamo bugs from
+        # killing a run.
+        if self.enable_torch_compile:
+            if device.startswith('cuda'):
+                try:
+                    import torch._dynamo
+                    torch._dynamo.config.suppress_errors = True
+                except ImportError:
+                    pass
+                self.model = torch.compile(self._raw_model, mode='default')
+                logging.info(
+                    "[T27] torch.compile ENABLED (train-path only, "
+                    "mode='default', dynamo errors suppressed)")
+            else:
+                logging.warning(
+                    "[T27] torch.compile requested but device=%s is not "
+                    "cuda; leaving model uncompiled.", device)
+                self.enable_torch_compile = False
+        if self.enable_amp:
+            logging.info(
+                f"[T27] AMP ENABLED (dtype={amp_dtype}, "
+                f"scaler={'on' if self._amp_needs_scaler else 'off (bf16)'})"
+            )
+
         self.early_stopping: EarlyStopping = early_stopping
         self.loss_type: str = loss_type
         self.focal_alpha: float = focal_alpha
@@ -510,7 +568,7 @@ class PCVRHyFormerRankingTrainer:
         ckpt_dir = os.path.join(self.save_dir, dir_name)
         os.makedirs(ckpt_dir, exist_ok=True)
         if not skip_model_file:
-            torch.save(self.model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
+            torch.save(self._raw_model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
         self._write_sidecar_files(ckpt_dir)
         logging.info(f"Saved checkpoint to {ckpt_dir}/model.pt")
         return ckpt_dir
@@ -703,8 +761,8 @@ class PCVRHyFormerRankingTrainer:
                             for p in group['params']:
                                 if p.data_ptr() in self.sparse_optimizer.state:
                                     old_state[p.data_ptr()] = self.sparse_optimizer.state[p]
-                        reinit_ptrs = self.model.reinit_high_cardinality_params(self.reinit_cardinality_threshold)
-                        sparse_params = self.model.get_sparse_params()
+                        reinit_ptrs = self._raw_model.reinit_high_cardinality_params(self.reinit_cardinality_threshold)
+                        sparse_params = self._raw_model.get_sparse_params()
                         self.sparse_optimizer = torch.optim.Adagrad(
                             sparse_params, lr=self.sparse_lr,
                             weight_decay=self.sparse_weight_decay)
@@ -713,6 +771,9 @@ class PCVRHyFormerRankingTrainer:
                             if p.data_ptr() not in reinit_ptrs and p.data_ptr() in old_state:
                                 self.sparse_optimizer.state[p] = old_state[p.data_ptr()]
                                 restored += 1
+                        # T27 · re-compile after sparse params change.
+                        if self.enable_torch_compile:
+                            self.model = torch.compile(self._raw_model, mode='default')
                         logging.info(
                             f"[proxy-reinit] Triggered sparse reinit at "
                             f"max_train_steps={self.max_train_steps} "
@@ -770,8 +831,8 @@ class PCVRHyFormerRankingTrainer:
                         if p.data_ptr() in self.sparse_optimizer.state:
                             old_state[p.data_ptr()] = self.sparse_optimizer.state[p]
 
-                reinit_ptrs = self.model.reinit_high_cardinality_params(self.reinit_cardinality_threshold)
-                sparse_params = self.model.get_sparse_params()
+                reinit_ptrs = self._raw_model.reinit_high_cardinality_params(self.reinit_cardinality_threshold)
+                sparse_params = self._raw_model.get_sparse_params()
                 self.sparse_optimizer = torch.optim.Adagrad(
                     sparse_params, lr=self.sparse_lr, weight_decay=self.sparse_weight_decay
                 )
@@ -781,6 +842,9 @@ class PCVRHyFormerRankingTrainer:
                     if p.data_ptr() not in reinit_ptrs and p.data_ptr() in old_state:
                         self.sparse_optimizer.state[p] = old_state[p.data_ptr()]
                         restored += 1
+                # T27 · re-compile after sparse params change.
+                if self.enable_torch_compile:
+                    self.model = torch.compile(self._raw_model, mode='default')
                 logging.info(f"Rebuilt Adagrad optimizer after epoch {epoch}, "
                              f"restored optimizer state for {restored} low-cardinality params")
         else:
@@ -852,37 +916,85 @@ class PCVRHyFormerRankingTrainer:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, action_num)
 
-        if self.multi_task_loss:
-            if logits.ndim != 2 or logits.shape[1] < 2:
-                raise ValueError(
-                    "multi_task_loss requires model action_num >= 2")
-            click_label = device_batch.get('label_click', label).float()
-            click_logits = logits[:, 0]
-            conversion_logits = logits[:, -1]
-            click_loss = F.binary_cross_entropy_with_logits(
-                click_logits, click_label)
-            conversion_loss = self._binary_loss(
-                conversion_logits, label, sample_weight)
-            loss = (
-                self.click_loss_weight * click_loss
-                + self.conversion_loss_weight * conversion_loss
-            )
+        # T27 · optional AMP autocast for forward + loss. bfloat16 is
+        # numerically stable enough for CVR BCE loss and doesn't need a
+        # loss scaler. fp16 goes through GradScaler.
+        if self.enable_amp:
+            with torch.autocast(
+                'cuda' if self.device.startswith('cuda') else 'cpu',
+                dtype=self.amp_dtype,
+            ):
+                logits = self.model(model_input)
+
+                if self.multi_task_loss:
+                    if logits.ndim != 2 or logits.shape[1] < 2:
+                        raise ValueError(
+                            "multi_task_loss requires model action_num >= 2")
+                    click_label = device_batch.get('label_click', label).float()
+                    click_logits = logits[:, 0]
+                    conversion_logits = logits[:, -1]
+                    click_loss = F.binary_cross_entropy_with_logits(
+                        click_logits, click_label)
+                    conversion_loss = self._binary_loss(
+                        conversion_logits, label, sample_weight)
+                    loss = (
+                        self.click_loss_weight * click_loss
+                        + self.conversion_loss_weight * conversion_loss
+                    )
+                else:
+                    if logits.ndim == 2 and logits.shape[1] > 1:
+                        logits = logits[:, -1]
+                    else:
+                        logits = logits.squeeze(-1)
+                    loss = self._binary_loss(logits, label, sample_weight)
         else:
-            if logits.ndim == 2 and logits.shape[1] > 1:
-                logits = logits[:, -1]
-            else:
-                logits = logits.squeeze(-1)
-            loss = self._binary_loss(logits, label, sample_weight)
-        loss.backward()
-        # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
-        # with certain tensor shapes in this project.
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+            logits = self.model(model_input)  # (B, action_num)
 
-        self.dense_optimizer.step()
-        if self.sparse_optimizer is not None:
-            self.sparse_optimizer.step()
+            if self.multi_task_loss:
+                if logits.ndim != 2 or logits.shape[1] < 2:
+                    raise ValueError(
+                        "multi_task_loss requires model action_num >= 2")
+                click_label = device_batch.get('label_click', label).float()
+                click_logits = logits[:, 0]
+                conversion_logits = logits[:, -1]
+                click_loss = F.binary_cross_entropy_with_logits(
+                    click_logits, click_label)
+                conversion_loss = self._binary_loss(
+                    conversion_logits, label, sample_weight)
+                loss = (
+                    self.click_loss_weight * click_loss
+                    + self.conversion_loss_weight * conversion_loss
+                )
+            else:
+                if logits.ndim == 2 and logits.shape[1] > 1:
+                    logits = logits[:, -1]
+                else:
+                    logits = logits.squeeze(-1)
+                loss = self._binary_loss(logits, label, sample_weight)
+
+        # Backward + optimizer step. Loss-scaling only when fp16.
+        if self.amp_scaler is not None:
+            self.amp_scaler.scale(loss).backward()
+            self.amp_scaler.unscale_(self.dense_optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                self._raw_model.parameters(), max_norm=1.0, foreach=False)
+            self.amp_scaler.step(self.dense_optimizer)
+            if self.sparse_optimizer is not None:
+                # Sparse optimizer doesn't need scaler (no fp16 gradients
+                # on sparse embeddings), but we must step it only after
+                # scaler updates.
+                self.sparse_optimizer.step()
+            self.amp_scaler.update()
+        else:
+            loss.backward()
+            # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug
+            # observed with certain tensor shapes in this project.
+            torch.nn.utils.clip_grad_norm_(
+                self._raw_model.parameters(), max_norm=1.0, foreach=False)
+            self.dense_optimizer.step()
+            if self.sparse_optimizer is not None:
+                self.sparse_optimizer.step()
 
         return loss.item()
 
@@ -922,7 +1034,10 @@ class PCVRHyFormerRankingTrainer:
         run_slice_diag: bool,
     ) -> Tuple[float, float]:
         print(f"Start Evaluation (PCVRHyFormer) - {split_tag}")
-        self.model.eval()
+        # T27 · evaluation uses the un-compiled raw model. DECEM's
+        # post explicitly recommends NOT applying torch.compile to
+        # inference; evaluation is on the inference code path.
+        self._raw_model.eval()
 
         pbar = tqdm(enumerate(loader), total=len(loader))
 
@@ -1065,7 +1180,8 @@ class PCVRHyFormerRankingTrainer:
         label = device_batch['label']
 
         model_input = self._make_model_input(device_batch)
-        logits, _ = self.model.predict(model_input)  # (B, 1), (B, D)
+        # T27 · use raw (un-compiled) model for evaluation.
+        logits, _ = self._raw_model.predict(model_input)  # (B, 1), (B, D)
         if logits.ndim == 2 and logits.shape[1] > 1:
             logits = logits[:, -1]
         else:

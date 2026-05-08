@@ -3,36 +3,28 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH}"
 
 # ═══════════════════════════════════════════════════════════════════
-# Job: fafe-gap05-icq-halftrain-swiglu-vr005-bs128
+# Job: t27-compile-amp-proxy-smoke
 #
-# H2 · Feature-aware Feature Embedding (FaFE) in RankMixer NS
-# tokenizer. Each fid's raw embedding passes through a per-fid
-# LayerNorm+Linear(emb_dim, emb_dim) before chunked concatenation.
+# T27 · torch.compile + AMP bf16 platform smoke.
 #
-# Baseline: icq-half-gap05 (Dev 0.842443, LB 0.839223).
-# Change:   +--enable_fafe
+# Goal: verify on GPU that --enable_torch_compile + --enable_amp
+# (bf16) don't crash on a fast-proxy configuration before launching a
+# full training run. Target the exact ICQ+swiglu+time-split config
+# that holds our LB SOTA (0.84637), so we can compare step times
+# apples-to-apples against historical proxy runs.
 #
-# Rationale (Seed 主楼方案 2 + InterFormer CIKM 2025):
-#   * Default tokenizer shares chunk projection across all fids, so
-#     fid-specific structure can get diluted.
-#   * FaFE gives each fid a dedicated transform BEFORE concatenation,
-#     letting the model learn feature-specific representations.
-#   * InterFormer paper reports +0.14% AUC on same-distribution test.
-#     Per EDA EXP-029: model is known to overfit info-rich samples,
-#     so per-fid transform should help redistribute representation
-#     capacity.
+# Expected: same loss trajectory as non-AMP proxy (bf16 is numerically
+# equivalent to fp32 for BCE), step time drop of 1.5~2.5x on A100,
+# no OOM, no dynamo tracebacks, saved best_model can be loaded by
+# platform default infer.py (raw_model.state_dict() has no
+# _orig_mod. prefix -- verified in local smoke).
 #
-# Extra params: ~257k dense (60 fids × 4288 params per-fid-transform
-# for emb_dim=64). Training cost: +~3-5%.
+# If this passes: promote to a full 4~8 epoch training job with
+# --enable_torch_compile --enable_amp as the default acceleration
+# baseline going forward.
 #
-# Decision thresholds (ΔLB vs icq-half-gap05 LB 0.839223):
-#   ≥ +0.005  🎯 Real signal, FaFE Accept.
-#   +0.002..+0.005  Suspected, need multi-seed.
-#   -0.002..+0.002  Flat.
-#   < -0.002  Negative.
-#
-# ⚠️ Platform note: --enable_fafe is a PCVRHyFormer.__init__ kwarg.
-# Must upload baseline/infer.py so eval-time model is built the same.
+# Change vs icq-half-seed3-rerun-2: + --enable_torch_compile
+# + --enable_amp + fast-proxy limits (limit_train_rgs / max_train_steps).
 # ═══════════════════════════════════════════════════════════════════
 
 python3 -u "${SCRIPT_DIR}/train.py" \
@@ -48,12 +40,13 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --enable_time_of_day_features \
     --valid_split_strategy time \
     --valid_ratio 0.05 \
-    --valid_gap_ratio 0.05 \
-    --enable_row_valid_gap \
     --item_conditioned_query \
-    --enable_fafe \
-    --logloss_rebound_patience 2 \
-    --logloss_rebound_delta 0.0 \
+    --seed 42 \
     --batch_size 128 \
-    --num_epochs 4 \
+    --num_epochs 1 \
+    --limit_train_rgs 50 \
+    --max_train_steps 500 \
+    --enable_torch_compile \
+    --enable_amp \
+    --amp_dtype bfloat16 \
     "$@"
