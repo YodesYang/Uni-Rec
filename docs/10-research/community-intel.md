@@ -808,3 +808,66 @@ However, Round 1 uses a Delayed Feedback mechanism: some submission results wil
 | HSTU 2.0 全量 | Meta arXiv 2602.16986 | 训练 5×, 推理 21×, 业务 4~8% | 骨干级改造，本赛季时间不够 |
 
 **关键纪律提示**：上述数字是各自论文 / 生产环境的结果，在本赛题（post-click CVR、1.9M 行、test 远未来 valid→LB gap 0.023）的**转化率不可等比外推**。历史经验是 local AUC → LB AUC 约 **30~40% 转化率**（EXP-018 观测）。所以上表"本赛题适配预期"都按保守 30% 系数折算。
+
+---
+
+## 工业赛道 Rank 1 · DECEM 公开情报（2026-05-08 小红书抓取）
+
+> **来源**：小红书账号 `DECEM`（工业赛道当时榜一「撑鱼大队长」，定位四川），6 张截图用户手动搬运 · 2026-05-08 整理
+> **赛题身份**：Industrial Track · Rank 1 · Best Score **0.852181**（2026-05-06 18:47:59）/ 此前 0.851688（2026-05-05 11:38:44）
+> **本节纪律**: 外部自述可能夸大或略过负向实验；数字 / 方法论**只作方向性参考**，不作为本仓库决策依据。对口实验仍以 holdout AUC + LB 小样本校准为准。
+
+### 作者公开自述（汇总 · 按主题合并多帖）
+
+**背景**：
+- 第一次做推荐相关比赛。自 2021 年起做过 NLP、语音、CV、LLM、AI4S、AI+6G、3D 分割等多个方向。
+- TAAC 中期已做 **60+ 个实验**，实际 work（上分点）**约 6 个**。一直尽量做**单变量消融**，整个过程靠 **Claude Opus** 辅助。
+
+**分享的"work 了"的方向**（作者明确说 work 的）：
+1. **torch.compile + 混合精度加速训练**（见 Q&A 2）。作者明确说 "必须得做"，但**只加在训练，推理不加**。
+2. **时间特征**（作者原话："简单测了一些数据集，后续就是常规的时间特征，目前只 work 了两个"）。具体哪两个未公开。
+3. **Tokenization 设计的小修改**（作者原话："简单做了一些修复，让其更加合理化"）。具体未公开。
+4. **模型两块**：
+   - "一个是我在前期就做了的 **DIN + MLP**"（多次提到，用户多次追问"就是 global token 里序列 pool 改为 DIN 吗？"，作者未明确否认）。
+   - "还有一个那天晚上看的**一篇论文的方法**，这个大家就先不要问了"（明确保留）。
+
+**未 work 的方向**（作者明确说掉分 / 不涨分）：
+- **user_id / item_id 加入**：作者原话 "添加 user_id or item_id or scaling 都会掉分"（与 Seed 帖观测完全一致 → 再次证实 id OOV 过拟合是系统性问题）。
+- **Scaling up**（模型变大）：作者原话 "**scaling 不掉分，但也不涨分**"。暗示本赛题数据规模（1.9M）下模型参数量已饱和。
+- **序列长度**：作者原话 "还是 baseline 的，没变"（即没改 baseline 默认序列长度截断）。
+
+**Baseline 相关**：
+- 作者原话："大部分我认为都是面向 baseline 一些不够完善的地方去做小修小补，也没有做好 scaling。当前很多地方都是 baseline 原始的参数，序列长度没变，LR warmup 也没加"
+- 暗示：**榜一方案对 baseline 做的是"精修补丁"而非架构级重写**；与 Seed 帖主"主流 rankmixer/onetrans/hyformer/mixformer 改成 pure model 都掉分"相互印证 → **本赛题在 1.9M 数据规模下不支持架构级 scaling**。
+
+**对 seed 的观点**：
+- 作者原话："所以说大家的上分空间还是很大的，万一我只是找到了个好的 seed 呢"
+- 与本仓库 2026-05-06 EXP-028 观测（icq-half 5-seed 跨度 0.010、seed 上沿 0.846）**完全印证** → 榜一的 0.852181 里 **约 ±0.005 是 seed luck**，真实方法学峰值估算在 **0.847 左右**。
+
+**验证集分数**：
+- 作者原话："验证集 0.87+"
+- 同日本仓库 C6 `rowgap15-icq-halftrain` dev=0.838（gap=0.15 row-level） / EXP-030 `icq-half-gap05` dev=0.841（gap=0.05） / icq-half（无 gap）dev=0.868
+- **推测**：作者"验证集 0.87+"大概率是**无 row-level gap 的 baseline 切分**，与本仓库 `valid_split_strategy=time` 无 gap 的 dev 0.868 同量级 → **方法学绝对贡献约 +0.002~0.003 dev AUC，放大到 LB 约 +0.006~0.008**；比我们多出的 LB 差距（0.852 - 0.846 = 0.006）中约一半是方法学，一半是 seed。
+
+### 对口本仓库的路线决策启示
+
+| DECEM 线索 | 对口本仓库当前状态 | 决策启示 |
+|---|---|---|
+| DIN + MLP work | T16 ICQ additive 方向（query 侧 gate，非 target cross-attn）；DIN 未实现 | **优先实装 DIN-style target cross-attention（G1 原方案）**，把 item_pool 对全序列的完整 softmax attention 接入，位置可选：① NS token 侧生成 `interest_token`；② 序列 pool 替换 mean-pool |
+| 时间特征 work 2 个 | T12 时间特征已做（年月日 / 星期 / 小时 / 距离最近时间 / diff log bucket）；已包含可能的两个 | **当前 T12 已大概率覆盖**；不重投入 |
+| user_id / item_id scaling 掉分 | 本仓库 T21 idmask Δ−0.004 / T23 disable47 Δ−0.006 已知掉分 | **方向关闭确认**；不再做 id embedding 相关 ablation |
+| Scaling 不涨分 | 本仓库 T11/d_model=128 Δ gap +0.028 | **d_model=64 定锁**；不再试更大 |
+| torch.compile + AMP 训练加速 | 本仓库未做 | **优先级中等**：不提升 LB 但可加快迭代；若能让 half-train 从 5h → 3h，实验吞吐 +60%。**实装成本**：`model = torch.compile(model)` + `torch.amp.autocast('cuda')`，~20 行代码，但要小心 SDPA kernel 兼容性；**推理不加**（作者明确）|
+| Tokenization 小修改 work | 本仓库 RankMixerNSTokenizer / GroupNSTokenizer 已成熟 | **未知具体修改**，无可执行方向 |
+| seed 作用 ±0.005 | 本仓库 2026-05-06 已确认 | 已纳入 team-memory 铁律 |
+| "一篇论文的方法" 保留 | 未知 | 无法行动 |
+
+### 本次情报最重要的 3 条判决
+
+1. **G1 DIN target attention 方向从"候选"升级为"强优先"**：榜一公开承认 DIN + MLP 是 work 的，与 UniRec / 方案 1 推荐路线、外部论文数字锚全部一致。建议下一个 half-train 直接实装。
+2. **torch.compile + AMP 纳入工程优化队列**：ROI 不在 LB 而在迭代速度。半个月内若想多跑 2~3 批 ablation，训练加速是必要前置条件。建议作为独立小任务（T?? "train acceleration"）单独落地，不与 G1 混跑。
+3. **真实 LB 能力带修正**：榜一 0.852 - seed luck 0.005 ≈ **0.847** 作为方法学峰值。本仓库 SOTA 0.84637 距离方法学峰值只有 **~0.001**，意味着**单方向（如 G1 DIN）只能吃掉一半差距，真正拉开需要 G1 + 工程加速 + 再做 1~2 次方向级探索的组合拳**。
+
+### 原始快照位置
+
+`docs/99-raw/community-snapshots/xhs-decem-2026-05-08/` （6 张截图 + 本节文字整理），不走 `diff_with_previous.sh` 流程，手工管理。
