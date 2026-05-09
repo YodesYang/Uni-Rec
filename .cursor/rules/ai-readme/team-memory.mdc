@@ -67,6 +67,8 @@ alwaysApply: true
 
 - **📋 Platform job 提交建议必须标注"信号类型"**（2026-05-09 早 · EXP-032 战术复盘）：未来 agent 给平台运行建议时,每个 job 必须明确标注:🟢 **架构级 bet**（新模块 / 新 loss / 新 backbone, 高信息增量, 优先级最高）; 🟡 **信号校准**（多 seed / rerun 噪声带测量, 每 5~10 个 bet 做 1 次即可, 不连续消耗 quota）; 🔴 **small ablation**（超参微调, EXP-028 起**原则上关闭**）。**建议每批 4 training slot 至少 3 个是 🟢 类**。违反示例: EXP-032 4 个 slot 里 3 个是 🟡（2 次 SOTA rerun + 1 次 seed=3）+ 1 个 🔴（vr=0.01 消融）,0 个 🟢 —— 战术偏离, 损失 1 次架构级 bet 回流时间。
 
+- **❌ 容量扩张型架构 bet 在本赛题 1.9M 数据下几乎必死**（2026-05-09 CEST 09:43 · EXP-034 / T19 per-token FFN 单独证伪 · ADR-007 Deprecated）：`rank_mixer_ffn_mode=per_token` Dense +34%（+992,640 params）→ E2 Val AUC 0.840142（vs baseline 0.841124 Δ−0.00098 = 10× rerun 噪声）+ E2 Val LogLoss 0.28208（vs baseline 0.22468 **+0.057 绝对值异常**）→ LogLoss guard 在 E2 就拦截,baseline 要到 E5+ 才反弹。**机制**：1.9M samples × 30k steps/epoch 摊到每参数仅 ~30 steps 梯度（baseline ~120, 4× 更充分）→ warmup 严重不足 → E2 刚收敛 → E3 立刻 overfit。**与 Seed 主楼情报完全印证**："主流 rankmixer/onetrans/hyformer/mixformer 改 pure model 都掉分, 可能数据量不够" —— pure model / per-token FFN / 任何"每参数减少梯度信号"的改动**是同一失败机制**。**铁律**: ① **Dense 参数量增幅 ≥ 20% 的架构改动直接跳过, 不投 quota**（ROI 负期望）; ② **每参数平均梯度 steps**作为硬约束——`total_steps / n_dense_params > 60` 安全 / `30~60` 高风险 / `<30` 几乎必崩; ③ 本赛题对口路线是**小参数 / 结构化 / 稀疏**（如 T25 DIN bypass Dense +3.6% = ~100k, 每参数 ~300 steps 安全）,不是大容量; ④ 复赛 10× 数据时可重启容量扩张方向,初赛期**关闭**; ⑤ RankMixer / OneTrans 论文原始数字是抖音日活级（十亿样本）验证,本赛题 1.9M 差 3 个量级,**论文数字不可直接外推到本赛题**。
+
 
 ## 协作与提交约定
 

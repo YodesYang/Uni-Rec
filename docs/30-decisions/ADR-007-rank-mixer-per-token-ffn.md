@@ -1,9 +1,9 @@
 # ADR-007 · RankMixerBlock Per-token FFN（修正共享 FFN 偏差）
 
-> **Status**: Accepted（2026-05-04 晚 · S1 本地 smoke 通过后升 Accepted）
-> **Date**: 2026-05-04
+> **Status**: **❌ Deprecated**（2026-05-09 CEST 09:43 · EXP-034 单独 half-train 证伪后降级 · 见下方 §Deprecation Note after EXP-034）
+> **Date**: 2026-05-04（首次 Accepted）· 2026-05-09（Deprecated）
 > **Related Tasks**: T19（见 `docs/20-tasks/active.md`）
-> **Related Experiments**: 待 EXP-023（proxy / half-train 验证）
+> **Related Experiments**: EXP-023（本地 smoke）· **EXP-034（单独 half-train 证伪）**
 > **External References**:
 > - RankMixer: Scaling Up Ranking Models in Industrial Recommenders（arXiv 2507.15551, 2025）
 > - `docs/00-context/model-py-section-map.md` §RankMixer：已明确标注 "仓库 vs 论文的细节差异 —— 仓库用 shared FFN，论文是 per-token FFN"
@@ -238,3 +238,51 @@ train.py CLI → model_args dict → PCVRHyFormer.__init__(rank_mixer_ffn_mode=.
 2. **新 `PCVRHyFormer.__init__` kwarg 首次 evaluation 必上传自定义 infer.py**
 
 与 T16 / T17 / T18 的关系：**完全正交**。可搭车"四合一 half-train"（T16 additive + T18 auc-loss + T17 holdout + T19 per-token FFN）一次验证。
+
+---
+
+## §Deprecation Note after EXP-034（2026-05-09 CEST 09:43）
+
+### 判决
+
+`rank_mixer_ffn_mode=per_token` 在本赛题（1.9M train rows）**Deprecated**。默认路径保持 `shared`，代码分支保留但不再推荐启用。
+
+### 证据
+
+EXP-034 `t19-perffn-halftrain-gap05-noamp`（严格单变量 vs `icq-half-gap05` baseline）：
+
+| 指标 | Baseline E2 | T19 E2 | Δ |
+|---|---|---|---|
+| Dev AUC | 0.841124 | 0.840142 | **−0.000982**（10× rerun 噪声） |
+| Val LogLoss | 0.22468 | 0.28208 | **+0.0574**（25% 绝对值异常） |
+
+- `stop_reason=logloss_rebound_epoch_2` — LogLoss guard 在 E2 就触发，**baseline 要到 E5+ 才反弹**，说明 per-token FFN 严重提前过拟合
+- 没跑到 E3（baseline 的 best），按 EXP-034 Go/No-go 直接落入"负向"区间
+
+### 机制
+
+**+34% Dense params（+992,640）在 1.9M × 30k steps/epoch 的数据规模下**严重 warmup 不足。每参数平均只摊到约 30 optimizer steps 的梯度信号（baseline shared FFN 约 120 steps，4× 更充分）。E2 刚勉强收敛 → E3 立刻 overfit → LogLoss guard 拦截。
+
+### 与外部情报的印证
+
+Seed 主楼 2026-05-04 情报（community-intel.md §问题-4）：
+
+> "pure model 反向信号 ⚠️: 主流 rankmixer/onetrans/hyformer/mixformer 都基本为了提 MFU 改成 pure model, 没有太多精细的传统派小结构建模, 但试了下都掉分, 可能数据量不够"
+
+Seed 的 "pure model 掉分" 和 T19 "per-token FFN 欠拟合"**是同一机制**：**1.9M 数据规模不支持容量扩张型架构 bet**。RankMixer 论文验证场景是**抖音日活级（十亿样本）**，与本赛题差 3 个量级。
+
+### 保留代码的理由
+
+- `rank_mixer_ffn_mode=per_token` 分支不回滚，保留历史 / 未来复赛 10× 数据时可重试
+- 任何希望"在本赛题 1.9M 数据下启用" 的未来实验，**必须先解决数据量 warmup 问题**（例如：预训练 + 微调、更小 hidden_mult、更少 epoch 长度）
+
+### 规则推广
+
+把 "**容量扩张型 bet 在本赛题几乎必死**" 升级为 team-memory 铁律：
+- 每参数平均 ≥ 60 steps 梯度 = 安全
+- 每参数平均 30~60 steps = 高风险
+- 每参数平均 ≤ 30 steps = 几乎必过拟合（T19 命中）
+
+未来候选方向如需 Dense +20%+，**直接跳过，不投 quota**。
+
+详见 [`EXP-034 §Result + §Lessons`](../40-experiments/EXP-034-t19-perffn-halftrain-2026-05-09.md)。

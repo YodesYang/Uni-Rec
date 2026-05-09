@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-09 西班牙早 06:12（UTC+2 · T27 + T25 B + T19 三并发架构级 bet + EXP-032/033/034 全部落档）· 结论：① **三 slot 并发 🟢 架构级 bet**（严格遵守 EXP-032 新战术铁律"每批 4 slot ≥3 🟢"）：T27 compile+AMP（工程加速, running, 5/9 03:40 启动）+ T25 DIN bypass 方案 B（方法学 bet · running 待起动）+ T19 Per-token FFN（方法学 bet · running 待起动）。② **战略升级**：平台 LB ~20 人达 0.85，我方 SOTA 0.84637（均值 0.8424），差 Δ 0.008 能力均值。**路径 C（方法学叠加 + seed sweep 混合）**：今日三方向判决 → 5/10~5/11 choose best combo 做 4 seed sweep → **目标 5/11 触 0.85**。③ **判决阈值**（利用 EXP-032 铁律 ±0.0001 rerun 噪声 + EXP-030 gap=0.05 dev→LB gap +0.003 可信）：所有 bet 的 E3 Dev **≥ 0.847（+0.0046 = 10× 噪声）**判真信号, [0.8444, 0.847) 疑似, [0.8412, 0.8444) 持平 Deprecated。④ **T19 task 从 `[x]` 重启为 `[~]`**：偿还 2026-05-04 "四合一被污染未单独验证" 的 TODO,严格单变量 ablation。⑤ **并发 OOM 风险 20%**：T27 ~10GB（bf16）+ T25 B ~14GB + T19 ~17GB 同卡会 OOM,分卡则 OK；T19 应急 `--batch_size 96` 降到 ~13GB。⑥ **quota**：training 3 slot 用中（T27/T25 B/T19）/ 1 slot 空闲；evaluation 0 用 / 4 剩。⑦ **今日预计 11:00~14:00 三方向全部回流**,晚上择机 evaluation 或起 seed sweep。⑧ **本地 commit 5 个未 push**（待 T27 回流后统一 push）。
+**最近一次审视**：2026-05-09 西班牙早 09:43（UTC+2 · ⚠️ T19 首发回流 ❌ Deprecated · T27/T25 B 仍在跑 · keep_topk_ckpt 已实装）· 结论：① **T19 per-token FFN 单独证伪关闭**：`t19-perffn-halftrain-gap05-noamp` E2 触发 LogLoss guard 早停（`logloss_rebound_epoch_2`），E2 Dev AUC 0.840142 vs baseline 0.841124 Δ−0.00098（10× rerun 噪声）+ E2 Val LogLoss 0.28208 vs 0.22468 **Δ+0.057 绝对值异常**（结构性过拟合）。机制：+34% Dense params（+992,640）在 1.9M × 30k steps/epoch 摊到每参数 ~30 steps 梯度，warmup 严重不足。**与 Seed 主楼 "pure model 改造都掉分" 机制一致**（数据量不够）。ADR-007 降为 Deprecated; EXP-034 §Result+§Lessons 补档; team-memory 新增 1 条铁律"容量扩张 bet 必死"; 规则: Dense 增幅 ≥20% 直接跳过。② **keep_topk_ckpt 已实装**（commit 34823f4）：`--keep_topk_ckpt N` CLI + `*.topk_{rank}/` 目录 + summary topk 字段 + K=3/K=1 双路径 smoke 通过 → 明天起所有 half-train 默认带 `--keep_topk_ckpt 4`，**evaluation quota 4× 放大**。③ **T27 compile+AMP 超时**：启动 CEST 03:40 预期 3h 回流，现在 09:43 已跑 ~6h 仍未完成（远超 baseline ~5h）→ **compile+AMP 加速没达标**，可能 dynamo recompile 频繁 / 平台调度差卡 / 其他瓶颈，**ADR-008 判决倾向"部分 Go"或 No-go**，等日志确认。④ **T25 B 仍在跑**：预期 CEST 10:00~10:30 回流（比 T19 晚因 DIN 多 ~5% 计算）。**今天唯一剩下的方法学弹药**，如失败明早触 0.85 概率 <15%。⑤ **修订冲 0.85 概率**（相对 06:05）：明早 5/10 07:00 从 35~45% 降到 **25~35%**（T19 这条线归零）; 5/11 早从 60~70% 降到 **55~65%**（T25 + seed sweep 仍可行）。⑥ **quota 状态**: training 2/4 活跃（T27 + T25 B）/ 2 slot 空闲 / T19 slot 已释放; evaluation 0 用 / 4 剩; CEST 14:00 是今日 evaluation 截止（因 AOE 16:00 LB 更新窗口，超了要等 5/11 07:00 上榜）。⑦ **本地 7 commits 未 push**（T27 fix + EXP-032/033/034 + keep_topk_ckpt + T19 Deprecation）。
 
 ---
 
@@ -164,25 +164,19 @@
 
 ---
 
-### T19 `[~]` RankMixer Per-token FFN — 🔁 2026-05-09 重启（单独 half-train 首次验证）
+### T19 `[x]` RankMixer Per-token FFN — ❌ 2026-05-09 单独 half-train 证伪关闭（ΔDev E2 −0.0010 + E2 LogLoss guard 早停）
 
-**2026-05-09 重启背景**：EXP-030 后战略聚焦"架构级创新是唯一破局路径"，T19 作为 RankMixer 论文忠实度修正（shared → per-token FFN, anti-dominant feature 动机对口本赛题 item 长尾）是**对口 + 未消化**的架构级 bet。今天（5/9）与 T27 / T25 B 并发启动，**严格单变量 ablation**（不叠加 T25、T27）。
+**2026-05-09 CEST 09:43 终结**：`t19-perffn-halftrain-gap05-noamp` E2 触发 LogLoss guard 早停（`logloss_rebound_epoch_2`），best_epoch=E2 / Dev AUC **0.840142** vs baseline E2 0.841124 **Δ−0.000982**（10× rerun 噪声 ±0.0001, 确认真实负向）。E2 Val LogLoss **0.28208** vs baseline 0.22468 **Δ+0.0574**（25% 绝对值异常,结构性过拟合而非微调问题）。没跑到 E3 就崩掉,和 baseline E3 best AUC 0.842443 直接失去对比点,但**LogLoss guard E2 触发 = 方向失败的确定性信号**。
 
-**配置**：`icq-half-gap05` baseline + `--rank_mixer_ffn_mode per_token`（其他完全相同）。
+**机制**：+34% Dense params（+992,640）在 1.9M 训练样本 × 30k step/epoch 的规模下**严重欠拟合 warmup 慢 → E2 刚收敛 → E3 立刻 overfit**。每参数平均只摊到 ~30 step 梯度信号,远低于 baseline shared FFN 的 ~120 step。与 Seed 主楼 2026-05-04 情报 "主流 rankmixer/onetrans/hyformer/mixformer 改 pure model 都掉分, 可能数据量不够" **是同一机制** —— 容量扩张型架构 bet 在本赛题 1.9M 数据规模下系统性失败。
 
-**本地 smoke 通过**（2026-05-09 早 06:08）：Dense params 2.88M → 3.87M（**+34% = +992,640，与理论 `T=16 × (64×256 + 256×64) = 1.05M` 吻合**），train 5 steps AUC 0.749 无 crash。
+**2026-05-04 旧 Deprecation 回放**：T19 原搭配 T18 被污染关闭（四合一被 T18 BPR LB 崩盘带累,T19 独立收益未验证）。**5/9 本次偿还了 "单独验证" 的 TODO → 确认 T19 单独也 Deprecated**,关闭画上句号。
 
-**判决阈值**（E3 Dev AUC vs baseline 0.842443，利用 EXP-032 ±0.0001 rerun 噪声下界）：
-- ≥ 0.847（ΔDev ≥ +0.0046 = 10× rerun 噪声）→ 🎯 真信号，立即 evaluation
-- [0.8444, 0.847)（ΔDev ∈ [+0.002, +0.0046)）→ 🟡 疑似，seed=3 rerun 确认
-- [0.8412, 0.8444)（ΔDev ∈ [−0.0012, +0.002)）→ ⚪ 持平 / 饱和，Deprecated
-- < 0.8412 → ❌ 负向（+34% 容量在 1.9M 数据下过拟合）
+**代码保留不回滚**：`--rank_mixer_ffn_mode per_token` 分支仍在,默认 `shared` 不变。未来不再尝试 per-token + 小 hidden_mult 变种（机制判断是数据量约束, 调参救不回来）。
 
-**历史归档回放**（2026-05-04 晚 10）：T19 原搭配 T18 被污染关闭 —— 四合一 half-train E1 dev 0.861232 / E2 dev 0.862946，同期三合一 E1 dev 0.862036 / E2 dev 0.864589，T19 单独贡献 E1~E2 夹带 −0.0008~−0.0016 dev AUC warmup 代价；但因 T18 LB 崩盘无法 evaluation 验证。5/4 当时判定"T19 独立收益未验证，task 关闭"——**本次 5/9 就是偿还这条 TODO**。ADR-007 保留 Accepted，若本次判决 Deprecated 则追加 §Deprecation Note。
+**连锁启示 for T25 DIN**：T25 Dense +3.6%（~100k）远小于 T19 +34%, 参数量 vs 数据量比例**健康 10×**, **T19 失败不构成对 T25 的负面预警**。
 
-**风险**：Dense +34% 在 1.9M 数据下过拟合（概率 35%）；同卡与 T27/T25 并发 OOM（概率 20%，应急 `bs=96` 重提）；平台 default infer.py 不识别 `rank_mixer_ffn_mode` kwarg，**首次 evaluation 必须勾选"上传自定义 infer.py"**。
-
-详见 [`EXP-034`](../40-experiments/EXP-034-t19-perffn-halftrain-2026-05-09.md) + [`ADR-007`](../30-decisions/ADR-007-rank-mixer-per-token-ffn.md)。
+详见 [`EXP-034`](../40-experiments/EXP-034-t19-perffn-halftrain-2026-05-09.md) §Result + §Lessons · [`ADR-007`](../30-decisions/ADR-007-rank-mixer-per-token-ffn.md) §Deprecation Note。
 
 ---
 
@@ -428,6 +422,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-09 西班牙早 09:43（UTC+2 · ⚠️ T19 首发回流 ❌ Deprecated · keep_topk_ckpt 实装 · 冲 0.85 概率下调）**：① **T19 `t19-perffn-halftrain-gap05-noamp` 证伪关闭**: E2 Dev 0.840142（baseline 0.841124 Δ−0.00098 = 10× rerun 噪声）+ E2 Val LogLoss **0.28208**（baseline 0.22468 Δ+0.057 绝对值异常）→ LogLoss guard E2 触发早停（`logloss_rebound_epoch_2`），没跑到 baseline 的 E3 best 就崩。**机制**：+34% Dense params（+992,640）在 1.9M × 30k steps/epoch 摊到每参数 ~30 steps 梯度,warmup 严重不足 → E2 刚收敛 → E3 立刻 overfit。**与 Seed 主楼 "pure model 改造都掉分, 数据量不够" 完全印证**。**T19 task 从 `[~]` 改回 `[x]` Deprecated**; ADR-007 Status 降为 Deprecated 并补 §Deprecation Note; EXP-034 补 §Result+§Lessons; team-memory 新增铁律 "容量扩张 bet 必死 · Dense 增幅≥20% 直接跳过 · 每参数平均梯度 steps 硬约束 ≥60 安全/30~60 高风险/<30 必崩"。② **keep_topk_ckpt 实装完成**（commit 34823f4）: `--keep_topk_ckpt N` CLI + `*.topk_{rank}/` 目录（与 `.best_model/` 并存不冲突）+ 2 阶段 rename 避免冲突 + summary topk_checkpoints 字段; K=3/K=1 双路径 smoke 通过。**含义**：后续所有 half-train 默认 `--keep_topk_ckpt 4`, 单 job 产出 4 个候选 ckpt, **evaluation quota 4× 放大**, 大幅缓解"best AUC != best LB"（icq-full E6 vs half E4 教训）的 ckpt 选错风险。③ **T27 compile+AMP 慢于预期**: 启动 CEST 03:40 预期 3h 回流, 09:43 已跑 ~6h 仍未结束（远超 baseline ~5h）→ compile+AMP **加速未达标**, ADR-008 判决倾向"部分 Go"或 No-go, 等日志。④ **T25 B 仍在跑**, 预期 CEST 10:00~10:30 回流, **今日唯一剩下的方法学弹药**。⑤ **修订冲 0.85 概率**（相对 06:05）: 明早 5/10 07:00 从 35~45% 降到 **25~35%**（T19 归零）; 5/11 早从 60~70% 降到 **55~65%**（T25 + seed sweep 仍可行）。⑥ **战术启示**: 今日 4 slot 里 3 个是 🟢 方法学 bet（T27 / T25 B / T19）, T19 失败是 50%×50%×... 的概率事件, 符合 EXP-032 战术铁律"每批 ≥3 🟢" 方向正确, 不悔。⑦ **本地 7 commits 未 push**（待 T25 B 回流后统一 push）。
 
 - **2026-05-09 西班牙早 06:12（UTC+2 · 🎯 三路并发架构级 bet + 冲 0.85 战略 · 路径 C）**：平台 LB 约 20 人达 0.85+，我方 SOTA 0.84637（均值 0.8424）差 Δ 0.008 能力均值。采用**路径 C（方法学叠加 + seed sweep 混合）**：① 三路并发 🟢 架构级 bet 启动（严格遵守 EXP-032 战术铁律"每批 4 slot ≥3 🟢"）: T27 compile+AMP（工程加速 running, 03:40 启动）+ T25 DIN bypass 方案 B（方法学 bet）+ **T19 Per-token FFN**（方法学 bet · 本地 smoke Dense +34% = +992,640 已验证, EXP-034 落档）。② **T19 task 从 `[x]` 重启为 `[~]`**：偿还 2026-05-04 "四合一被污染未单独验证" TODO, 严格单变量 ablation, 不叠加 T25/T27。③ **统一判决阈值**（EXP-033/034）：E3 Dev ≥ 0.847（ΔDev ≥ +0.0046 = 10× EXP-032 rerun 噪声 ±0.0001）真信号; [0.8444, 0.847) 疑似; [0.8412, 0.8444) 持平 Deprecated; <0.8412 负向。④ **时间线预估**：今日 11:00~14:00 三方向 E3 Dev 回流 → 晚上择机 evaluation 或起 seed sweep → **5/11 早**（4 seed sweep + 1 次 LB 校准）**触 0.85 概率 60%**，悲观 5/13 早。⑤ **并发 OOM 风险 20%**：T27 ~10GB（bf16）+ T25 B ~14GB + T19 ~17GB 同卡绝对 OOM, 分卡则 OK; T19 应急 `--batch_size 96` 降到 ~13GB。⑥ **quota 使用**: training 3/4 满（T27 + T25 B + T19）/ 1 空闲; evaluation 4/4 全剩。⑦ **EXP-034 落档**（T19 实验计划, 对齐 EXP-031/033 结构，~260 行）。⑧ **本地 5 commits 未 push**，等今日三方向全部回流后统一 push。
 

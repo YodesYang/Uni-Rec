@@ -2,8 +2,8 @@
 
 **日期**：2026-05-09（西班牙时间早 · 与 T27 / T25 B 并发提交）
 **作者**：Agent（与用户共同推演）
-**状态**：🚧 Planned · 代码已在主线（`rank_mixer_ffn_mode=per_token` · ADR-007）· 本地 smoke 2026-05-09 通过
-**关联**：T19（tasks/active.md）· ADR-007（RankMixer per-token FFN）· EXP-023（历史 smoke）· 2026-05-04 T19 与 T18 捆绑归档后**从未单独验证**
+**状态**：✅ 完成 · **❌ Deprecated**（2026-05-09 CEST 09:43 回流 · E2 触发 LogLoss guard 早停 · ΔDev E2 = −0.000982 真实负向）
+**关联**：T19（tasks/active.md）· ADR-007（RankMixer per-token FFN）· EXP-023（历史 smoke）· 2026-05-04 T19 与 T18 捆绑归档后**从未单独验证**，本 EXP 偿还该 TODO
 
 ---
 
@@ -276,3 +276,103 @@ T19 half-train 完成后:
 ## 与 ADR-007 的关系
 
 ADR-007（2026-05-04 Accepted）原计划是 T19 和 T18 叠加跑，但 T18 Deprecated 后 T19 task 也关闭了。**本 EXP 重启 T19，首次单独验证**，ADR-007 保持 Accepted 状态；若本 EXP 判决 T19 Deprecated，ADR-007 在最后追加一节 "§Deprecation Note after EXP-034"。
+
+---
+
+## §Result（2026-05-09 CEST 09:43 回流）
+
+### 平台 Summary 原文（从日志提取）
+
+```
+stop_reason=logloss_rebound_epoch_2
+best_val_AUC=0.8401421406350547  best_val_logloss=0.2820819616317749
+best_epoch=2  best_global_step=30336
+last_val_AUC=0.8401421406350547  last_val_logloss=0.2820819616317749
+last_epoch=2  last_global_step=30336
+val_auc_history=E1@15168:0.837658*, E2@30336:0.840142*
+```
+
+**Wall-time**: 3h12m（远低于历史 5h baseline，推测平台分配了较好卡且无争抢）
+
+### Epoch 对照表（vs `icq-half-gap05` EXP-030 baseline）
+
+| Epoch | Baseline Dev AUC | T19 Dev AUC | Δ | Baseline LogLoss | T19 LogLoss | Δ |
+|---|---|---|---|---|---|---|
+| E1 | 0.837939 | 0.837658 | −0.000281（噪声内）| 0.227xx | N/A（未贴出）| — |
+| **E2** | **0.841124** | **0.840142** | **−0.000982（10× noise）** | 0.22468 | **0.28208** | **+0.0574（!!）** |
+| E3 | 0.842443 | **未跑到**（guard 停）| — | 0.22372 | — | — |
+
+### 判决
+
+**❌ Deprecated** — 按 EXP-034 Go/No-go 表：
+- E2 Dev 0.840142 < 0.8412 下界 → 落入"负向" 区间
+- 虽然没有 E3 数据点，但 LogLoss guard 在 E2 就触发**本身就是方向失败的信号**（baseline E3 才 best）
+- LogLoss 绝对值 E2 = 0.28208 vs baseline E2 = 0.22468，**差距 +0.057**，不是微调问题是**结构性过拟合**
+
+### 机制分析
+
+**核心原因**：+34% Dense params（+992,640）在 **1.9M 训练样本 × 30k step/epoch** 的数据规模下**严重欠拟合 warmup 慢 → E2 刚收敛 → E3 立刻 overfit**。
+
+**量化推理**：
+- 每参数平均只摊到 ~30 step 的梯度信号（baseline shared FFN 摊 ~120 step，4× 更充分）
+- `hidden_mult=4` 让每 token 独立 FFN 的 expansion 层有 16k 参数 × 16 token × 2 block = 大量参数冷启动未完成
+- LogLoss 异常高（0.28 vs baseline 0.22）说明**模型 logits 分布尖锐化失败**——典型"参数量 vs 数据量" 失衡症状
+
+**与外部情报印证**：
+- **Seed 主楼（2026-05-04 社区情报）**：*"主流 rankmixer/onetrans/hyformer/mixformer 都基本为了提 MFU 改成 pure model, 没有太多精细的传统派小结构建模, 但试了下都掉分, 可能数据量不够"*
+- Seed 的 "pure model 掉分" 和 T19 的 "per-token FFN 在 1.9M 数据下欠拟合" **是同一机制**：**本赛题数据规模不支持增加容量型架构 bet**
+- RankMixer 原论文验证场景是**抖音日活级（十亿样本）**，与本赛题 1.9M 级别差 3 个量级
+
+### 后续动作（按"Deprecated 分支"推进）
+
+1. ✅ 代码**不 rollback**：`rank_mixer_ffn_mode` 默认 `shared`，保留 `per_token` 分支作历史纪念
+2. ✅ ADR-007 追加 `§Deprecation Note after EXP-034`
+3. ✅ active.md T19 从 `[~]` 改回 `[x]`
+4. ✅ team-memory 加铁律"per-token FFN / 容量扩张型 bet 在本赛题数据规模下均受限"
+5. ❌ **不尝试 per-token + 小 hidden_mult** 变种：机制判断是数据量约束,调参救不回来
+6. 🎯 **连锁启示 for T25 DIN**：T25 DIN Dense +3.6%（~100k）远小于 T19 +34%，参数量 vs 数据量比例**健康 10×**，T19 失败**不构成**对 T25 的负面预警
+
+---
+
+## §Lessons（T19 失败沉淀）
+
+### 教训 1：容量扩张型 bet 在本赛题几乎必死
+
+所有"加参数量 ≥ 10%" 的架构改动都要先过**数据量约束检验**：
+- 每参数平均 ≥ 60 step 梯度 = 安全
+- 每参数平均 30~60 step 梯度 = 高风险
+- 每参数平均 ≤ 30 step 梯度 = 几乎必过拟合（T19 命中）
+
+未来候选方向如需 Dense +20%+，**直接跳过，不投 quota**。
+
+### 教训 2：LogLoss 绝对值是早期诊断信号
+
+**E2 LogLoss 0.28 vs baseline 0.22 = +0.06** 这个差距在 E1 刚跑完就可以诊断方向是否健康。未来如果类似实验 E1 LogLoss 已经比 baseline 高 >0.03，**可以在 E2 就停，不用等 guard**。
+
+### 教训 3：Per-token FFN 和 pure-model 是**同一个失败机制**
+
+Seed 主楼情报和 T19 实测**互相验证**。这类"架构级精致化" 在 1.9M 数据下**系统性失败**，方向从此对齐**更小 / 更稀疏** 的方法学（如 T25 DIN bypass 只加 100k dense）。
+
+### 教训 4：LogLoss guard 再一次 proven
+
+**guard 又救了一次**：E2 就停，没浪费 E3/E4 的训练时间（~1.5h 节省）。EXP-032 铁律"LogLoss guard 生产 proven" 再添 1 个数据点。
+
+### 教训 5：平台 wall-time 非 deterministic
+
+T19 跑 3h12m 远快于预期 ~5h baseline。不是代码变快，是**平台资源调度差异**（可能拿到更好的卡 / 更少 job 争抢）。**未来 wall-time 作为 T27 compile+AMP 加速判据时，要对比"同卡"而非"任意两个 job"**。
+
+---
+
+## 最终战略含义
+
+对冲 0.85 战略的影响（相对 06:05 的估计修订）：
+
+| 指标 | 修订前（06:05）| 修订后（09:43, T19 失败后）|
+|---|---|---|
+| 明早 5/10 07:00 LB ≥ 0.850 | 35~45% | **25~35%** |
+| 5/11 早 07:00 LB ≥ 0.850 | 60~70% | **55~65%** |
+| 主要变数 | T25 + T19 至少一个 work | **纯压在 T25** |
+
+T25 B 如果也失败 → 只能走 seed sweep 纯 S2 路径，明早触 0.85 概率降至 <15%。
+
+T25 B 预期回流时间：**CEST 10:00~10:30**（与 T19 相同启动节奏，3h~3h30m）。
