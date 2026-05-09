@@ -151,11 +151,10 @@ class PCVRHyFormerRankingTrainer:
         # killing a run.
         if self.enable_torch_compile:
             if device.startswith('cuda'):
-                try:
-                    import torch._dynamo
-                    torch._dynamo.config.suppress_errors = True
-                except ImportError:
-                    pass
+                dynamo_cfg = getattr(
+                    getattr(torch, '_dynamo', None), 'config', None)
+                if dynamo_cfg is not None:
+                    dynamo_cfg.suppress_errors = True
                 self.model = torch.compile(self._raw_model, mode='default')
                 logging.info(
                     "[T27] torch.compile ENABLED (train-path only, "
