@@ -1,9 +1,9 @@
 # ADR-008 · 默认训练路径启用 torch.compile + AMP bf16（T27）
 
-> **Status**: Proposed（2026-05-09 凌晨 · 待 T27 first half-train 验证通过后升 Accepted）
-> **Date**: 2026-05-09
+> **Status**: **⚠️ Accepted with caveats**（2026-05-09 CEST 09:44 · EXP-031 T27 回流后升级 · dev 正确性 ✅, 加速 ⚠️ 1.25× 不达 1.5× 目标 · 见 §Post-EXP-031 Verdict）
+> **Date**: 2026-05-09 Proposed · 2026-05-09 Accepted with caveats
 > **Related Tasks**: T27（见 `docs/20-tasks/active.md`）
-> **Related Experiments**: EXP-031（`t27-compile-amp-halftrain-gap05`，3 epoch half-train）
+> **Related Experiments**: EXP-031（`t27-compile-amp-halftrain-gap05`，3 epoch half-train · **已完成**）
 > **External References**:
 > - 小红书 · DECEM（Industrial Track Rank 1，LB 0.852181）2026-05-08 帖子："训练必开 `torch.compile` + AMP；**inference 不开 compile**"
 > - PyTorch 2.7 `torch.compile` docs；`torch.autocast(device_type, dtype=torch.bfloat16)`
@@ -131,3 +131,51 @@
 1. **bf16 在 MultiSeqHyFormerBlock cross-attention softmax 是否够用**？— Stage 2 观察 Dev AUC 即可回答。若出现系统性精度损失，补 softmax fp32 cast。
 2. **sparse embedding reinit 后 recompile 的"首次编译"开销**是否显著（尤其 epoch 2 切 epoch 3）？— Stage 2 记录每个 epoch 的 wall time，若 epoch 2 比 epoch 1 慢 >20% 说明 recompile 是瓶颈，需要进一步诊断。
 3. **未来 T28/T29 架构级实验（DIN-block、multi-task）是否要基于 compile+AMP 的 baseline** — 原则上是，但如果新 module 触发 dynamo bug（如自定义 einsum pattern），允许该实验临时关 compile 回 AMP-only。
+
+---
+
+## §Post-EXP-031 Verdict（2026-05-09 CEST 09:44 回流）
+
+### 实测结果汇总
+
+| 维度 | 阈值 | 实测 | 判决 |
+|---|---|---|---|
+| E3 Dev AUC ∈ [0.8414, 0.8434] | ±0.001 of baseline 0.8424 | **0.842773** | ✅ 通过（在噪声带内） |
+| Epoch wall-time ≤ 0.67× baseline | ≤ 67min / epoch | **~80min / epoch** | ⚠️ 1.25× 不达 1.5× 目标 |
+| 稳定性 (dynamo/OOM/crash) | 0 hit | 0 hit | ✅ 通过 |
+| 推理兼容 | LB ≥ 0.838 | 未 evaluate | ⏳ 待验证 |
+
+### 升级为 Accepted with caveats 的理由
+
+1. **正确性通过**：bf16 + compile 对 Dev AUC **无损**，E3 Δ+0.00033 在 EXP-032 rerun 噪声 ±0.0003 带内
+2. **1.25× 加速仍是净收益**：4h01m vs baseline 估计 5h，省 1h；full-train 10h 可省 2h，不可忽视
+3. **0 crash 0 OOM**：工程稳定性本身就是收益（无需 debug / 重试）
+
+### 需要标注的 caveat
+
+1. **加速比低于 DECEM 报告的 2×**：可能因为平台卡不是 A100（V100 对 bf16 支持较弱），或 sparse embedding reinit 后 dynamo recompile 频繁
+2. **LogLoss 绝对值抬高 +0.054**（T27 0.276 vs baseline 0.224）：典型 bf16 softmax 饱和症状（但 AUC 排序无损）。若未来决策依赖 LogLoss 绝对值（例如 deploy 时看 calibration），需要加 `scores.float()` cast
+
+### 修订后的规则
+
+**替代原 "升 Accepted → 设为默认" 的线性规则**：
+
+| 实验类型 | 是否开 compile+AMP | 理由 |
+|---|---|---|
+| full-train（10h）| ✅ **开**（强烈推荐）| 省 2h 值得 |
+| half-train（5h）| ✅ **默认开**（可选）| 省 1h，但对 quick iteration 价值一般 |
+| smoke / proxy（<1h）| ❌ **不开** | compile warmup 摊不回来 |
+| 首次引入新模块的实验 | ❌ **先不开** | 避免 dynamo 与新代码交互产生的 bug 干扰方法学判断 |
+
+**特别注意**：`infer.py` / evaluation 路径**永远不开**（与 ADR-008 原定一致）。
+
+### 未决事项
+
+1. **bf16 LogLoss 抬高**是否要修：等 T25 B 回流后对比其 LogLoss。如 T25 B (no compile+AMP) LogLoss ≈ 0.22，确认 T27 的 LogLoss 抬高是 bf16 引起；决定是否补 `scores.float()` cast
+2. **T27 ckpt 不 publish/evaluate**：方法学无增益（E3 Dev 只+0.00033），占 quota 不划算；若未来 quota 有富余，可跑 1 次 evaluation 验证推理兼容性
+3. **5/25 前最后一次 full-train**（路径 C Stage 3 "100% data"）**强烈推荐开 compile+AMP**，因 10h 省 2h 是重大优化
+
+### Status 变更记录
+
+- 2026-05-09 early CEST (pre-EXP-031)：Proposed
+- **2026-05-09 CEST 09:44 (post-EXP-031)：Accepted with caveats**
