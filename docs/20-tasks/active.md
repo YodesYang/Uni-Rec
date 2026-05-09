@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-07 西班牙早 09:40（UTC+2 · 🔥 4 eval 结果回流 · SOTA 确认是 seed 上沿 · Gap=0.05 funnel 实测成功 · F1 hash 关闭 · G1 DIN 启动）· 结论：① **4 evaluation 结果**: `icq-half-gap05` LB **0.839223** (dev→LB gap +0.0032) / `hash100k-gap05` LB **0.838417** (gap +0.0020) / `icq_seed3` LB **0.845329** (第 2 高!) / `icq_seed7` LB **0.836413** (最低)。② **Seed 噪声确认 ±0.005**：5 seed (42/2/3/7 + gap05 重跑) LB 跨度 0.010, 均值 **0.8424**, SOTA 0.84637 几乎是 seed 上沿, **Dev/LB 在 seed 维度几乎独立** (seed=7 dev 最高 LB 最低, seed=3 dev 最低 LB 第 2 高)。③ **Gap=0.05 funnel 实测 dev→LB gap = +0.002~+0.003** (vs gap=0 的 +0.022~+0.032, **小 10×**!) → **dev 变成极可信 LB 代理**，未来方向级 ablation 不花 eval quota 就能筛方向，**实验迭代 10× 加速**。④ **F1 hash100k 关闭** (ΔLB vs 新基线 −0.0008, 在噪声内) → 不再试 hash50k/25k。⑤ **真实能力带修订**: [0.836, 0.846] 跨度 0.010, SOTA 不是天花板而是运气上沿 → **破 SOTA 新阈值 = "方法学使均值从 0.8424 提升 0.005+"** (即 LB ≥ 0.8474)。⑥ **T25 G1 DIN 启动**: Seed 主楼方案 2 "fafe+din" 对口, hard attention vs T16 additive (soft) 机制完全不同, ~80 行 model.py。⑦ **今天计划**: 文档落档(正在做) + DIN 代码 + smoke + 启 job。⑧ **quota**: 4 eval 全用, **今日剩 0**, training 4 slot 全空闲。
+**最近一次审视**：2026-05-09 西班牙早 05:55（UTC+2 · T27 平台启动成功 + T25 代码就位 + EXP-032 seed rerun 噪声固化）· 结论：① **T27 `t27-compile-amp-halftrain-gap05` 已在平台运行中**（commit `38d6ea2` trainer.py bug 修复版，预期 ~3h 回流），**UnboundLocalError 已修复**（函数内 `import torch._dynamo` 污染作用域，改用 `getattr(torch, '_dynamo', None)`）。② **EXP-032 落档**（2026-05-08 晚 4 个 rerun half-train batch 分析）：3 条新铁律 = 同 seed rerun dev 噪声 ±0.0001 / vr<0.05 方向关闭 / LogLoss guard 生产触发 proven（Job 3 seed=3 E4）；**team-memory 新增 5 条铁律**（含 Python import local-scope 工程陷阱 + 战术铁律"每批 4 slot 至少 3 🟢 架构级"）。③ **T25 G1 DIN 代码全部就位**：`DINInterestExtractor` bypass 版 + `--enable_din_interest` CLI + infer 兼容；本地 smoke 4/4 通过（train 5 steps / config 落盘 / infer 1000 predictions / Dense +104,896 符合理论）；**EXP-033 实验计划落档**，2 个 run.sh 版本（A=叠加 T27, B=fallback 纯 DIN）准备好，等 T27 判决后选其一立即启动。④ **新判决阈值**（利用 EXP-032 铁律 ①）：T25 E3 Dev **≥ 0.847 = 真信号（10× rerun 噪声）**，[0.8444, 0.847) 疑似，[0.8412, 0.8444) 持平 Deprecated，<0.8412 负向。⑤ **quota 状态**：training 4 slot（T27 在跑 1 / 空 3，T25 待启动占 1 → 剩 2 slot 可留给 T19 Per-token FFN 或 T28 DIN block-integrated 跟进）；evaluation 4 slot（今日未用）。⑥ **战略聚焦**：按 EXP-032 铁律，后续每批 4 slot 至少 3 个是 🟢 架构级 bet，拒绝 small ablation。
 
 ---
 
@@ -274,7 +274,7 @@
 
 **结论**：F1 方向无 LB 信号。hash 从 500k 降到 100k 的效果: Dev 降 0.002 (容量变紧), LB 几乎不变。**不再试 hash50k/25k**。
 
-### T25 `[~]` G1 DIN Target Attention（下一批唯一方向）
+### T25 `[~]` G1 DIN Target Attention（代码已就位 · 待 T27 判决后启动）
 
 **触发**：EXP-030 显示 small ablation / hash 调整全部持平，**架构级创新是唯一破局路径**。DIN 是 Seed 主楼方案 2 "fafe+din" 中对口最好的方向。
 
@@ -282,22 +282,29 @@
 - T16 additive: target_embed **加性注入** seq 每个 token（soft, 低表达力）—— 已在 full train 证伪
 - G1 DIN: target_embed **作 query 对 seq cross-attention**（hard attention, 高表达力）—— **完全不同机制**
 
-**实施**：
-- `DINInterestExtractor` 模块 in `model.py`（~80 行）
-- Target item embedding 从 `item_int_feats` 聚合
-- 对 4 条 seq 分别 cross-attention 生成 `interest_token`
-- 拼入 NS tokens
-- CLI: `--enable_din_interest`
+**实施**（已完成 · 2026-05-09 早）:
+- ✅ `DINInterestExtractor` 模块 in `baseline/model.py:563-666`（4 × CrossAttention per domain + merge Linear, ~100 行）
+- ✅ `PCVRHyFormer._apply_din_interest_bypass` in `baseline/model.py:2677-2703`（bypass 接到 classifier 前）
+- ✅ CLI `--enable_din_interest` in `baseline/train.py:413`
+- ✅ `baseline/infer.py` 读取 `cfg['enable_din_interest']`，自定义 infer.py 兼容
+- ✅ 本地 smoke 4/4 通过（`py_compile`, train 5 steps, train_config 落盘, infer 1000 predictions）—— 详见 `EXP-033` §本地 smoke
+- ✅ 参数量增量实测 **Dense +104,896（+3.6%）**，与理论估算一致
+- ✅ EXP-033 实验计划 + 2 个 run.sh 版本（A=叠加 T27, B=fallback 纯 DIN）已落档
 
-**训练 config**：`--valid_gap_ratio 0.05 --enable_row_valid_gap`（新默认）
+**训练 config**：`--valid_gap_ratio 0.05 --enable_row_valid_gap`（新默认 · EXP-030）
 
-**判决阈值**（ΔLB vs icq-half-gap05 0.839223）:
-- ≥ +0.005 → 🎯 真信号（超 seed 噪声），DIN Accept
-- ∈ [+0.002, +0.005) → 疑似正向，多 seed 验证
-- ∈ [−0.002, +0.002) → 持平，无信号
-- < −0.002 → 负向
+**判决阈值**（E3 Dev AUC vs `icq-half-gap05` E3 baseline 0.842443 · 在 gap=0.05 可信 dev 下）:
+- ≥ 0.847（ΔDev ≥ +0.0046 = **10× seed rerun 噪声 ±0.0001**）→ 🎯 强信号，立即 evaluation
+- [0.8444, 0.847) → 🟡 疑似，先 seed=3 rerun
+- [0.8412, 0.8444) → ⚪ 持平 / 噪声内，Deprecated
+- < 0.8412 → ❌ 负向，关闭
 
-详见 [`EXP-029`](../40-experiments/EXP-029-eda-report-2026-05-05.md)。
+**下一步**（等 T27 EXP-031 回流）:
+- 若 T27 Go（bf16 dev 无损 + ≥1.5× 加速）→ 用 EXP-033 方案 A（T25 + compile+AMP 叠加）
+- 若 T27 No-go → 用 EXP-033 方案 B（纯 DIN, 无 compile/AMP）
+- 首次 evaluation 必须勾选"上传自定义 infer.py"（`enable_din_interest` 是新 kwarg，team-memory 铁律）
+
+详见 [`EXP-029`](../40-experiments/EXP-029-eda-report-2026-05-05.md) + [`EXP-033`](../40-experiments/EXP-033-t25-din-halftrain-2026-05-09.md)。
 
 ---
 
@@ -407,6 +414,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-09 西班牙早 05:55（UTC+2 · T27 平台启动成功 + T25 代码就位 + EXP-032 落档 + 5 条新铁律）**：① **T27 修复**: 平台首次启动报 `UnboundLocalError: local variable 'torch' referenced before assignment`，根因 `baseline/trainer.py::__init__` 内 `try: import torch._dynamo` 让 Python 把整个函数作用域的 `torch` 标为 local。改用 `getattr(torch, '_dynamo', None)` 访问子模块（commit `38d6ea2`）。T27 `t27-compile-amp-halftrain-gap05` 已在平台运行中，预期 ~3h 回流。② **EXP-032 落档**（昨晚 4 个 half-train rerun batch · 25 GPU-hour）：3 次 seed=42 同 config rerun dev 跨度 **0.000143** → 同 rerun 噪声 ±0.0001（跨 seed 噪声 ±0.005 的 50× 小）; Job 2 `valid_ratio=0.01` 消融 E4 dev 0.865913 Δ−0.003 → 方向关闭; Job 3 seed=3 E4 LogLoss 0.22473 反弹 → LogLoss guard **首次生产触发**, best_model=E3 AUC-selected。③ **team-memory 新增 5 条铁律**: (a) Python 函数内 `import X.submod` 陷阱（工程）; (b) rerun 噪声 ±0.0001 下界（判决阈值）; (c) vr<0.05 方向关闭; (d) LogLoss guard proven; (e) platform job 建议必须标注 🟢 架构级 / 🟡 信号校准 / 🔴 small ablation, 每批 4 slot ≥3 🟢。④ **T25 G1 DIN 代码就位**: `DINInterestExtractor` (bypass 版, 4×CrossAttn + merge, `model.py:563-666`) + `enable_din_interest` CLI + infer.py 兼容; 本地 smoke 4/4 通过（train 5 steps loss 0.62→0.32 / train_config 正确落盘 / infer 1000 predictions / Dense 参数 +104,896 符合理论）; **EXP-033 实验计划落档**, 2 个 run.sh (A=叠加 T27 推荐, B=fallback) 准备好。⑤ **T25 判决阈值**（利用 EXP-032 铁律 ①）：E3 Dev ≥ 0.847（ΔDev ≥ +0.0046 = 10× rerun 噪声）真信号立即 eval; [0.8444, 0.847) 疑似; [0.8412, 0.8444) 持平 Deprecated; <0.8412 负向。⑥ **战术偏离复盘**（EXP-032 战略章节）: 昨晚 4 slot 全是 🟡/🔴 类（2 次 SOTA rerun + seed=3 + vr 消融），0 个 🟢 类 → 损失 1 次架构级 bet 回流时间; 未来必须严格按 ≥3 🟢 配比。⑦ **quota**: training 1 用（T27）/ 3 空闲（T25 待启动占 1 后剩 2）; evaluation 0 用 / 4 剩。
 
 - **2026-05-07 西班牙早 09:40 (UTC+2) / PDT 00:40（🔥 4 evaluation 回流 · SOTA 确认 seed luck 上沿 · Gap=0.05 funnel 实测成功 · F1 关闭 · T25 DIN 启动）**：**LB 数据**: `icq-half-gap05` **0.839223** / `hash100k-gap05` **0.838417** / `icq_seed3` **0.845329** (第 2 高！) / `icq_seed7` **0.836413** (最低)。**3 大发现**: (1) **Seed 噪声 ±0.005**（5 seed LB 跨度 0.010, 均值 0.8424, SOTA 是上沿）, **Dev 与 LB 在 seed 维度几乎独立** (seed=7 dev 最高 LB 最低, seed=3 反向), 实锤 "SOTA = seed luck" 假说; (2) **Gap=0.05 dev→LB gap 实测 +0.002~+0.003**(vs gap=0 的 +0.022~+0.032, 小 **10×**) → **dev 变极可信 LB 代理**, 精度 ±0.003, 未来方向级 ablation 不花 eval quota 就能筛方向; (3) **F1 hash100k 持平 (ΔLB −0.0008 在噪声内), 不再追 hash 激进方向**。**战略级转折**: (a) **真实能力带 [0.836, 0.846]**, SOTA 不是天花板而是 seed 上沿运气; (b) **破 SOTA 新阈值**: 不是 "单点 LB ≥ 0.849", 而是 "方法学使能力均值 0.8424 提升 0.005+" (即 **LB ≥ 0.8474 等价能力提升**); (c) **实验迭代 10× 加速**: 5h half-train + gap=0.05 看 dev 直接判决, 不用 eval quota; (d) 下一批唯一方向 = **G1 DIN target attention** (Seed 主楼方案 2 对口, hard attention 与 T16 additive 机制完全不同, ~80 行 model.py)。**T24 F1 归档** (持平关闭), **T25 G1 新建** (DIN)。**EXP-030 落档** 4 eval 完整分析 + 5 seed LB 分布图 + 判决阈值矩阵。**当日 quota**: evaluation 4 全用 (剩 0); training 4 slot 空闲, G1 DIN 代码完成后立刻启动。**注**: 用户今日下午/晚西班牙当地时间有空, Agent 文档 + 代码 + smoke 今日全部完成。
 
