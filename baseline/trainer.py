@@ -72,6 +72,7 @@ class PCVRHyFormerRankingTrainer:
         enable_torch_compile: bool = False,
         enable_amp: bool = False,
         amp_dtype: str = 'bfloat16',
+        keep_topk_ckpt: int = 1,
     ) -> None:
         self.model: nn.Module = model
         # ``_raw_model`` always points at the un-compiled instance. Used
@@ -209,6 +210,22 @@ class PCVRHyFormerRankingTrainer:
         self.last_val_auc: Optional[float] = None
         self.last_val_logloss: Optional[float] = None
 
+        # ── keep_topk_ckpt (2026-05-09 · EXP-024 Method P2 + 冲 0.85 战略) ──
+        # Retain up to K checkpoints ranked by val_auc (descending). The
+        # global best is still tracked via ``best_checkpoint_dir`` and
+        # lives in a ``*.best_model`` directory (platform Publish
+        # requirement). Runners-up live in ``*.topk_{rank}`` dirs and are
+        # renamed on every update so the filesystem mirrors the current
+        # ranking exactly. Rationale: icq-full E6 LB 0.8436 < icq-half E4
+        # LB 0.84637 showed that "best AUC" is not always "best LB";
+        # keeping top-K lets us send every plausible ckpt to evaluation
+        # rather than committing to the AUC argmax. Default 1 = current
+        # behavior, fully backward-compat.
+        self.keep_topk_ckpt: int = max(1, int(keep_topk_ckpt))
+        # List of (val_auc, val_logloss, global_step, ckpt_dir). Kept
+        # sorted by val_auc DESCENDING. Length <= keep_topk_ckpt.
+        self._topk_ckpts: list[tuple[float, float, int, str]] = []
+
         # LogLoss rebound co-monitor (complements AUC-based EarlyStopping).
         # Motivation (2026-05-04 t13tf-loss-full LB incident): AUC-only ES
         # keeps training past the point where LogLoss starts rebounding,
@@ -317,6 +334,12 @@ class PCVRHyFormerRankingTrainer:
         self._check_logloss_rebound_guard(
             epoch=epoch, total_step=total_step, val_logloss=val_logloss)
 
+        # Top-K ring maintenance (2026-05-09). No-op when keep_topk_ckpt==1.
+        # Runs on every validation regardless of whether this is a new best,
+        # so that e.g. E3 best + E4 drop both get a chance to enter the
+        # ring when K>=2 (covers the icq-full E6 vs E4 LB-inversion case).
+        self._maintain_topk_ckpts(total_step, val_auc, val_logloss)
+
     def _check_logloss_rebound_guard(
         self,
         epoch: int,
@@ -406,6 +429,18 @@ class PCVRHyFormerRankingTrainer:
             "logloss_rebound_counter": self._logloss_rebound_counter,
             "best_logloss_for_guard": self._best_logloss_for_guard,
             "validation_history": self.validation_history,
+            "keep_topk_ckpt": self.keep_topk_ckpt,
+            "topk_checkpoints": [
+                {
+                    "rank": rank,
+                    "val_auc": auc,
+                    "val_logloss": ll,
+                    "global_step": step,
+                    "ckpt_dir": ckpt_dir,
+                }
+                for rank, (auc, ll, step, ckpt_dir) in enumerate(
+                    self._topk_ckpts, start=1)
+            ],
             "key_train_config": {},
         }
         if self.train_config:
@@ -454,6 +489,15 @@ class PCVRHyFormerRankingTrainer:
                 for r in self.validation_history
             )
             logging.info(f"[summary] val_auc_history={compact}")
+        if self.keep_topk_ckpt > 1 and self._topk_ckpts:
+            topk_compact = ", ".join(
+                f"rank{rank}@step{step}:auc={auc:.6f}"
+                for rank, (auc, _, step, _) in enumerate(
+                    self._topk_ckpts, start=1)
+            )
+            logging.info(
+                f"[summary] topk_ckpts (K={self.keep_topk_ckpt}): "
+                f"{topk_compact}")
         logging.info("[summary] ===== End Training Summary =====")
 
         out_paths = [os.path.join(self.save_dir, "training_summary.json")]
@@ -580,6 +624,143 @@ class PCVRHyFormerRankingTrainer:
         for old_dir in glob.glob(pattern):
             shutil.rmtree(old_dir)
             logging.info(f"Removed old best_model dir: {old_dir}")
+
+    def _build_topk_dir_name(
+        self,
+        global_step: int,
+        rank: int,
+        val_auc: float,
+    ) -> str:
+        """Build a ``*.topk_{rank}`` checkpoint sub-directory name.
+
+        Format mirrors ``_build_step_dir_name`` but terminates with
+        ``.topk_{rank}`` instead of ``.best_model``. The ``.auc=``
+        fragment is always included so platform inspection / offline
+        selection can read the validation score straight from the name.
+        """
+        parts = [f"global_step{global_step}"]
+        for key in ("layer", "head", "hidden"):
+            if key in self.ckpt_params:
+                parts.append(f"{key}={self.ckpt_params[key]}")
+        parts.append(f"auc={val_auc:.6f}")
+        return ".".join(parts) + f".topk_{rank}"
+
+    def _maintain_topk_ckpts(
+        self,
+        global_step: int,
+        val_auc: float,
+        val_logloss: float,
+    ) -> None:
+        """Maintain the Top-K (by val_auc DESC) checkpoint ring.
+
+        Called once per validation event. No-op when ``keep_topk_ckpt
+        == 1`` (the default, backward-compat path: global best is
+        already handled by ``_handle_validation_result``).
+
+        Behavior for K > 1:
+          1. Decide whether this ckpt qualifies for the current Top-K.
+             It does if either the ring is not yet full (<K entries) or
+             this ``val_auc`` > current worst retained score.
+          2. If qualifies:
+             a. Materialize a snapshot of the current model into a
+                temporary ``*.topk_pending`` directory (we don't yet
+                know its final rank).
+             b. Insert (val_auc, logloss, step, temp_dir) into
+                ``self._topk_ckpts``, re-sort by val_auc DESC, then
+                truncate to K. If the incoming entry is evicted (can
+                happen if tie on AUC pushes it out), its temp dir is
+                deleted.
+             c. Rename all surviving entries to ``*.topk_{rank}``
+                according to their new rank.
+             d. Delete any stale ``*.topk_*`` directories on disk that
+                don't correspond to a current top-K entry (cleanup).
+          3. If not qualifies: no-op.
+
+        This is SEPARATE from the ``*.best_model`` path maintained by
+        ``_handle_validation_result``. The global-best ckpt has its own
+        directory and is not counted among the top-K siblings — so if
+        K=3, disk will carry at most 1 ``best_model`` + 3 ``topk_N``
+        dirs = 4 checkpoint directories (but global-best often matches
+        top-1 so the distinct model files typically total 3 for K=3).
+        """
+        if self.keep_topk_ckpt <= 1:
+            return
+
+        # Decide qualification using val_auc.
+        ring_full = len(self._topk_ckpts) >= self.keep_topk_ckpt
+        if ring_full:
+            current_worst = min(self._topk_ckpts, key=lambda e: e[0])[0]
+            if val_auc <= current_worst:
+                return
+
+        # Step a: write the snapshot. Use a unique temp name keyed by step
+        # to avoid collisions if two validations trigger back-to-back.
+        tmp_name = f"global_step{global_step}.topk_pending"
+        tmp_dir = os.path.join(self.save_dir, tmp_name)
+        os.makedirs(tmp_dir, exist_ok=True)
+        torch.save(
+            self._raw_model.state_dict(), os.path.join(tmp_dir, "model.pt"))
+        self._write_sidecar_files(tmp_dir)
+
+        # Step b: insert + re-sort + truncate + evict.
+        self._topk_ckpts.append((val_auc, val_logloss, global_step, tmp_dir))
+        self._topk_ckpts.sort(key=lambda e: (-e[0], e[2]))  # AUC DESC, step ASC tie-break
+        if len(self._topk_ckpts) > self.keep_topk_ckpt:
+            evicted = self._topk_ckpts[self.keep_topk_ckpt:]
+            self._topk_ckpts = self._topk_ckpts[:self.keep_topk_ckpt]
+            for _, _, _, evicted_dir in evicted:
+                if os.path.isdir(evicted_dir):
+                    shutil.rmtree(evicted_dir)
+                    logging.info(
+                        f"[topk] evicted lower-ranked ckpt: {evicted_dir}")
+
+        # Step c: rename survivors to final *.topk_{rank} names. Two-phase
+        # rename via intermediate .topk_renaming suffix to avoid collisions
+        # when a new ckpt inherits an existing rank's directory name.
+        staging: list[tuple[int, float, float, int, str]] = []  # (rank, auc, ll, step, staged_dir)
+        for rank, (auc, ll, step, cur_dir) in enumerate(self._topk_ckpts, start=1):
+            final_name = self._build_topk_dir_name(step, rank, auc)
+            final_dir = os.path.join(self.save_dir, final_name)
+            if cur_dir == final_dir:
+                staging.append((rank, auc, ll, step, cur_dir))
+                continue
+            staged_name = f"{final_name}.renaming"
+            staged_dir = os.path.join(self.save_dir, staged_name)
+            if os.path.isdir(staged_dir):
+                shutil.rmtree(staged_dir)
+            os.rename(cur_dir, staged_dir)
+            staging.append((rank, auc, ll, step, staged_dir))
+
+        new_topk: list[tuple[float, float, int, str]] = []
+        for rank, auc, ll, step, staged_dir in staging:
+            final_name = self._build_topk_dir_name(step, rank, auc)
+            final_dir = os.path.join(self.save_dir, final_name)
+            if staged_dir != final_dir:
+                if os.path.isdir(final_dir):
+                    # Paranoid: a leftover from an interrupted rename.
+                    shutil.rmtree(final_dir)
+                os.rename(staged_dir, final_dir)
+            new_topk.append((auc, ll, step, final_dir))
+        self._topk_ckpts = new_topk
+
+        # Step d: cleanup any stray *.topk_{rank} or *.topk_pending dirs
+        # that aren't in our current ring.
+        kept_dirs = {d for _, _, _, d in self._topk_ckpts}
+        stray_pattern = os.path.join(
+            self.save_dir, "global_step*.topk_*")
+        for stray in glob.glob(stray_pattern):
+            if stray not in kept_dirs and not stray.endswith('.renaming'):
+                if os.path.isdir(stray):
+                    shutil.rmtree(stray)
+                    logging.info(f"[topk] removed stray dir: {stray}")
+
+        logging.info(
+            f"[topk] updated ring (K={self.keep_topk_ckpt}): "
+            + ", ".join(
+                f"rank{r}@step{s}:auc={a:.6f}"
+                for r, (a, _, s, _) in enumerate(self._topk_ckpts, start=1)
+            )
+        )
 
     def _batch_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Move all tensors in ``batch`` to ``self.device`` (``non_blocking=True``,

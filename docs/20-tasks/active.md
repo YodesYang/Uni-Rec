@@ -204,7 +204,7 @@
 |---|---|---|---|
 | A | Valid split 重设计: `train[0, 80%] \| 空窗[80, 95%] \| valid[95, 100%]`(ADR-005 方案 C) | ~60 行 `dataset.py` | 🔴 治本,提升 dev→LB 相关性 |
 | B | 纪律: 组合实验前必须先有单变量 ablation | 纯纪律,写入 `.cursor/rules` | 🔴 避免归因歧义 |
-| C | Trainer 加 `keep_topk_ckpt=3`,保留多 epoch ckpt | ~50 行 `trainer.py` | 🟡 离线选优空间,quota 3× 换取完整曲线 |
+| C | Trainer 加 `keep_topk_ckpt=3`,保留多 epoch ckpt | ~50 行 `trainer.py` | ✅ **已实装（2026-05-09）** · `--keep_topk_ckpt N` CLI + `*.topk_{rank}/` 目录 + `topk_checkpoints` summary 字段 + 4× evaluation 放大 |
 | D | Proxy 重新定位: 只过滤代码 bug,不做方法学判决 | 纯纪律 | 🟡 释放 proxy quota 给 ablation |
 | E | Evaluation 前 5~10 次明确用于建立 dev→LB 映射 | 纯纪律 | 🟡 有了映射后再追 SOTA |
 | F | Ranking-family loss（BPR / ListMLE / Contrastive）降优先级 | 规则 | 🟢 避免重犯 T18 错误 |

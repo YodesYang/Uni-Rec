@@ -452,6 +452,18 @@ def parse_args() -> argparse.Namespace:
                              'Ampere+ GPUs (A100/V100 partial support); float16 '
                              'requires GradScaler but has wider hardware support. '
                              'Only consulted when --enable_amp is set.')
+    parser.add_argument('--keep_topk_ckpt', type=int, default=1,
+                        help='Keep top-K checkpoints (by val AUC DESC) in '
+                             'addition to the global-best *.best_model/ dir. '
+                             'Default 1 = current behavior (only best_model). '
+                             'K>1 persists runners-up in *.topk_{rank}/ dirs '
+                             'that are renamed on every validation to mirror '
+                             'the live ranking. Motivation (2026-05-09, 冲 0.85 '
+                             '战略): icq-full E6 LB < icq-half E4 LB showed '
+                             'that "best AUC" != "best LB". Keeping top-K '
+                             'lets evaluation quota test multiple ckpts from '
+                             'a single training run (4x effective evaluation '
+                             'utilization when K=4).')
 
 
     parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
@@ -728,6 +740,7 @@ def main() -> None:
         enable_torch_compile=args.enable_torch_compile,
         enable_amp=args.enable_amp,
         amp_dtype=args.amp_dtype,
+        keep_topk_ckpt=args.keep_topk_ckpt,
     )
 
     trainer.train()
