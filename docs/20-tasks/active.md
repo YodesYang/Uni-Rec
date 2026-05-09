@@ -6,7 +6,7 @@
 
 ---
 
-**最近一次审视**：2026-05-09 西班牙早 05:55（UTC+2 · T27 平台启动成功 + T25 代码就位 + EXP-032 seed rerun 噪声固化）· 结论：① **T27 `t27-compile-amp-halftrain-gap05` 已在平台运行中**（commit `38d6ea2` trainer.py bug 修复版，预期 ~3h 回流），**UnboundLocalError 已修复**（函数内 `import torch._dynamo` 污染作用域，改用 `getattr(torch, '_dynamo', None)`）。② **EXP-032 落档**（2026-05-08 晚 4 个 rerun half-train batch 分析）：3 条新铁律 = 同 seed rerun dev 噪声 ±0.0001 / vr<0.05 方向关闭 / LogLoss guard 生产触发 proven（Job 3 seed=3 E4）；**team-memory 新增 5 条铁律**（含 Python import local-scope 工程陷阱 + 战术铁律"每批 4 slot 至少 3 🟢 架构级"）。③ **T25 G1 DIN 代码全部就位**：`DINInterestExtractor` bypass 版 + `--enable_din_interest` CLI + infer 兼容；本地 smoke 4/4 通过（train 5 steps / config 落盘 / infer 1000 predictions / Dense +104,896 符合理论）；**EXP-033 实验计划落档**，2 个 run.sh 版本（A=叠加 T27, B=fallback 纯 DIN）准备好，等 T27 判决后选其一立即启动。④ **新判决阈值**（利用 EXP-032 铁律 ①）：T25 E3 Dev **≥ 0.847 = 真信号（10× rerun 噪声）**，[0.8444, 0.847) 疑似，[0.8412, 0.8444) 持平 Deprecated，<0.8412 负向。⑤ **quota 状态**：training 4 slot（T27 在跑 1 / 空 3，T25 待启动占 1 → 剩 2 slot 可留给 T19 Per-token FFN 或 T28 DIN block-integrated 跟进）；evaluation 4 slot（今日未用）。⑥ **战略聚焦**：按 EXP-032 铁律，后续每批 4 slot 至少 3 个是 🟢 架构级 bet，拒绝 small ablation。
+**最近一次审视**：2026-05-09 西班牙早 06:12（UTC+2 · T27 + T25 B + T19 三并发架构级 bet + EXP-032/033/034 全部落档）· 结论：① **三 slot 并发 🟢 架构级 bet**（严格遵守 EXP-032 新战术铁律"每批 4 slot ≥3 🟢"）：T27 compile+AMP（工程加速, running, 5/9 03:40 启动）+ T25 DIN bypass 方案 B（方法学 bet · running 待起动）+ T19 Per-token FFN（方法学 bet · running 待起动）。② **战略升级**：平台 LB ~20 人达 0.85，我方 SOTA 0.84637（均值 0.8424），差 Δ 0.008 能力均值。**路径 C（方法学叠加 + seed sweep 混合）**：今日三方向判决 → 5/10~5/11 choose best combo 做 4 seed sweep → **目标 5/11 触 0.85**。③ **判决阈值**（利用 EXP-032 铁律 ±0.0001 rerun 噪声 + EXP-030 gap=0.05 dev→LB gap +0.003 可信）：所有 bet 的 E3 Dev **≥ 0.847（+0.0046 = 10× 噪声）**判真信号, [0.8444, 0.847) 疑似, [0.8412, 0.8444) 持平 Deprecated。④ **T19 task 从 `[x]` 重启为 `[~]`**：偿还 2026-05-04 "四合一被污染未单独验证" 的 TODO,严格单变量 ablation。⑤ **并发 OOM 风险 20%**：T27 ~10GB（bf16）+ T25 B ~14GB + T19 ~17GB 同卡会 OOM,分卡则 OK；T19 应急 `--batch_size 96` 降到 ~13GB。⑥ **quota**：training 3 slot 用中（T27/T25 B/T19）/ 1 slot 空闲；evaluation 0 用 / 4 剩。⑦ **今日预计 11:00~14:00 三方向全部回流**,晚上择机 evaluation 或起 seed sweep。⑧ **本地 commit 5 个未 push**（待 T27 回流后统一 push）。
 
 ---
 
@@ -164,11 +164,25 @@
 
 ---
 
-### T19 `[x]` RankMixer Per-token FFN — ❌ 搭配 T18 被污染关闭（四合一 E1/E2 dev 差)
+### T19 `[~]` RankMixer Per-token FFN — 🔁 2026-05-09 重启（单独 half-train 首次验证）
 
-**2026-05-04 晚 10 终结**：四合一 half-train E1 dev 0.861232 / E2 dev 0.862946,同期三合一 E1 dev 0.862036 / E2 dev 0.864589,T19 单独贡献 E1~E2 **夹带 −0.0008 ~ −0.0016 dev AUC 的 warmup 代价**,且四合一不能 evaluation(因 T18 已确认 LB 崩盘,叠加只会更差)。**T19 独立收益未验证**,ADR-007 保留 Accepted 但**task 关闭**。代码保留(`rank_mixer_ffn_mode=per_token` 分支),默认 `shared`。未来若重启 T19,必须**单独**(不叠加 T18)跑 full train 验证。
+**2026-05-09 重启背景**：EXP-030 后战略聚焦"架构级创新是唯一破局路径"，T19 作为 RankMixer 论文忠实度修正（shared → per-token FFN, anti-dominant feature 动机对口本赛题 item 长尾）是**对口 + 未消化**的架构级 bet。今天（5/9）与 T27 / T25 B 并发启动，**严格单变量 ablation**（不叠加 T25、T27）。
 
-**潜在后续**：T19 单独叠加 T16 的组合(不含 T18)仍值得一次 full train 探索,但**优先级低于目前的 T16-only full train 路径**;待当前 full train 结果回流后视 quota 决定。
+**配置**：`icq-half-gap05` baseline + `--rank_mixer_ffn_mode per_token`（其他完全相同）。
+
+**本地 smoke 通过**（2026-05-09 早 06:08）：Dense params 2.88M → 3.87M（**+34% = +992,640，与理论 `T=16 × (64×256 + 256×64) = 1.05M` 吻合**），train 5 steps AUC 0.749 无 crash。
+
+**判决阈值**（E3 Dev AUC vs baseline 0.842443，利用 EXP-032 ±0.0001 rerun 噪声下界）：
+- ≥ 0.847（ΔDev ≥ +0.0046 = 10× rerun 噪声）→ 🎯 真信号，立即 evaluation
+- [0.8444, 0.847)（ΔDev ∈ [+0.002, +0.0046)）→ 🟡 疑似，seed=3 rerun 确认
+- [0.8412, 0.8444)（ΔDev ∈ [−0.0012, +0.002)）→ ⚪ 持平 / 饱和，Deprecated
+- < 0.8412 → ❌ 负向（+34% 容量在 1.9M 数据下过拟合）
+
+**历史归档回放**（2026-05-04 晚 10）：T19 原搭配 T18 被污染关闭 —— 四合一 half-train E1 dev 0.861232 / E2 dev 0.862946，同期三合一 E1 dev 0.862036 / E2 dev 0.864589，T19 单独贡献 E1~E2 夹带 −0.0008~−0.0016 dev AUC warmup 代价；但因 T18 LB 崩盘无法 evaluation 验证。5/4 当时判定"T19 独立收益未验证，task 关闭"——**本次 5/9 就是偿还这条 TODO**。ADR-007 保留 Accepted，若本次判决 Deprecated 则追加 §Deprecation Note。
+
+**风险**：Dense +34% 在 1.9M 数据下过拟合（概率 35%）；同卡与 T27/T25 并发 OOM（概率 20%，应急 `bs=96` 重提）；平台 default infer.py 不识别 `rank_mixer_ffn_mode` kwarg，**首次 evaluation 必须勾选"上传自定义 infer.py"**。
+
+详见 [`EXP-034`](../40-experiments/EXP-034-t19-perffn-halftrain-2026-05-09.md) + [`ADR-007`](../30-decisions/ADR-007-rank-mixer-per-token-ffn.md)。
 
 ---
 
@@ -414,6 +428,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-09 西班牙早 06:12（UTC+2 · 🎯 三路并发架构级 bet + 冲 0.85 战略 · 路径 C）**：平台 LB 约 20 人达 0.85+，我方 SOTA 0.84637（均值 0.8424）差 Δ 0.008 能力均值。采用**路径 C（方法学叠加 + seed sweep 混合）**：① 三路并发 🟢 架构级 bet 启动（严格遵守 EXP-032 战术铁律"每批 4 slot ≥3 🟢"）: T27 compile+AMP（工程加速 running, 03:40 启动）+ T25 DIN bypass 方案 B（方法学 bet）+ **T19 Per-token FFN**（方法学 bet · 本地 smoke Dense +34% = +992,640 已验证, EXP-034 落档）。② **T19 task 从 `[x]` 重启为 `[~]`**：偿还 2026-05-04 "四合一被污染未单独验证" TODO, 严格单变量 ablation, 不叠加 T25/T27。③ **统一判决阈值**（EXP-033/034）：E3 Dev ≥ 0.847（ΔDev ≥ +0.0046 = 10× EXP-032 rerun 噪声 ±0.0001）真信号; [0.8444, 0.847) 疑似; [0.8412, 0.8444) 持平 Deprecated; <0.8412 负向。④ **时间线预估**：今日 11:00~14:00 三方向 E3 Dev 回流 → 晚上择机 evaluation 或起 seed sweep → **5/11 早**（4 seed sweep + 1 次 LB 校准）**触 0.85 概率 60%**，悲观 5/13 早。⑤ **并发 OOM 风险 20%**：T27 ~10GB（bf16）+ T25 B ~14GB + T19 ~17GB 同卡绝对 OOM, 分卡则 OK; T19 应急 `--batch_size 96` 降到 ~13GB。⑥ **quota 使用**: training 3/4 满（T27 + T25 B + T19）/ 1 空闲; evaluation 4/4 全剩。⑦ **EXP-034 落档**（T19 实验计划, 对齐 EXP-031/033 结构，~260 行）。⑧ **本地 5 commits 未 push**，等今日三方向全部回流后统一 push。
 
 - **2026-05-09 西班牙早 05:55（UTC+2 · T27 平台启动成功 + T25 代码就位 + EXP-032 落档 + 5 条新铁律）**：① **T27 修复**: 平台首次启动报 `UnboundLocalError: local variable 'torch' referenced before assignment`，根因 `baseline/trainer.py::__init__` 内 `try: import torch._dynamo` 让 Python 把整个函数作用域的 `torch` 标为 local。改用 `getattr(torch, '_dynamo', None)` 访问子模块（commit `38d6ea2`）。T27 `t27-compile-amp-halftrain-gap05` 已在平台运行中，预期 ~3h 回流。② **EXP-032 落档**（昨晚 4 个 half-train rerun batch · 25 GPU-hour）：3 次 seed=42 同 config rerun dev 跨度 **0.000143** → 同 rerun 噪声 ±0.0001（跨 seed 噪声 ±0.005 的 50× 小）; Job 2 `valid_ratio=0.01` 消融 E4 dev 0.865913 Δ−0.003 → 方向关闭; Job 3 seed=3 E4 LogLoss 0.22473 反弹 → LogLoss guard **首次生产触发**, best_model=E3 AUC-selected。③ **team-memory 新增 5 条铁律**: (a) Python 函数内 `import X.submod` 陷阱（工程）; (b) rerun 噪声 ±0.0001 下界（判决阈值）; (c) vr<0.05 方向关闭; (d) LogLoss guard proven; (e) platform job 建议必须标注 🟢 架构级 / 🟡 信号校准 / 🔴 small ablation, 每批 4 slot ≥3 🟢。④ **T25 G1 DIN 代码就位**: `DINInterestExtractor` (bypass 版, 4×CrossAttn + merge, `model.py:563-666`) + `enable_din_interest` CLI + infer.py 兼容; 本地 smoke 4/4 通过（train 5 steps loss 0.62→0.32 / train_config 正确落盘 / infer 1000 predictions / Dense 参数 +104,896 符合理论）; **EXP-033 实验计划落档**, 2 个 run.sh (A=叠加 T27 推荐, B=fallback) 准备好。⑤ **T25 判决阈值**（利用 EXP-032 铁律 ①）：E3 Dev ≥ 0.847（ΔDev ≥ +0.0046 = 10× rerun 噪声）真信号立即 eval; [0.8444, 0.847) 疑似; [0.8412, 0.8444) 持平 Deprecated; <0.8412 负向。⑥ **战术偏离复盘**（EXP-032 战略章节）: 昨晚 4 slot 全是 🟡/🔴 类（2 次 SOTA rerun + seed=3 + vr 消融），0 个 🟢 类 → 损失 1 次架构级 bet 回流时间; 未来必须严格按 ≥3 🟢 配比。⑦ **quota**: training 1 用（T27）/ 3 空闲（T25 待启动占 1 后剩 2）; evaluation 0 用 / 4 剩。
 
