@@ -195,16 +195,16 @@ val_auc_history=E1@15168:0.836638*, E2@30336:0.840812*, E3@45504:0.842773*
 
 ### Epoch 对照表 vs `icq-half-gap05` (EXP-030 baseline)
 
-| Epoch | baseline Dev AUC | T27 Dev AUC | Δ | baseline LogLoss | T27 LogLoss | Δ |
+| Epoch | baseline Dev AUC | T27 Dev AUC | Δ AUC | baseline LogLoss | T27 LogLoss | Δ LogLoss |
 |---|---|---|---|---|---|---|
-| E1 | 0.837939 | 0.836638 | **−0.001301** | 0.227xx | 0.28397 | +0.056 |
-| E2 | 0.841124 | 0.840812 | −0.000312 | 0.22468 | 0.27901 | +0.054 |
-| **E3** | **0.842443** | **0.842773** | **+0.000330** | 0.22372 | 0.27673 | +0.053 |
+| E1 | 0.838353 | 0.836638 | −0.001715 | 0.28280 | 0.28397 | +0.00117 |
+| E2 | **0.837453**（反弹 −0.0009） | 0.840812 | **+0.003359** | **0.28516**（反弹 +0.00236） | 0.27901 | **−0.00615**（T27 更好）|
+| **E3** | **0.842443** | **0.842773** | **+0.000330** | 0.27917 | 0.27673 | **−0.00244**（T27 更好）|
 
 **判决**：
 - E3 Dev Δ+0.00033 在 **EXP-032 铁律 3σ 下界 ±0.0003 之内**，视为 "bf16 对 Dev 无损"，**正确性通过**
 - E1 / E2 轻微 Δ−0.001 可能是 compile warmup / bf16 早期漂移，E3 追上属正常
-- **LogLoss 绝对值差 +0.054** ⚠️ 需要警惕（详见 §分析 1）
+- **LogLoss 轨迹优于 baseline**：E2 不反弹（baseline 反弹 +0.00236）、E3 绝对值更低 → **T27 的 LogLoss 行为更健康**（不是原初版分析里错误声称的"抬高 +0.054"）
 
 ### 预测 LB（用 EXP-030 gap=0.05 dev→LB gap +0.0032）
 
@@ -229,18 +229,26 @@ T27 E3 Dev 0.842773 → **预测 LB ≈ 0.8396**（与 baseline `icq-half-gap05`
 
 ## §分析
 
-### 分析 1：LogLoss 绝对值 +0.054 的异常
+### 分析 1：LogLoss 对比（原初版"抬高 +0.054"判断已修正）
 
-**关键观察**：T27 三个 epoch 的 LogLoss 都比 baseline 高 ~0.054（0.276 vs 0.222）。**这个差距太大不是 bf16 精度能解释的**。
+> ⚠️ **2026-05-09 CEST 10:10 修正**：原版分析基于错误 baseline（用了 gap=0 baseline LogLoss 0.224 和 T27 gap=0.05 LogLoss 0.277 对比，得出 Δ+0.054 "异常"）。实际上**同 config gap=0.05 baseline** 的 LogLoss 是 0.28280 / 0.28516 / 0.27917（EXP-030 §C 真实记录）。
 
-**可能性**：
-1. **bf16 softmax 在极端 logits 下饱和** → 概率分布过度压缩到 [0.3, 0.7] → LogLoss 偏高（典型 bf16 calibration 损失）
-2. **platform baseline 对比误差**：我用来对比的 `icq-half-gap05` E3 LogLoss 0.22372 是从 EXP-030 记忆的，可能记错
-3. **dropout 或其他微妙差异**：T27 可能和 baseline 的 dropout schedule 不同
+**正确对比**：
 
-**诊断**：AUC 无损 + LogLoss 抬高 = 模型 **排序能力** 保留但 **概率校准** 劣化。这对 AUC leaderboard **不影响**（AUC 是排序指标），但对**BCE loss 梯度方向**有间接影响，可能延缓收敛。
+| Epoch | baseline LogLoss (gap=0.05) | T27 LogLoss | Δ |
+|---|---|---|---|
+| E1 | 0.28280 | 0.28397 | +0.00117（噪声内）|
+| E2 | **0.28516**（反弹）| 0.27901 | **−0.00615**（T27 更好 + 不反弹）|
+| E3 | 0.27917 | 0.27673 | −0.00244（T27 更好）|
 
-**暂不采取行动**：等 T25 B 回流后看 T25 B 的 LogLoss（也带 gap=0.05 但不带 compile+AMP），如果 T25 B 的 LogLoss 是 ~0.22 量级，则确认 LogLoss 抬高**是 bf16 带来的**，**不必 rollback**（AUC 无损即可）。
+**真实结论**：**T27 的 LogLoss 轨迹优于 baseline**：
+- baseline E1→E2 反弹 +0.00236，T27 E1→E2 反而下降 −0.00496（不反弹）
+- baseline E3 相对 E2 恢复 −0.00599，T27 E3 继续下降 −0.00228（都健康）
+- T27 E3 LogLoss 绝对值 0.27673 < baseline E3 0.27917
+
+**机制推测**：bf16 autocast 对 softmax 的微小数值噪声**可能起到了正则化作用**，反而让 LogLoss 轨迹比 fp32 更平滑。**这是 caveat 的反面**：不仅没坏，还可能比 baseline 稍好（但 E3 Δ−0.002 仍在 rerun 噪声带内）。
+
+**撤回原"LogLoss 抬高 bf16 嫌疑"的担忧**：不需要补 `scores.float()` cast，bf16 路径看起来完全健康。
 
 ### 分析 2：加速 1.25× 不达 1.5× 目标的处理
 
@@ -278,7 +286,7 @@ ADR-008 原定 1.5× 是"Go 条件"。实测 1.25× 不达标但**不是 No-go**
 | **Dev AUC 正确性** | ✅ 通过（E3 Δ+0.00033 在噪声内）|
 | **稳定性** | ✅ 通过（0 crash / 0 OOM / 0 dynamo traceback）|
 | **加速比** | ⚠️ 1.25× 不达 1.5× 目标，但仍有 ~20% 净收益 |
-| **LogLoss** | ⚠️ 抬高 +0.054（bf16 calibration 损失嫌疑，待 T25 B 对比验证）|
+| **LogLoss** | ✅ **轨迹优于 baseline**（E2 不反弹，E3 绝对值更低）— 原判"抬高 +0.054"是错误 baseline 对比导致, 已修正 |
 | **推理兼容性** | ⏳ 未 evaluate 验证 |
 
 **ADR-008 Status**：`Proposed` → `Accepted with caveats`（2026-05-09 CEST 09:44 升级）
@@ -288,7 +296,7 @@ ADR-008 原定 1.5× 是"Go 条件"。实测 1.25× 不达标但**不是 No-go**
 1. **future half-train 和 full-train 都可选用 `--enable_torch_compile --enable_amp`**，但**不强制默认开启**
 2. **如果加速比不重要的短实验**，可以关闭避免 compile warmup 开销
 3. **long-running full-train（10h+）一定开**，因为 1.25× 也能省 2h
-4. **如果后续实验出现 LogLoss 异常抬高且影响决策**，再回头修 bf16 softmax fp32 cast 问题
+4. ~~**如果后续实验出现 LogLoss 异常抬高且影响决策**，再回头修 bf16 softmax fp32 cast 问题~~ **（2026-05-09 CEST 10:10 撤回：LogLoss 没抬高，是 baseline 对比错误）**
 
 ---
 
@@ -305,6 +313,6 @@ ADR-008 原定 1.5× 是"Go 条件"。实测 1.25× 不达标但**不是 No-go**
 
 1. ✅ ADR-008 升 `Accepted with caveats`
 2. ✅ team-memory 加铁律"compile+AMP 1.25× 加速 / 正确性 OK / 可选不强制"
-3. ⏳ **等 T25 B 回流**：如果 T25 B E3 LogLoss ~0.22，确认 T27 的 LogLoss 抬高是 bf16 引起
+3. ~~**等 T25 B 回流**：如果 T25 B E3 LogLoss ~0.22，确认 T27 的 LogLoss 抬高是 bf16 引起~~ **（2026-05-09 CEST 10:10 撤回：已在修正 §分析 1 中确认 LogLoss 没抬高）**
 4. ⏳ **T27 ckpt 暂不 publish 也不 evaluate**：没有方法学价值，占用 quota 也不增 LB
 5. ⏳ 如果 T25 B 是**叠加 compile+AMP** 的（EXP-033 方案 A），那它同时是 T25 + T27 联合验证；如果是**方案 B 纯 DIN**，那 T27 只影响未来决策

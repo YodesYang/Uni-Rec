@@ -154,7 +154,7 @@
 ### 需要标注的 caveat
 
 1. **加速比低于 DECEM 报告的 2×**：可能因为平台卡不是 A100（V100 对 bf16 支持较弱），或 sparse embedding reinit 后 dynamo recompile 频繁
-2. **LogLoss 绝对值抬高 +0.054**（T27 0.276 vs baseline 0.224）：典型 bf16 softmax 饱和症状（但 AUC 排序无损）。若未来决策依赖 LogLoss 绝对值（例如 deploy 时看 calibration），需要加 `scores.float()` cast
+2. ~~**LogLoss 绝对值抬高 +0.054**（T27 0.276 vs baseline 0.224）：典型 bf16 softmax 饱和症状（但 AUC 排序无损）。若未来决策依赖 LogLoss 绝对值（例如 deploy 时看 calibration），需要加 `scores.float()` cast~~ **（2026-05-09 CEST 10:10 修正撤回）**: 原判决基于错误 baseline（用了 gap=0 配置 baseline LogLoss 0.224 和 gap=0.05 T27 0.276 对比）。**真实 gap=0.05 baseline LogLoss 为 0.28280/0.28516/0.27917（EXP-030 §C）**；T27 LogLoss 0.28397/0.27901/0.27673 实际**优于 baseline**（不反弹、E3 绝对值更低）。无需 `scores.float()` cast。
 
 ### 修订后的规则
 
@@ -171,7 +171,7 @@
 
 ### 未决事项
 
-1. **bf16 LogLoss 抬高**是否要修：等 T25 B 回流后对比其 LogLoss。如 T25 B (no compile+AMP) LogLoss ≈ 0.22，确认 T27 的 LogLoss 抬高是 bf16 引起；决定是否补 `scores.float()` cast
+1. ~~**bf16 LogLoss 抬高**是否要修：等 T25 B 回流后对比其 LogLoss。如 T25 B (no compile+AMP) LogLoss ≈ 0.22，确认 T27 的 LogLoss 抬高是 bf16 引起；决定是否补 `scores.float()` cast~~ **（2026-05-09 CEST 10:10 撤回）**：修正后确认 T27 LogLoss **无异常**，不需要补 cast。
 2. **T27 ckpt 不 publish/evaluate**：方法学无增益（E3 Dev 只+0.00033），占 quota 不划算；若未来 quota 有富余，可跑 1 次 evaluation 验证推理兼容性
 3. **5/25 前最后一次 full-train**（路径 C Stage 3 "100% data"）**强烈推荐开 compile+AMP**，因 10h 省 2h 是重大优化
 

@@ -2,8 +2,8 @@
 
 **日期**：2026-05-09（西班牙时间早 · 与 T27 / T25 B 并发提交）
 **作者**：Agent（与用户共同推演）
-**状态**：✅ 完成 · **❌ Deprecated**（2026-05-09 CEST 09:43 回流 · E2 触发 LogLoss guard 早停 · ΔDev E2 = −0.000982 真实负向）
-**关联**：T19（tasks/active.md）· ADR-007（RankMixer per-token FFN）· EXP-023（历史 smoke）· 2026-05-04 T19 与 T18 捆绑归档后**从未单独验证**，本 EXP 偿还该 TODO
+**状态**：⏸️ **Inconclusive - LogLoss guard 早停（patience=1 / delta=0.0 过严），实际 vs gap=0.05 baseline 疑似正向，needs rerun with loose guard**（2026-05-09 CEST 10:10 修正 · 见下方 §Correction）。~~原状态 ❌ Deprecated 基于错误 baseline 对比已撤回。~~
+**关联**：T19（tasks/active.md）· ADR-007（RankMixer per-token FFN）· EXP-023（历史 smoke）· EXP-030（gap=0.05 baseline 真实数据 E2 LogLoss 0.28516 / AUC 0.837453）· 2026-05-04 T19 与 T18 捆绑归档后**从未单独验证**，本 EXP 偿还该 TODO
 
 ---
 
@@ -376,3 +376,85 @@ T19 跑 3h12m 远快于预期 ~5h baseline。不是代码变快，是**平台资
 T25 B 如果也失败 → 只能走 seed sweep 纯 S2 路径，明早触 0.85 概率降至 <15%。
 
 T25 B 预期回流时间：**CEST 10:00~10:30**（与 T19 相同启动节奏，3h~3h30m）。
+
+---
+
+## §Correction (2026-05-09 CEST 10:10 · 错误撤回与真实状态)
+
+### 🚫 我犯了什么错
+
+在 2026-05-09 CEST 09:43 的 §Result 判决里，我**错误地用 gap=0 配置的 baseline 数字** 对比 T19 gap=0.05 的结果：
+
+| 对比项 | 我用的"baseline" | 实际该用的 gap=0.05 baseline |
+|---|---|---|
+| E2 AUC | 0.841124（**gap=0, icq-half EXP-019**） | **0.837453（gap=0.05, icq-half-gap05 EXP-030）** |
+| E2 LogLoss | 0.22468（**gap=0 配置**） | **0.28516（gap=0.05 配置）** |
+
+**后果**：
+- 把 T19 E2 AUC 0.840142 与错误 baseline 比，得 Δ−0.00098 → 错判"真实负向"
+- 把 T19 E2 LogLoss 0.28208 与错误 baseline 比，得 Δ+0.057 → 错判"结构性过拟合"
+- 基于错判写了 `§Result`、`§Lessons`、ADR-007 Deprecated、team-memory 铁律"容量扩张 bet 必死" 等一系列污染文档
+
+### ✅ 正确对比
+
+T19 和 gap=0.05 baseline `icq-half-gap05`（EXP-030 §C 真实数据）：
+
+| Epoch | baseline AUC | T19 AUC | Δ AUC | baseline LogLoss | T19 LogLoss | Δ LogLoss |
+|---|---|---|---|---|---|---|
+| E1 | 0.838353 | 0.837658 | −0.000695 | 0.28280 | **0.28173** | **−0.00107** |
+| E2 | 0.837453（AUC 反弹 −0.0009 但未停） | **0.840142** | **+0.0027** | 0.28516（反弹 +0.00236） | 0.28208（反弹 +0.00035） | **−0.00308** |
+| E3 | **0.842443** (best) | **未跑到** | — | 0.27917 | — | — |
+
+**观察**：
+- **T19 E2 AUC 领先 baseline E2 +0.0027**（10× rerun 噪声，真正向信号）
+- **T19 E2 LogLoss 低于 baseline E2 −0.00308**（实际比 baseline 好）
+- T19 E1→E2 AUC 梯度 **+0.0025**（正增长），baseline E1→E2 梯度 **−0.0009**（反弹）
+- **按梯度外推，T19 E3 AUC 可能达到 0.843~0.845**（但未跑到，无数据）
+
+### ❓ Guard 触发是否合理？
+
+T19 E1 LogLoss 0.28173 → E2 0.28208 反弹 +0.00035 → `logloss_rebound_patience=1 + delta=0.0` 命中 → 早停。
+
+**机制缺陷**：
+- baseline 自己 E2 LogLoss 反弹 **+0.00236**（比 T19 反弹幅度大 7 倍），但 baseline 跑到 E3 AUC 涨回 0.842443 —— 说明 **gap=0.05 配置下 E2 LogLoss 小反弹是噪声级抖动，不是真过拟合**
+- `delta=0.0` 过严，**T19 +0.00035 反弹（1/7 baseline 反弹）就被停** 不合理
+- 正确 guard 配置应该是 `delta ≈ 0.003`（只有真反弹才停）或 `patience=2`（连续 2 次反弹才停）
+
+**注**：baseline `icq-half-gap05` 当时能跑到 E3 而不被 guard 停，可能是因为：
+- (a) 当时 job 用 `--logloss_rebound_patience=0`（guard 关闭），或
+- (b) 当时 trainer.py 版本里 guard 未落地（2026-05-04 落地，但 EXP-030 job 可能使用更早 commit）
+- 需要核查 EXP-030 job 的原始 run.sh / commit 确认
+
+### 🔄 真实判决
+
+**T19 当前状态：⏸️ Inconclusive**（不是 Deprecated，不是 Work）
+
+- 数据不足以定论（没 E3，无法对齐 baseline best）
+- **E2 数据趋势 → 疑似正向**（+0.0027 AUC over baseline E2）
+- **guard 早停 → 实验被中断**，不能判死
+
+### 🚀 需要做的 rerun
+
+**建议**：`t19-perffn-halftrain-gap05-rerun-loose-guard` 配置：
+- 完全同 T19（per-token FFN + gap=0.05 + seed=42）
+- **改 `--logloss_rebound_delta 0.003 --logloss_rebound_patience 2`** 让 guard 不过敏
+- 目标：跑完 E3，拿到真实 AUC 数据判决
+
+**判决阈值**（修订版）：
+- E3 Dev ≥ 0.847 → 🎯 真信号强阳（10× rerun 噪声）
+- [0.8444, 0.847) → 🟡 疑似正向
+- [0.8412, 0.8444) → ⚪ 持平
+- < 0.8412 → ❌ 负向
+
+### 教训 (revised Lessons, overriding §Lessons 原内容)
+
+1. **对比 baseline 前必须核对配置版本**（gap=0 vs gap=0.05，seed，代码 commit），不能凭记忆引数字。
+2. **LogLoss guard `delta=0.0` 在 gap=0.05 配置下过严**，应该调到 `delta=0.003` 或 `patience=2`
+3. **"容量扩张 bet 必死" 这条铁律要撤回**：T19 Dense +34% 实测数据**不支持该结论**
+4. **今天 T27 E3 Dev vs baseline 数据点验证了 gap=0.05 baseline 的稳定性**（T27 0.842773 vs baseline 0.842443 Δ+0.00033 在噪声带内）
+5. **agent 在下快速判决前必须重新核对原始文档**：EXP-030 §C 明明有真实数据，我却凭记忆用 EXP-019 的数字，这是纪律问题
+
+### Status 变更记录
+
+- 2026-05-09 CEST 09:43：错误 Deprecated（基于错误 baseline 对比）
+- **2026-05-09 CEST 10:10：Inconclusive-needs-rerun**（修正）

@@ -1,9 +1,9 @@
 # ADR-007 · RankMixerBlock Per-token FFN（修正共享 FFN 偏差）
 
-> **Status**: **❌ Deprecated**（2026-05-09 CEST 09:43 · EXP-034 单独 half-train 证伪后降级 · 见下方 §Deprecation Note after EXP-034）
-> **Date**: 2026-05-04（首次 Accepted）· 2026-05-09（Deprecated）
+> **Status**: **⏸️ Paused - Needs Rerun with Loose LogLoss Guard**（2026-05-09 CEST 10:10 修正 · 见下方 §Correction · ~~原 09:43 Deprecated 判决已撤回，基于错误 baseline 对比~~）
+> **Date**: 2026-05-04（首次 Accepted）· 2026-05-09 CEST 09:43（错误 Deprecated）· **2026-05-09 CEST 10:10 Paused（修正）**
 > **Related Tasks**: T19（见 `docs/20-tasks/active.md`）
-> **Related Experiments**: EXP-023（本地 smoke）· **EXP-034（单独 half-train 证伪）**
+> **Related Experiments**: EXP-023（本地 smoke）· EXP-034（单独 half-train：guard 早停 + baseline 对比错误导致 Deprecated 已撤回）· EXP-030（gap=0.05 baseline 数据源）
 > **External References**:
 > - RankMixer: Scaling Up Ranking Models in Industrial Recommenders（arXiv 2507.15551, 2025）
 > - `docs/00-context/model-py-section-map.md` §RankMixer：已明确标注 "仓库 vs 论文的细节差异 —— 仓库用 shared FFN，论文是 per-token FFN"
@@ -286,3 +286,48 @@ Seed 的 "pure model 掉分" 和 T19 "per-token FFN 欠拟合"**是同一机制*
 未来候选方向如需 Dense +20%+，**直接跳过，不投 quota**。
 
 详见 [`EXP-034 §Result + §Lessons`](../40-experiments/EXP-034-t19-perffn-halftrain-2026-05-09.md)。
+
+---
+
+## §Correction after EXP-030 baseline review（2026-05-09 CEST 10:10）
+
+### 撤回上面 §Deprecation Note after EXP-034
+
+**上面的 §Deprecation Note 基于错误的 baseline 对比**，已撤回。真实数据：
+
+| Epoch | gap=0.05 baseline (EXP-030) | T19 (实测) | Δ |
+|---|---|---|---|
+| E1 AUC | 0.838353 | 0.837658 | −0.0007 |
+| E2 AUC | **0.837453**（反弹 −0.0009） | **0.840142** | **+0.0027**（T19 反超）|
+| E2 LogLoss | **0.28516**（反弹 +0.00236） | 0.28208（反弹 +0.00035） | **−0.00308**（T19 更好）|
+
+**纠正**：T19 **E2 数据比 baseline E2 更好**（AUC + / LogLoss 也更低）。原 §Deprecation Note 里的 "Δ−0.00098 / +0.057" 数字是用 gap=0 baseline 对比 gap=0.05 T19 的错误结果。
+
+### 真实状态：Inconclusive - Needs Rerun with Loose LogLoss Guard
+
+- **LogLoss guard `patience=1 / delta=0.0` 在 gap=0.05 配置下过敏**（T19 E2 反弹 +0.00035 是 baseline 反弹 +0.00236 的 1/7，但 T19 被停 / baseline 当时未被停）
+- **T19 被 guard 早停在 E2**，没 E3 数据 → 无法对齐 baseline best（E3 0.842443）
+- **但 E2 梯度 +0.0025 AUC/epoch 属正向**，外推 E3 ≈ 0.843+（疑似接近 baseline best）
+
+### ADR-007 状态修订
+
+- Status: `Paused - Needs Rerun with Loose LogLoss Guard`
+- 代码**不回滚**（`rank_mixer_ffn_mode=per_token` 分支仍在，默认 `shared`）
+- 下一步：**rerun T19** 配 `--logloss_rebound_delta 0.003 --logloss_rebound_patience 2`，跑完 E3 才能真正判决
+
+### 铁律撤回
+
+原 §Deprecation Note 里的两条规则：
+1. ~~Dense 参数量增幅 ≥ 20% 的架构改动直接跳过~~ —— **撤回**（T19 Dense +34% 实测在 E2 不输 baseline，不支持"必死"结论）
+2. ~~每参数平均梯度 steps 硬约束（<30 必崩）~~ —— **撤回**（T19 每参数 ~30 steps 在 E2 仍有 +0.0027 AUC 领先 baseline）
+
+这两条规则**可能仍然部分正确**（T19 E3+ 如果过拟合，规则可能仍适用）**但当前证据不足以下结论**。等 T19 rerun 跑到 E3 再评估。
+
+### 反思（最诚实）
+
+我在 09:43 下 Deprecated 判决时犯了 3 个错误：
+1. 用错误版本 baseline 对比（gap=0 vs gap=0.05）
+2. 把"guard 早停"直接等同"方向失败"（忽略了反弹幅度可能是噪声）
+3. 没去 EXP-030 §C 核对真实 baseline LogLoss 数字（只凭记忆）
+
+**工程补救**：未来所有涉及 baseline 对比的 agent 动作，**必须先 grep 原始 EXP 文档**，不能凭记忆。已入 team-memory 铁律（2026-05-09 下午）。
