@@ -60,7 +60,7 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --item_conditioned_query \
     --seed 42 \
     --batch_size 128 \
-    --num_epochs 3 \
+    --num_epochs 4 \
     --enable_torch_compile \
     --enable_amp \
     --amp_dtype bfloat16 \
