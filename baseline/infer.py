@@ -179,9 +179,21 @@ def _make_model_input(batch: Dict[str, Any], device: torch.device) -> ModelInput
 
 def _load_state_dict(path: str, device: torch.device) -> Dict[str, torch.Tensor]:
     try:
-        return torch.load(path, map_location=device, weights_only=True)
+        sd = torch.load(path, map_location=device, weights_only=True)
     except TypeError:
-        return torch.load(path, map_location=device)
+        sd = torch.load(path, map_location=device)
+    # Strip "_orig_mod." prefix if present. Such prefix appears when a ckpt
+    # was saved from a torch.compile()-wrapped model (ADR-008 T27 code had
+    # an early bug where EarlyStopping received the compiled wrapper and
+    # torch.save'd its state_dict directly). infer.py itself never compiles,
+    # so its model.state_dict() keys are always un-prefixed; renaming at
+    # load time keeps ancient ckpts evaluate-able without retraining.
+    if any(k.startswith("_orig_mod.") for k in sd.keys()):
+        sd = {
+            (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+            for k, v in sd.items()
+        }
+    return sd
 
 
 def main() -> None:

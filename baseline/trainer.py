@@ -817,7 +817,7 @@ class PCVRHyFormerRankingTrainer:
                 or es_score < old_best - self.early_stopping.delta
             )
         if not is_likely_new_best:
-            self.early_stopping(es_score, self.model, {
+            self.early_stopping(es_score, self._raw_model, {
                 "best_val_AUC": val_auc,
                 "best_val_logloss": val_logloss,
             })
@@ -832,7 +832,7 @@ class PCVRHyFormerRankingTrainer:
 
         self._remove_old_best_dirs()
 
-        self.early_stopping(es_score, self.model, {
+        self.early_stopping(es_score, self._raw_model, {
             "best_val_AUC": val_auc,
             "best_val_logloss": val_logloss,
         })
