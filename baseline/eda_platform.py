@@ -10,10 +10,11 @@ Design:
     平台 1000 个 parquet × 每文件 ~1900 行 = 1.9M 总行 + 每行含 list<int64>
     seq 列 → 全量 concat 到内存会 OOM（已踩坑: job exit 137 @ 2026-05-10）。
     解决方案: **file-level subsample + per-file row cap**:
-      - --max_files=50 抽样（files 按名字 sorted, 假设暗含时间顺序, step 均匀采）
-      - --rows_per_file=2000 每文件最多 2000 行
-      - 默认 50 × 2000 = 100k rows 总量, concat 后 ~50MB, 远低于 container 限
-    100k 行样本对所有 5 个假设都统计显著（H5 时间分布尤其对 100k 稳健）。
+      - --max_files=100 抽样（files 按名字 sorted, 假设暗含时间顺序, step 均匀采）
+      - --rows_per_file=1000 每文件最多 1000 行
+      - 默认 100 × 1000 = 100k rows → concat 后 ~5GB peak, 容器限 15GB+ 安全
+    100k 行样本 × 每行 seq 总 tokens ~2800 → H5 获 ~2.8 亿 delta 点, 统计极显著。
+    用户实测 training job 活跃内存 17GB RAM + 9.8GB GPU, EDA 无 GPU 用 ~15GB RAM。
 
 Outputs:
     - prints human-readable table to stdout
@@ -360,14 +361,15 @@ def main() -> None:
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .parquet files")
     parser.add_argument("--max_rows", type=int, default=0,
                         help="Cap total rows in final concat table (0 = no cap).")
-    parser.add_argument("--max_files", type=int, default=30,
+    parser.add_argument("--max_files", type=int, default=100,
                         help="Cap number of parquet files scanned (0 = all). Files are sampled "
                              "evenly across the sorted file list for temporal coverage. "
-                             "Default 30 = conservative memory-safe choice for 1.9M dataset.")
-    parser.add_argument("--rows_per_file", type=int, default=500,
+                             "Default 100 files × 1000 rows/file ≈ 100k rows → ~5GB peak, "
+                             "well within container limit (training uses ~17GB RAM).")
+    parser.add_argument("--rows_per_file", type=int, default=1000,
                         help="Max rows to read from each sampled file (0 = full file). "
-                             "Default 500 × 30 files = 15k rows → ~300MB peak (seq list<int64> "
-                             "explosion included), well under container limit.")
+                             "Default 1000 × 100 files = 100k rows → statistically rich "
+                             "for all 5 hypotheses (H5 gets ~280M delta points).")
     parser.add_argument("--output_dir", type=str, default="/tmp/eda",
                         help="Directory to write eda_report.json")
     args = parser.parse_args()
