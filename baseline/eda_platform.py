@@ -668,7 +668,7 @@ def main() -> None:
             rows_read_this_file += tbl.num_rows
             del tbl
         files_scanned += 1
-        if files_scanned % 10 == 0 or files_scanned == len(files):
+        if files_scanned % 30 == 0 or files_scanned == len(files):
             print(f"[eda] Scanned {files_scanned}/{len(files)} files, "
                   f"{total_rows} rows so far")
         gc.collect()
@@ -686,11 +686,9 @@ def main() -> None:
     print("[eda] Finalizing H5 · seq_ts distance...")
     r_h5 = acc_h5.finalize()
 
-    _print_h1(r_h1)
-    _print_h2h3(r_h2h3)
-    _print_h4(r_h4)
-    _print_h5(r_h5)
-
+    # CRITICAL: build report + print SUMMARY + BLOB FIRST before any pretty
+    # prints. Platform log UI truncates to top 1000 rows; pretty prints take
+    # ~80 rows, if run before blob they push blob out of log window.
     report = {
         "meta": {
             "data_dir": str(data_dir),
@@ -706,10 +704,15 @@ def main() -> None:
         "H4": r_h4,
         "H5": r_h5,
     }
+    # (Disk write is useless on this platform — ckpt dir not downloadable —
+    # but keep it as no-op best-effort.)
     out_path = out_dir / "eda_report.json"
-    with out_path.open("w") as f:
-        json.dump(report, f, indent=2, default=str)
-    print(f"\n[eda] Report written to {out_path}")
+    try:
+        with out_path.open("w") as f:
+            json.dump(report, f, indent=2, default=str)
+        print(f"[eda] Report written to {out_path} (may not be downloadable)")
+    except Exception as e:
+        print(f"[eda] Warning: disk write failed: {e}")
 
     # Also write to TRAIN_LOG_PATH if set (some platforms expose log dir but not ckpt).
     log_path_env = os.environ.get("TRAIN_LOG_PATH")
@@ -786,14 +789,35 @@ def main() -> None:
     print("#" * 72)
     sys.stdout.flush()
 
-    # Full JSON dump to stdout (backup in case ckpt file not downloadable).
+    # --------------------------------------------------------------------
+    # Base64(gzip(JSON)) blob · platform log truncates at top 1000 rows.
+    # Pretty print and raw JSON were too long (1300+ rows), lost the SUMMARY
+    # and JSON. Use compressed blob: demo 13.7KB raw → 3.7KB gzip → 4948 base64
+    # chars ≈ 42 rows at 120 chars/line. Platform 100k data report will be
+    # slightly larger but still ≤100 rows total.
+    # --------------------------------------------------------------------
+    import base64
+    import gzip
+    raw = json.dumps(report, default=str).encode("utf-8")
+    gz = gzip.compress(raw)
+    b64 = base64.b64encode(gz).decode("ascii")
+    chunk_size = 120
     print("\n" + "#" * 72)
-    print("## EDA FULL REPORT (JSON) · copy below into eda_report.json")
+    print("## EDA JSON BLOB · base64(gzip(JSON))")
+    print(f"## raw_bytes={len(raw)} gz_bytes={len(gz)} b64_chars={len(b64)}")
+    print("## Decode locally: base64 -d | gunzip")
     print("#" * 72)
-    print("<<<EDA_JSON_START>>>")
-    print(json.dumps(report, indent=2, default=str))
-    print("<<<EDA_JSON_END>>>")
+    print("<<<EDA_BLOB_START>>>")
+    for i in range(0, len(b64), chunk_size):
+        print(b64[i:i + chunk_size])
+    print("<<<EDA_BLOB_END>>>")
     sys.stdout.flush()
+
+    # Pretty prints LAST (nice-to-have, OK if truncated by platform log limit).
+    _print_h1(r_h1)
+    _print_h2h3(r_h2h3)
+    _print_h4(r_h4)
+    _print_h5(r_h5)
 
 
 if __name__ == "__main__":
