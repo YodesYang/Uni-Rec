@@ -34,13 +34,17 @@ Dependencies: stdlib + pyarrow + numpy only.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyarrow.parquet as pq
+
+print = functools.partial(print, flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -454,6 +458,86 @@ def main() -> None:
     with out_path.open("w") as f:
         json.dump(report, f, indent=2, default=str)
     print(f"\n[eda] Report written to {out_path}")
+
+    # Also write to TRAIN_LOG_PATH if set (some platforms expose log dir but not ckpt).
+    log_path_env = os.environ.get("TRAIN_LOG_PATH")
+    if log_path_env:
+        log_dir = Path(log_path_env)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_copy = log_dir / "eda_report.json"
+        try:
+            with log_copy.open("w") as f:
+                json.dump(report, f, indent=2, default=str)
+            print(f"[eda] Also copied to {log_copy} (TRAIN_LOG_PATH)")
+        except Exception as e:
+            print(f"[eda] Warning: could not write to TRAIN_LOG_PATH: {e}")
+
+    # --------------------------------------------------------------------
+    # Platform-safe summary + JSON dump to stdout
+    # --------------------------------------------------------------------
+    # Platform log may truncate long pretty prints (observed 2026-05-10).
+    # Print a compact 20-line summary FIRST (small buffer, guaranteed flush),
+    # THEN dump the full JSON to stdout as backup (1~2k lines, usually OK).
+    print("\n" + "#" * 72)
+    print("## EDA COMPACT SUMMARY · 20 key numbers (platform log safe)")
+    print("#" * 72)
+    print(f"# rows_loaded: {big_tbl.num_rows}, files_sampled: {len(files)} / {len(all_files)}")
+    # H1: label_time delta
+    if r_h1.get("n_pos", 0) > 0:
+        p = r_h1["delta_percentiles_sec"]
+        print(f"# H1 label_time_delta: pos_rate={r_h1['pos_rate']:.4f}, "
+              f"p50={p['p50']:.0f}s, p95={p['p95']:.0f}s, "
+              f"within_15min={r_h1['delta_within_15min_frac']*100:.1f}%, "
+              f"within_24h={r_h1['delta_within_24h_frac']*100:.1f}%")
+    # H2+H3: seq domain key numbers
+    for dn in ["seq_a", "seq_b", "seq_c", "seq_d"]:
+        d = r_h2h3["domains"].get(dn, {})
+        s = d.get("seq_len_stats", {})
+        p = d.get("seq_len_percentiles", {})
+        # key signal: ts_fid + 1 (usually the "primary id" fid); show its unique+zero
+        # instead probe the LARGEST-unique fid (the "item-like" fid)
+        max_u = 0
+        max_u_fid = None
+        for fn, fi in d.get("fids", {}).items():
+            if fi.get("is_ts_fid"):
+                continue
+            if fi.get("unique", 0) > max_u:
+                max_u = fi["unique"]
+                max_u_fid = fn
+        zfrac = d.get("fids", {}).get(max_u_fid, {}).get("zero_frac", -1) if max_u_fid else -1
+        print(f"# H2+H3 {dn}: seq_len p50={p.get('p50', 0):.0f} p95={p.get('p95', 0):.0f}, "
+              f"empty={d.get('seq_empty_rows_frac', 0)*100:.1f}%, "
+              f"top_unique_fid={max_u_fid} unique={max_u} zero%={zfrac*100:.1f}")
+    # H4
+    print(f"# H4: total_rows={r_h4['total_rows']}, unique_users={r_h4['unique_users']} "
+          f"({r_h4['unique_users']/r_h4['total_rows']*100:.2f}%), "
+          f"user_mean_imp={r_h4['user_impressions_per_user_mean']:.2f}, "
+          f"user_max_imp={r_h4['user_impressions_per_user_max']}, "
+          f"unique_items={r_h4['unique_items']} ({r_h4['unique_items']/r_h4['total_rows']*100:.2f}%), "
+          f"item_max_imp={r_h4['item_impressions_per_item_max']}")
+    # H5 key: within_5min / 1h / 1d for each domain (the "recency" fingerprint)
+    for dn in ["seq_a", "seq_b", "seq_c", "seq_d"]:
+        d = r_h5["domains"].get(dn, {})
+        if "note" in d:
+            print(f"# H5 {dn}: {d['note']}")
+            continue
+        print(f"# H5 {dn}: within_5min={d.get('within_5min_frac', 0)*100:.2f}%, "
+              f"within_1h={d.get('within_1h_frac', 0)*100:.2f}%, "
+              f"within_1d={d.get('within_1d_frac', 0)*100:.2f}%, "
+              f"within_7d={d.get('within_7d_frac', 0)*100:.2f}%, "
+              f"within_30d={d.get('within_30d_frac', 0)*100:.2f}%, "
+              f"over_30d={d.get('over_30d_frac', 0)*100:.2f}%")
+    print("#" * 72)
+    sys.stdout.flush()
+
+    # Full JSON dump to stdout (backup in case ckpt file not downloadable).
+    print("\n" + "#" * 72)
+    print("## EDA FULL REPORT (JSON) · copy below into eda_report.json")
+    print("#" * 72)
+    print("<<<EDA_JSON_START>>>")
+    print(json.dumps(report, indent=2, default=str))
+    print("<<<EDA_JSON_END>>>")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":
