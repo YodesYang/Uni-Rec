@@ -122,154 +122,392 @@ def _top_k_values(arr: np.ndarray, k: int = 3) -> list[tuple[int, int]]:
 # --------------------------------------------------------------------------
 
 
+class H1Accumulator:
+    """H1: label_time - timestamp 分布 (正样本 label_type==2 only).
+
+    Streaming: update() 每次吞一个 arrow table, state 只保留正样本 delta list
+    (预期 <1% × 100k = <1k samples, 几 KB 内存) + label_type counter."""
+
+    def __init__(self) -> None:
+        self.n_total = 0
+        self.n_pos = 0
+        self.label_type_counts: dict[int, int] = {}
+        self.lt_zero_count = 0
+        self.delta_pos: list[int] = []
+
+    def update(self, tbl) -> None:
+        lt = tbl.column("label_time").to_numpy(zero_copy_only=False).astype(np.int64)
+        ts = tbl.column("timestamp").to_numpy(zero_copy_only=False).astype(np.int64)
+        lab = tbl.column("label_type").to_numpy(zero_copy_only=False).astype(np.int64)
+
+        self.n_total += len(lab)
+        uniq, counts = np.unique(lab, return_counts=True)
+        for u, c in zip(uniq.tolist(), counts.tolist()):
+            self.label_type_counts[int(u)] = self.label_type_counts.get(int(u), 0) + int(c)
+
+        self.lt_zero_count += int((lt == 0).sum())
+
+        pos_mask = lab == 2
+        n_pos = int(pos_mask.sum())
+        self.n_pos += n_pos
+        if n_pos > 0:
+            delta = (lt[pos_mask] - ts[pos_mask]).astype(np.int64)
+            self.delta_pos.extend(delta.tolist())
+
+    def finalize(self) -> dict[str, Any]:
+        if self.n_pos == 0:
+            return {"hypothesis": "H1", "note": "no positive samples", "n_pos": 0,
+                    "label_type_dist": self.label_type_counts}
+        delta = np.asarray(self.delta_pos, dtype=np.int64)
+        return {
+            "hypothesis": "H1",
+            "label_type_dist": self.label_type_counts,
+            "n_pos": self.n_pos,
+            "pos_rate": self.n_pos / self.n_total if self.n_total > 0 else 0.0,
+            "label_time_zero_frac": self.lt_zero_count / self.n_total if self.n_total > 0 else 0.0,
+            "delta_stats_sec": _summary_stats(delta),
+            "delta_percentiles_sec": _percentiles(delta),
+            "delta_within_15min_frac": float((delta <= 900).mean()),
+            "delta_within_1h_frac": float((delta <= 3600).mean()),
+            "delta_within_24h_frac": float((delta <= 86400).mean()),
+        }
+
+
 def check_h1_label_time_delta(tbl) -> dict[str, Any]:
-    """H1: label_time - timestamp 分布 (正样本 label_type==2 only)."""
-    lt = tbl.column("label_time").to_numpy(zero_copy_only=False).astype(np.int64)
-    ts = tbl.column("timestamp").to_numpy(zero_copy_only=False).astype(np.int64)
-    lab = tbl.column("label_type").to_numpy(zero_copy_only=False).astype(np.int64)
+    """One-shot wrapper (for backward-compat with smoke tests)."""
+    acc = H1Accumulator()
+    acc.update(tbl)
+    return acc.finalize()
 
-    pos_mask = lab == 2
-    n_pos = int(pos_mask.sum())
-    if n_pos == 0:
-        return {"hypothesis": "H1", "note": "no positive samples", "n_pos": 0}
 
-    delta_pos = (lt[pos_mask] - ts[pos_mask]).astype(np.int64)
-    lt_null_frac = float((lt == 0).mean())
+class _FidState:
+    """Per-fid streaming state for H2H3."""
+    __slots__ = ("n_vals", "zero_count", "neg_count", "min_v", "max_v",
+                 "unique_set", "unique_saturated", "value_counter",
+                 "UNIQUE_CAP", "COUNTER_CAP", "COUNTER_TRIM")
 
-    return {
-        "hypothesis": "H1",
-        "label_type_dist": dict(zip(*[arr.tolist() for arr in np.unique(lab, return_counts=True)])),
-        "n_pos": n_pos,
-        "pos_rate": float(pos_mask.mean()),
-        "label_time_zero_frac": lt_null_frac,
-        "delta_stats_sec": _summary_stats(delta_pos),
-        "delta_percentiles_sec": _percentiles(delta_pos),
-        "delta_within_15min_frac": float((delta_pos <= 900).mean()),
-        "delta_within_1h_frac": float((delta_pos <= 3600).mean()),
-        "delta_within_24h_frac": float((delta_pos <= 86400).mean()),
-    }
+    def __init__(self, unique_cap: int = 200000, counter_cap: int = 30000,
+                 counter_trim: int = 5000) -> None:
+        self.n_vals = 0
+        self.zero_count = 0
+        self.neg_count = 0
+        self.min_v: int | None = None
+        self.max_v: int | None = None
+        self.unique_set: set[int] = set()
+        self.unique_saturated = False
+        # Counter (value -> count). Periodic prune if size > COUNTER_CAP, keep top
+        # COUNTER_TRIM. After prune, top-3 at finalize is still approximate but
+        # very accurate since top values almost never get evicted under Zipf dist.
+        self.value_counter: dict[int, int] = {}
+        self.UNIQUE_CAP = unique_cap
+        self.COUNTER_CAP = counter_cap
+        self.COUNTER_TRIM = counter_trim
+
+    def update(self, arr: np.ndarray) -> None:
+        self.n_vals += len(arr)
+        self.zero_count += int((arr == 0).sum())
+        self.neg_count += int((arr < 0).sum())
+        mn = int(arr.min())
+        mx = int(arr.max())
+        self.min_v = mn if self.min_v is None else min(self.min_v, mn)
+        self.max_v = mx if self.max_v is None else max(self.max_v, mx)
+
+        # Unique set (cap-protected)
+        if not self.unique_saturated:
+            uniq_vals = np.unique(arr)
+            for v in uniq_vals.tolist():
+                self.unique_set.add(int(v))
+                if len(self.unique_set) > self.UNIQUE_CAP:
+                    self.unique_saturated = True
+                    break
+
+        # Top-k counter: count unique-per-batch, then add to global counter.
+        # Periodic prune to keep memory bounded.
+        uniq, counts = np.unique(arr, return_counts=True)
+        for v, c in zip(uniq.tolist(), counts.tolist()):
+            v_int = int(v)
+            self.value_counter[v_int] = self.value_counter.get(v_int, 0) + int(c)
+        if len(self.value_counter) > self.COUNTER_CAP:
+            # Keep top COUNTER_TRIM by count.
+            top_items = sorted(self.value_counter.items(), key=lambda x: -x[1])[:self.COUNTER_TRIM]
+            self.value_counter = dict(top_items)
+
+    def finalize_fid(self) -> dict[str, Any]:
+        unique_str: int | str = (f">={self.UNIQUE_CAP}" if self.unique_saturated
+                                 else len(self.unique_set))
+        zero_frac = self.zero_count / self.n_vals if self.n_vals > 0 else 0.0
+        neg_frac = self.neg_count / self.n_vals if self.n_vals > 0 else 0.0
+        top3 = sorted(self.value_counter.items(), key=lambda x: -x[1])[:3]
+        return {
+            "n_vals": self.n_vals,
+            "unique": unique_str,
+            "zero_frac": zero_frac,
+            "neg_frac": neg_frac,
+            "min": self.min_v if self.min_v is not None else 0,
+            "max": self.max_v if self.max_v is not None else 0,
+            "top3_val_count": [(int(v), int(c)) for v, c in top3],
+        }
+
+
+class H2H3Accumulator:
+    """H2 + H3: 4 个 domain 各 fid 的 unique / zero_frac / top3 / len distribution.
+
+    Memory-safe streaming: per-fid state is bounded (unique_set cap, counter cap).
+    Seq len is reservoir sampled (up to 500k per domain for percentile calc)."""
+
+    RESERVOIR_CAP = 500_000
+
+    def __init__(self) -> None:
+        self.domain_states: dict[str, dict[str, Any]] = {}
+        for domain_name, cfg in DOMAIN_CONFIG.items():
+            self.domain_states[domain_name] = {
+                "ts_fid": cfg["ts_fid"],
+                "fid_states": {fid: _FidState() for fid in cfg["fids"]},
+                "fid_all_none": {fid: True for fid in cfg["fids"]},
+                "row_count": 0,
+                "empty_row_count": 0,
+                "seq_len_sample": [],
+                "seq_len_n": 0,
+            }
+
+    def update(self, tbl) -> None:
+        for domain_name, cfg in DOMAIN_CONFIG.items():
+            state = self.domain_states[domain_name]
+            prefix = cfg["prefix"]
+            ts_fid = cfg["ts_fid"]
+            ts_col_name = f"{prefix}_{ts_fid}"
+
+            # Compute per-row seq lengths from ts_fid column (cheap).
+            if ts_col_name in tbl.column_names:
+                ts_col_py = tbl.column(ts_col_name).to_pylist()
+                state["row_count"] += len(ts_col_py)
+                for x in ts_col_py:
+                    length = len(x) if x is not None else 0
+                    if length == 0:
+                        state["empty_row_count"] += 1
+                    # Reservoir sample for percentile.
+                    if len(state["seq_len_sample"]) < self.RESERVOIR_CAP:
+                        state["seq_len_sample"].append(length)
+                    state["seq_len_n"] += 1
+
+            for fid in cfg["fids"]:
+                col_name = f"{prefix}_{fid}"
+                if col_name not in tbl.column_names:
+                    continue
+                col_py = tbl.column(col_name).to_pylist()
+                concat = _concat_list_col(col_py)
+                if concat is None:
+                    continue
+                state["fid_all_none"][fid] = False
+                state["fid_states"][fid].update(concat)
+
+    def finalize(self) -> dict[str, Any]:
+        results: dict[str, Any] = {}
+        for domain_name, state in self.domain_states.items():
+            fid_stats: dict[str, Any] = {}
+            for fid, fs in state["fid_states"].items():
+                if state["fid_all_none"][fid]:
+                    fid_stats[f"fid_{fid}"] = {"n_vals": 0, "note": "all None/empty"}
+                    continue
+                fid_info = fs.finalize_fid()
+                fid_info["is_ts_fid"] = (fid == state["ts_fid"])
+                fid_stats[f"fid_{fid}"] = fid_info
+
+            len_arr = np.asarray(state["seq_len_sample"], dtype=np.int64)
+            row_count = state["row_count"]
+            results[domain_name] = {
+                "ts_fid": state["ts_fid"],
+                "row_count": row_count,
+                "seq_len_stats": _summary_stats(len_arr),
+                "seq_len_percentiles": _percentiles(len_arr),
+                "seq_empty_rows_frac": (state["empty_row_count"] / row_count
+                                         if row_count > 0 else float("nan")),
+                "fids": fid_stats,
+            }
+        return {"hypothesis": "H2+H3", "domains": results}
 
 
 def check_h2_h3_seq_domain_structure(tbl) -> dict[str, Any]:
-    """H2 + H3: 4 个 domain 各 fid 的 unique / zero_frac / top3 / len distribution."""
-    results: dict[str, Any] = {}
-    for domain_name, cfg in DOMAIN_CONFIG.items():
-        prefix = cfg["prefix"]
-        fid_stats: dict[str, Any] = {}
-        per_row_lens: list[int] = []
-        ts_fid = cfg["ts_fid"]
-        for fid in cfg["fids"]:
-            col_name = f"{prefix}_{fid}"
-            if col_name not in tbl.column_names:
-                continue
-            col_py = tbl.column(col_name).to_pylist()
-            if fid == ts_fid:
-                per_row_lens = [len(x) if x is not None else 0 for x in col_py]
+    """One-shot wrapper."""
+    acc = H2H3Accumulator()
+    acc.update(tbl)
+    return acc.finalize()
 
-            concat = _concat_list_col(col_py)
-            if concat is None:
-                fid_stats[f"fid_{fid}"] = {"n_vals": 0, "note": "all None/empty"}
-                continue
-            uniq = len(np.unique(concat))
-            zero_frac = float((concat == 0).mean())
-            neg_frac = float((concat < 0).mean())
-            top3 = _top_k_values(concat, k=3)
-            fid_stats[f"fid_{fid}"] = {
-                "n_vals": int(len(concat)),
-                "unique": uniq,
-                "zero_frac": zero_frac,
-                "neg_frac": neg_frac,
-                "min": int(concat.min()),
-                "max": int(concat.max()),
-                "top3_val_count": top3,
-                "is_ts_fid": (fid == ts_fid),
+
+class H4Accumulator:
+    """H4: user_id / item_id 重复性 (streaming via global Counter).
+
+    Memory: 1.9M rows → user/item Counter up to few MB each. OK."""
+
+    def __init__(self) -> None:
+        self.user_counts: dict[int, int] = {}
+        self.item_counts: dict[int, int] = {}
+        self.total_rows = 0
+
+    def update(self, tbl) -> None:
+        uid = tbl.column("user_id").to_numpy(zero_copy_only=False).astype(np.int64)
+        iid = tbl.column("item_id").to_numpy(zero_copy_only=False).astype(np.int64)
+        self.total_rows += len(uid)
+
+        u_uniq, u_c = np.unique(uid, return_counts=True)
+        for v, c in zip(u_uniq.tolist(), u_c.tolist()):
+            self.user_counts[int(v)] = self.user_counts.get(int(v), 0) + int(c)
+        i_uniq, i_c = np.unique(iid, return_counts=True)
+        for v, c in zip(i_uniq.tolist(), i_c.tolist()):
+            self.item_counts[int(v)] = self.item_counts.get(int(v), 0) + int(c)
+
+    def finalize(self) -> dict[str, Any]:
+        u_counts_arr = np.asarray(list(self.user_counts.values()), dtype=np.int64)
+        i_counts_arr = np.asarray(list(self.item_counts.values()), dtype=np.int64)
+
+        def _count_dist(counts: np.ndarray) -> dict[str, int]:
+            if len(counts) == 0:
+                return {"=1": 0, "=2": 0, "3-5": 0, "6-10": 0, "11-50": 0, ">=51": 0}
+            return {
+                "=1": int((counts == 1).sum()),
+                "=2": int((counts == 2).sum()),
+                "3-5": int(((counts >= 3) & (counts <= 5)).sum()),
+                "6-10": int(((counts >= 6) & (counts <= 10)).sum()),
+                "11-50": int(((counts >= 11) & (counts <= 50)).sum()),
+                ">=51": int((counts >= 51).sum()),
             }
 
-        len_arr = np.asarray(per_row_lens, dtype=np.int64)
-        results[domain_name] = {
-            "ts_fid": ts_fid,
-            "row_count": int(len(per_row_lens)),
-            "seq_len_stats": _summary_stats(len_arr),
-            "seq_len_percentiles": _percentiles(len_arr),
-            "seq_empty_rows_frac": float((len_arr == 0).mean()) if len(len_arr) > 0 else float("nan"),
-            "fids": fid_stats,
+        return {
+            "hypothesis": "H4",
+            "total_rows": self.total_rows,
+            "unique_users": len(self.user_counts),
+            "unique_items": len(self.item_counts),
+            "user_impressions_per_user_mean": float(u_counts_arr.mean()) if len(u_counts_arr) > 0 else 0.0,
+            "user_impressions_per_user_max": int(u_counts_arr.max()) if len(u_counts_arr) > 0 else 0,
+            "user_count_dist": _count_dist(u_counts_arr),
+            "item_impressions_per_item_mean": float(i_counts_arr.mean()) if len(i_counts_arr) > 0 else 0.0,
+            "item_impressions_per_item_max": int(i_counts_arr.max()) if len(i_counts_arr) > 0 else 0,
+            "item_count_dist": _count_dist(i_counts_arr),
         }
-    return {"hypothesis": "H2+H3", "domains": results}
 
 
 def check_h4_user_item_uniqueness(tbl) -> dict[str, Any]:
-    """H4: user_id / item_id 重复性 (demo 100% unique, 真实可能不同)."""
-    uid = tbl.column("user_id").to_numpy(zero_copy_only=False).astype(np.int64)
-    iid = tbl.column("item_id").to_numpy(zero_copy_only=False).astype(np.int64)
+    """One-shot wrapper."""
+    acc = H4Accumulator()
+    acc.update(tbl)
+    return acc.finalize()
 
-    u_uniq, u_counts = np.unique(uid, return_counts=True)
-    i_uniq, i_counts = np.unique(iid, return_counts=True)
 
-    def _count_dist(counts: np.ndarray) -> dict[str, int]:
-        return {
-            "=1": int((counts == 1).sum()),
-            "=2": int((counts == 2).sum()),
-            "3-5": int(((counts >= 3) & (counts <= 5)).sum()),
-            "6-10": int(((counts >= 6) & (counts <= 10)).sum()),
-            "11-50": int(((counts >= 11) & (counts <= 50)).sum()),
-            ">=51": int((counts >= 51).sum()),
-        }
+class H5Accumulator:
+    """H5: seq_ts - sample_ts 距离分布 (streaming).
 
-    return {
-        "hypothesis": "H4",
-        "total_rows": int(len(uid)),
-        "unique_users": int(len(u_uniq)),
-        "unique_items": int(len(i_uniq)),
-        "user_impressions_per_user_mean": float(u_counts.mean()),
-        "user_impressions_per_user_max": int(u_counts.max()),
-        "user_count_dist": _count_dist(u_counts),
-        "item_impressions_per_item_mean": float(i_counts.mean()),
-        "item_impressions_per_item_max": int(i_counts.max()),
-        "item_count_dist": _count_dist(i_counts),
-    }
+    Per-domain state: bucket counters (precise) + reservoir sample of deltas
+    for percentile calc (cap 500k per domain, 16MB × 4 = 64MB total).
+    """
+
+    RESERVOIR_CAP = 500_000
+    DAY = 86400
+
+    def __init__(self) -> None:
+        self.domain_states: dict[str, dict[str, Any]] = {}
+        for domain_name in DOMAIN_CONFIG.keys():
+            self.domain_states[domain_name] = {
+                "n_valid_deltas": 0,
+                "sum_v": 0.0,
+                "sum_sq_v": 0.0,
+                "min_v": None,
+                "max_v": None,
+                "within_5min": 0,
+                "within_1h": 0,
+                "within_1d": 0,
+                "within_7d": 0,
+                "within_30d": 0,
+                "over_30d": 0,
+                "sample": [],
+            }
+
+    def update(self, tbl) -> None:
+        sample_ts = tbl.column("timestamp").to_numpy(zero_copy_only=False).astype(np.int64)
+        for domain_name, cfg in DOMAIN_CONFIG.items():
+            ts_col_name = f"{cfg['prefix']}_{cfg['ts_fid']}"
+            if ts_col_name not in tbl.column_names:
+                continue
+            ts_col = tbl.column(ts_col_name).to_pylist()
+            state = self.domain_states[domain_name]
+
+            # Concat all deltas from this batch (all valid, positive-only).
+            batch_deltas: list[np.ndarray] = []
+            for i, seq_ts in enumerate(ts_col):
+                if seq_ts is None or len(seq_ts) == 0:
+                    continue
+                seq_ts_arr = np.asarray(seq_ts, dtype=np.int64)
+                valid = seq_ts_arr > 0
+                if not valid.any():
+                    continue
+                delta = (sample_ts[i] - seq_ts_arr[valid]).astype(np.int64)
+                delta = delta[delta >= 0]
+                if len(delta) > 0:
+                    batch_deltas.append(delta)
+            if not batch_deltas:
+                continue
+
+            concat = np.concatenate(batch_deltas)
+            state["n_valid_deltas"] += int(len(concat))
+
+            # Bucket counters (precise).
+            state["within_5min"] += int((concat <= 300).sum())
+            state["within_1h"] += int((concat <= 3600).sum())
+            state["within_1d"] += int((concat <= 1 * self.DAY).sum())
+            state["within_7d"] += int((concat <= 7 * self.DAY).sum())
+            state["within_30d"] += int((concat <= 30 * self.DAY).sum())
+            state["over_30d"] += int((concat > 30 * self.DAY).sum())
+
+            # Stats accumulators (exact).
+            state["sum_v"] += float(concat.sum())
+            state["sum_sq_v"] += float((concat.astype(np.float64) ** 2).sum())
+            mn = int(concat.min()); mx = int(concat.max())
+            state["min_v"] = mn if state["min_v"] is None else min(state["min_v"], mn)
+            state["max_v"] = mx if state["max_v"] is None else max(state["max_v"], mx)
+
+            # Reservoir sample up to cap (truncated-reservoir, simpler than true
+            # reservoir algorithm; within-domain earlier-file bias, but 500k is
+            # already larger than typical p99 calc needs).
+            remain = self.RESERVOIR_CAP - len(state["sample"])
+            if remain > 0:
+                take = concat[:remain].tolist() if len(concat) > remain else concat.tolist()
+                state["sample"].extend(take)
+
+    def finalize(self) -> dict[str, Any]:
+        results: dict[str, Any] = {}
+        for domain_name, state in self.domain_states.items():
+            n = state["n_valid_deltas"]
+            if n == 0:
+                results[domain_name] = {"note": "no valid deltas"}
+                continue
+            sample_arr = np.asarray(state["sample"], dtype=np.int64)
+            mean = state["sum_v"] / n
+            var = state["sum_sq_v"] / n - mean * mean
+            std = float(np.sqrt(max(var, 0.0)))
+            results[domain_name] = {
+                "n_valid_deltas": n,
+                "delta_sec_stats": {
+                    "n": n,
+                    "min": float(state["min_v"]),
+                    "max": float(state["max_v"]),
+                    "mean": mean,
+                    "std": std,
+                },
+                "delta_sec_percentiles": _percentiles(sample_arr),
+                "within_5min_frac": state["within_5min"] / n,
+                "within_1h_frac": state["within_1h"] / n,
+                "within_1d_frac": state["within_1d"] / n,
+                "within_7d_frac": state["within_7d"] / n,
+                "within_30d_frac": state["within_30d"] / n,
+                "over_30d_frac": state["over_30d"] / n,
+            }
+        return {"hypothesis": "H5", "domains": results}
 
 
 def check_h5_seq_ts_distance(tbl) -> dict[str, Any]:
-    """H5: seq_ts - sample_ts 每个 domain 的距离分布 (sec)."""
-    sample_ts = tbl.column("timestamp").to_numpy(zero_copy_only=False).astype(np.int64)
-
-    results: dict[str, Any] = {}
-    for domain_name, cfg in DOMAIN_CONFIG.items():
-        ts_col_name = f"{cfg['prefix']}_{cfg['ts_fid']}"
-        if ts_col_name not in tbl.column_names:
-            continue
-        ts_col = tbl.column(ts_col_name).to_pylist()
-
-        all_deltas: list[np.ndarray] = []
-        for i, seq_ts in enumerate(ts_col):
-            if seq_ts is None or len(seq_ts) == 0:
-                continue
-            seq_ts_arr = np.asarray(seq_ts, dtype=np.int64)
-            valid = seq_ts_arr > 0
-            if not valid.any():
-                continue
-            delta = (sample_ts[i] - seq_ts_arr[valid]).astype(np.int64)
-            delta = delta[delta >= 0]
-            if len(delta) > 0:
-                all_deltas.append(delta)
-
-        if not all_deltas:
-            results[domain_name] = {"note": "no valid deltas"}
-            continue
-
-        concat = np.concatenate(all_deltas)
-        results[domain_name] = {
-            "n_valid_deltas": int(len(concat)),
-            "delta_sec_stats": _summary_stats(concat),
-            "delta_sec_percentiles": _percentiles(concat),
-            "within_5min_frac": float((concat <= 300).mean()),
-            "within_1h_frac": float((concat <= 3600).mean()),
-            "within_1d_frac": float((concat <= 86400).mean()),
-            "within_7d_frac": float((concat <= 7 * 86400).mean()),
-            "within_30d_frac": float((concat <= 30 * 86400).mean()),
-            "over_30d_frac": float((concat > 30 * 86400).mean()),
-        }
-    return {"hypothesis": "H5", "domains": results}
+    """One-shot wrapper."""
+    acc = H5Accumulator()
+    acc.update(tbl)
+    return acc.finalize()
 
 
 # --------------------------------------------------------------------------
@@ -394,19 +632,21 @@ def main() -> None:
     else:
         files = all_files
 
-    # Streaming read: per-file cap, then per-RG read up to rows_per_file.
-    tables = []
+    # Streaming accumulators: per-RG update, never concat full table.
+    import gc
+    acc_h1 = H1Accumulator()
+    acc_h2h3 = H2H3Accumulator()
+    acc_h4 = H4Accumulator()
+    acc_h5 = H5Accumulator()
+
     total_rows = 0
+    files_scanned = 0
     for fp in files:
-        if args.max_rows > 0 and total_rows >= args.max_rows:
-            break
         pf = pq.ParquetFile(fp)
         rows_read_this_file = 0
-        per_file_cap = args.rows_per_file if args.rows_per_file > 0 else float("inf")
+        per_file_cap = args.rows_per_file if args.rows_per_file > 0 else 10**12
         for rg_idx in range(pf.num_row_groups):
             if rows_read_this_file >= per_file_cap:
-                break
-            if args.max_rows > 0 and total_rows >= args.max_rows:
                 break
             tbl = pf.read_row_group(rg_idx)
             remain_file = per_file_cap - rows_read_this_file
@@ -414,25 +654,37 @@ def main() -> None:
                 tbl = tbl.slice(0, int(remain_file))
             if args.max_rows > 0:
                 remain_total = args.max_rows - total_rows
+                if remain_total <= 0:
+                    break
                 if tbl.num_rows > remain_total:
                     tbl = tbl.slice(0, remain_total)
-            tables.append(tbl)
+
+            acc_h1.update(tbl)
+            acc_h2h3.update(tbl)
+            acc_h4.update(tbl)
+            acc_h5.update(tbl)
+
             total_rows += tbl.num_rows
             rows_read_this_file += tbl.num_rows
+            del tbl
+        files_scanned += 1
+        if files_scanned % 10 == 0 or files_scanned == len(files):
+            print(f"[eda] Scanned {files_scanned}/{len(files)} files, "
+                  f"{total_rows} rows so far")
+        gc.collect()
+        if args.max_rows > 0 and total_rows >= args.max_rows:
+            break
 
-    import pyarrow as pa
-    big_tbl = pa.concat_tables(tables)
-    print(f"[eda] Loaded {big_tbl.num_rows} rows from {len(files)} files "
-          f"(mem-safe sub-sample)")
+    print(f"[eda] Streaming scan complete: {total_rows} rows from {files_scanned} files")
 
-    print("[eda] Running H1 · label_time delta...")
-    r_h1 = check_h1_label_time_delta(big_tbl)
-    print("[eda] Running H2 + H3 · seq domain structure...")
-    r_h2h3 = check_h2_h3_seq_domain_structure(big_tbl)
-    print("[eda] Running H4 · user/item uniqueness...")
-    r_h4 = check_h4_user_item_uniqueness(big_tbl)
-    print("[eda] Running H5 · seq_ts distance...")
-    r_h5 = check_h5_seq_ts_distance(big_tbl)
+    print("[eda] Finalizing H1 · label_time delta...")
+    r_h1 = acc_h1.finalize()
+    print("[eda] Finalizing H2 + H3 · seq domain structure...")
+    r_h2h3 = acc_h2h3.finalize()
+    print("[eda] Finalizing H4 · user/item uniqueness...")
+    r_h4 = acc_h4.finalize()
+    print("[eda] Finalizing H5 · seq_ts distance...")
+    r_h5 = acc_h5.finalize()
 
     _print_h1(r_h1)
     _print_h2h3(r_h2h3)
@@ -444,7 +696,7 @@ def main() -> None:
             "data_dir": str(data_dir),
             "num_files_total": len(all_files),
             "num_files_sampled": len(files),
-            "rows_loaded": big_tbl.num_rows,
+            "rows_loaded": total_rows,
             "rows_per_file_cap": args.rows_per_file,
             "max_files_cap": args.max_files,
             "max_rows_cap": args.max_rows,
@@ -481,7 +733,7 @@ def main() -> None:
     print("\n" + "#" * 72)
     print("## EDA COMPACT SUMMARY · 20 key numbers (platform log safe)")
     print("#" * 72)
-    print(f"# rows_loaded: {big_tbl.num_rows}, files_sampled: {len(files)} / {len(all_files)}")
+    print(f"# rows_loaded: {total_rows}, files_sampled: {len(files)} / {len(all_files)}")
     # H1: label_time delta
     if r_h1.get("n_pos", 0) > 0:
         p = r_h1["delta_percentiles_sec"]
@@ -501,13 +753,17 @@ def main() -> None:
         for fn, fi in d.get("fids", {}).items():
             if fi.get("is_ts_fid"):
                 continue
-            if fi.get("unique", 0) > max_u:
-                max_u = fi["unique"]
+            u = fi.get("unique", 0)
+            # Saturated unique (str like '>=200000') treated as large sentinel.
+            u_num = 10**18 if isinstance(u, str) else u
+            if u_num > max_u:
+                max_u = u_num
                 max_u_fid = fn
+        max_u_display = d.get("fids", {}).get(max_u_fid, {}).get("unique", 0) if max_u_fid else 0
         zfrac = d.get("fids", {}).get(max_u_fid, {}).get("zero_frac", -1) if max_u_fid else -1
         print(f"# H2+H3 {dn}: seq_len p50={p.get('p50', 0):.0f} p95={p.get('p95', 0):.0f}, "
               f"empty={d.get('seq_empty_rows_frac', 0)*100:.1f}%, "
-              f"top_unique_fid={max_u_fid} unique={max_u} zero%={zfrac*100:.1f}")
+              f"top_unique_fid={max_u_fid} unique={max_u_display} zero%={zfrac*100:.1f}")
     # H4
     print(f"# H4: total_rows={r_h4['total_rows']}, unique_users={r_h4['unique_users']} "
           f"({r_h4['unique_users']/r_h4['total_rows']*100:.2f}%), "
