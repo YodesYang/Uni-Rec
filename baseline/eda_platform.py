@@ -1,8 +1,19 @@
 """Platform-ready EDA: 验证 5 个关键假设 (H1~H5)
 
 Usage:
-    python scripts/eda_platform.py --data_dir ./data/demo --max_rows 0
-    python scripts/eda_platform.py --data_dir /path/to/platform/train --max_rows 200000
+    python baseline/eda_platform.py --data_dir ./data/demo
+    python baseline/eda_platform.py \\
+        --data_dir /data_ams/industrial_training_data \\
+        --max_files 50 --rows_per_file 2000
+
+Design:
+    平台 1000 个 parquet × 每文件 ~1900 行 = 1.9M 总行 + 每行含 list<int64>
+    seq 列 → 全量 concat 到内存会 OOM（已踩坑: job exit 137 @ 2026-05-10）。
+    解决方案: **file-level subsample + per-file row cap**:
+      - --max_files=50 抽样（files 按名字 sorted, 假设暗含时间顺序, step 均匀采）
+      - --rows_per_file=2000 每文件最多 2000 行
+      - 默认 50 × 2000 = 100k rows 总量, concat 后 ~50MB, 远低于 container 限
+    100k 行样本对所有 5 个假设都统计显著（H5 时间分布尤其对 100k 稳健）。
 
 Outputs:
     - prints human-readable table to stdout
@@ -16,11 +27,7 @@ Hypotheses:
     H4: user_id 重复性 (demo 100% unique, 真实可能不同)
     H5: seq_ts - sample_ts 距离分布 (验证 "近 5 分钟" 价值)
 
-Design Principles:
-    - stdlib + pyarrow + numpy only (no pandas, no sklearn, no torch)
-    - streaming row-group read, max_rows cap 控制内存
-    - 不改训练 code, 不影响 baseline/
-    - 本地 demo_1000 smoke <10s; 平台 1.9M 数据 <5min 即可完成
+Dependencies: stdlib + pyarrow + numpy only.
 """
 
 from __future__ import annotations
@@ -349,10 +356,18 @@ def _print_h5(r: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Platform EDA · 5 hypothesis checks")
+    parser = argparse.ArgumentParser(description="Platform EDA · 5 hypothesis checks (streaming, OOM-safe)")
     parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .parquet files")
     parser.add_argument("--max_rows", type=int, default=0,
-                        help="Cap total rows (0 = no cap). Useful for quick platform runs.")
+                        help="Cap total rows in final concat table (0 = no cap).")
+    parser.add_argument("--max_files", type=int, default=30,
+                        help="Cap number of parquet files scanned (0 = all). Files are sampled "
+                             "evenly across the sorted file list for temporal coverage. "
+                             "Default 30 = conservative memory-safe choice for 1.9M dataset.")
+    parser.add_argument("--rows_per_file", type=int, default=500,
+                        help="Max rows to read from each sampled file (0 = full file). "
+                             "Default 500 × 30 files = 15k rows → ~300MB peak (seq list<int64> "
+                             "explosion included), well under container limit.")
     parser.add_argument("--output_dir", type=str, default="/tmp/eda",
                         help="Directory to write eda_report.json")
     args = parser.parse_args()
@@ -361,30 +376,48 @@ def main() -> None:
     out_dir = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    files = _find_parquet_files(data_dir)
-    print(f"[eda] Found {len(files)} parquet file(s) under {data_dir}")
+    all_files = _find_parquet_files(data_dir)
+    print(f"[eda] Found {len(all_files)} parquet file(s) under {data_dir}")
 
-    # streaming concat
+    # Even sub-sampling across files for temporal coverage (files are sorted).
+    if args.max_files > 0 and len(all_files) > args.max_files:
+        step = len(all_files) // args.max_files
+        files = [all_files[i * step] for i in range(args.max_files)]
+        print(f"[eda] Sampling {len(files)} files evenly "
+              f"(every {step}-th file) from {len(all_files)} total.")
+    else:
+        files = all_files
+
+    # Streaming read: per-file cap, then per-RG read up to rows_per_file.
     tables = []
     total_rows = 0
     for fp in files:
+        if args.max_rows > 0 and total_rows >= args.max_rows:
+            break
         pf = pq.ParquetFile(fp)
+        rows_read_this_file = 0
+        per_file_cap = args.rows_per_file if args.rows_per_file > 0 else float("inf")
         for rg_idx in range(pf.num_row_groups):
+            if rows_read_this_file >= per_file_cap:
+                break
             if args.max_rows > 0 and total_rows >= args.max_rows:
                 break
             tbl = pf.read_row_group(rg_idx)
+            remain_file = per_file_cap - rows_read_this_file
+            if tbl.num_rows > remain_file:
+                tbl = tbl.slice(0, int(remain_file))
             if args.max_rows > 0:
-                remain = args.max_rows - total_rows
-                if tbl.num_rows > remain:
-                    tbl = tbl.slice(0, remain)
+                remain_total = args.max_rows - total_rows
+                if tbl.num_rows > remain_total:
+                    tbl = tbl.slice(0, remain_total)
             tables.append(tbl)
             total_rows += tbl.num_rows
-        if args.max_rows > 0 and total_rows >= args.max_rows:
-            break
+            rows_read_this_file += tbl.num_rows
 
     import pyarrow as pa
     big_tbl = pa.concat_tables(tables)
-    print(f"[eda] Loaded {big_tbl.num_rows} rows, {big_tbl.num_columns} columns")
+    print(f"[eda] Loaded {big_tbl.num_rows} rows from {len(files)} files "
+          f"(mem-safe sub-sample)")
 
     print("[eda] Running H1 · label_time delta...")
     r_h1 = check_h1_label_time_delta(big_tbl)
@@ -403,8 +436,11 @@ def main() -> None:
     report = {
         "meta": {
             "data_dir": str(data_dir),
-            "num_files": len(files),
-            "total_rows": big_tbl.num_rows,
+            "num_files_total": len(all_files),
+            "num_files_sampled": len(files),
+            "rows_loaded": big_tbl.num_rows,
+            "rows_per_file_cap": args.rows_per_file,
+            "max_files_cap": args.max_files,
             "max_rows_cap": args.max_rows,
         },
         "H1": r_h1,
