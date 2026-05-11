@@ -6,11 +6,15 @@
 
 ---
 
-**最近一次审视**：2026-05-11 西班牙凌晨 04:10（UTC+2 · ⚠️ **u4i3 × gap=0 Dev 实测负向 + EDA 5 次失败放弃**）· 结论：① **2 u4i3 × gap=0 job 回流**（`~/Downloads/train_log.txt` line 1~42）：seed=42 × E4 Dev **0.868055** (vs EXP-036 A baseline 0.868924 **Δ−0.000869 = 3× rerun 噪声，明显负向**) / seed=3 × E4 Dev **0.868481**（松 guard 生效跑到 E4，baseline E3 停无法对称比较, 持平估算）。**u4i3 在 gap=0 领地反而微降**（假设机制: user_ns 5→4 粗化损伤记忆能力, item_ns 2→3 细化增益不足以补偿）。② **EDA platform 5 次迭代全部失败**（v1 OOM / v2 log 截断 / v3 OOM / v4 log 停 90/100 / v5 base64 blob 仍截断）消耗 3 slot + 3h agent 时间 → **产出 0 数据**。根因：平台 log UI 采集机制不透明，每次失败暴露新约束但 agent 盲试。用户 CEST 00:53 决定放弃。③ **当前 slot**: training 4/4 全空 / evaluation 0/4（等 CEST 06:00 重置）。④ **u4i3 × gap=0.05 信号（EXP-036 D）** 的 LogLoss 优化（−0.00245）是否转化为 LB 收益 → **等今日 07:00 前后 4 LB 上榜验证**。⑤ **决策策略**：不盲起 training job，等今日 LB 再决定；若 A LB ≥ 0.847 破 SOTA → gap=0 × DIN × seed=42 路径延伸；若 D LB ≥ 0.840 → Tokenization gap=0.05 方向保留；若全持平 → 重新战略 audit。⑥ **EXP-037 落档**（u4i3 gap=0 结果 + EDA 5 次失败详细复盘）。**本地 24 commits 未 push**（EDA 4 个 commit 占比，代码 500 行但 0 产出数据）。
+**最近一次审视**：2026-05-11 西班牙凌晨 05:20（UTC+2 · 🎯 **T29 Tokenization + T28 DIN Integrated 双方向代码就绪** · 等 7:00 CEST LB 决策起飞）· 结论：① **agent 阶段 A 产出**（04:12~04:55 · T29 Tokenization · 零代码改动 · 2 JSON + 生成脚本 + ADR-009 + EXP-038）；② **agent 阶段 B 产出**（04:46~05:20 · T28 DIN Integrated · ~80 行 model.py 代码 + ADR-010 + EXP-039）。两方向本地 smoke 全过：T29 A/B 参数量 353,334,977（不变, 只改 fid 顺序）/ T28 on 353,536,579（Δ+201,602 = 2 blocks × 100,801 符合理论）/ T28 off 353,334,977（backward-compat 完美）。③ **两方向完全正交**：T29 = fid 拼接顺序（tokenizer 层）/ T28 = DIN attention 深化（block 层），首次 ablation 不叠加但 S4 可叠加。④ **今日 4 slot 最优分配**（等 7:00 CEST 4 eval LB 回流决定，三种情景）:
+   - 🟢 **TOP 情景**（A LB ≥ 0.847 破 SOTA）: T29-A + T29-B + T28 + T25 gap=0 seed=11（跨方向覆盖 + gap=0 上沿追）
+   - 🟡 **中情景**（A LB ∈ [0.843, 0.847) 持平 T25）: T29-A + T29-B + T28 + 1 信号校准
+   - 🔴 **BOTTOM 情景**（A LB < 0.843 DIN 在 gap=0 失败）: T29-A + T29-B + T28 + 1 seed rerun（3 方向 × 1 校准 确保有回报）
+⑤ **战略承诺（用户 aggressive 选择）**：5/14 前 LB 0.850（Top 20）；每 48h 需一个正向方法学信号。今日 T29 + T28 双方向同时上马是"48h 内 2 个方法学 bet"的最高密度。⑥ T28 task `[~]` 新增，T29 task 已就位。⑦ **本地 27 commits 未 push**（昨晨 EXP-037 + T29 5 个文件 + T28 4 个文件改动 = 27）。
 
 ---
 
-**上一条审视（保留参考）**：2026-05-10 西班牙下午 16:25 · ① **Training slot 机制修正**（用户 16:21 更正）（grep `~/Downloads/train_log.txt`）：A **seed=42 × gap=0 × DIN × E4 Dev 0.868924** ⭐ 超 EXP-019 seed=42 no-DIN E4 baseline 0.868619 **+0.000305**（3× rerun 噪声, DIN 在 gap=0 首次正向信号）/ B seed=3 × gap=0 × DIN × E3 0.867661（guard 停 E3）/ C seed=7 × gap=0 × DIN × E3 0.866622（guard 停 E3）/ D Tokenization u4i3 × gap=0.05 × E3 0.843743（Dev 持平 T25 B, LogLoss **更低 −0.00245**）。② **关键机制发现**：gap=0 下 DIN 的 Dev 增益**边际递减**（gap=0.05 下 +0.00125 vs gap=0 下仅 +0.000305, 1/4 增益），**data completeness 消耗大部分 DIN 贡献**。③ **Tokenization u4i3 = "Dev 噪声 LogLoss 信号"**（Dev +0.00005 噪声内, LogLoss 明显降），**单看 Dev 会错过**；LogLoss 信号是否转化为 LB 增量要等 evaluation 验证。④ **4 evaluation 已全部提交**（全 4 quota 已用）：A-seed=42-E4, B-seed=3-E3, C-seed=7-E3, D-Tokenization-E3。**5/11 早 07:00 CEST LB 上榜**看结果。⑤ **预测 A 是今日最可能突破 SOTA 0.84637 的 ckpt**（gap=0 × DIN × seed=42 上沿叠加, 定性 ceiling 0.846~0.850）。**但 gap=0 下 Dev→LB gap 历史 +0.022~0.025, Dev +0.0003 不足以可靠预测 LB 增量**。⑥ **seed=3/7 guard 早停**（LogLoss E3 反弹触发）→ 未来 gap=0 × DIN 实验应默认 `--logloss_rebound_delta 0.003 --logloss_rebound_patience 2` 松 guard 让跑到 E4。⑦ **num_epochs=4 今早修正的价值验证**：A job E3→E4 Δ+0.000782 Dev（超 EXP-019 E3→E4 +0.000654），若停 E3 会丢失信号。⑧ **EXP-036 落档**（~280 行，含 4 job 完整 epoch 数据 + 4 个 Finding 分析 + LB 情景决策树）。⑨ **本地 15 commits 未 push**（昨日 14 + 今早 EXP-035 = 15）。
+**上一条审视（保留参考）**：2026-05-11 西班牙凌晨 04:10（UTC+2 · ⚠️ **u4i3 × gap=0 Dev 实测负向 + EDA 5 次失败放弃**）· 结论：① **2 u4i3 × gap=0 job 回流**（`~/Downloads/train_log.txt` line 1~42）：seed=42 × E4 Dev **0.868055** (vs EXP-036 A baseline 0.868924 **Δ−0.000869 = 3× rerun 噪声，明显负向**) / seed=3 × E4 Dev **0.868481**（松 guard 生效跑到 E4，baseline E3 停无法对称比较, 持平估算）。**u4i3 在 gap=0 领地反而微降**（假设机制: user_ns 5→4 粗化损伤记忆能力, item_ns 2→3 细化增益不足以补偿）。② **EDA platform 5 次迭代全部失败**（v1 OOM / v2 log 截断 / v3 OOM / v4 log 停 90/100 / v5 base64 blob 仍截断）消耗 3 slot + 3h agent 时间 → **产出 0 数据**。根因：平台 log UI 采集机制不透明，每次失败暴露新约束但 agent 盲试。用户 CEST 00:53 决定放弃。③ **当前 slot**: training 4/4 全空 / evaluation 0/4（等 CEST 06:00 重置）。④ **u4i3 × gap=0.05 信号（EXP-036 D）** 的 LogLoss 优化（−0.00245）是否转化为 LB 收益 → **等今日 07:00 前后 4 LB 上榜验证**。⑤ **决策策略**：不盲起 training job，等今日 LB 再决定；若 A LB ≥ 0.847 破 SOTA → gap=0 × DIN × seed=42 路径延伸；若 D LB ≥ 0.840 → Tokenization gap=0.05 方向保留；若全持平 → 重新战略 audit。⑥ **EXP-037 落档**（u4i3 gap=0 结果 + EDA 5 次失败详细复盘）。**本地 24 commits 未 push**（EDA 4 个 commit 占比，代码 500 行但 0 产出数据）。
 
 ---
 
@@ -327,6 +331,87 @@
 
 ---
 
+### T28 `[~]` DIN Integrated Inside HyFormer Block（T25 bypass 的 block-integrated 升级）
+
+**触发**（2026-05-11 CEST 05:15）：T25 DIN bypass 已在 EXP-036 证明 LB 真信号（+0.00421 LB · 9× rerun 噪声），但 bypass 只在 classifier 前拼接一次，DIN 信号**未参与 HyFormer block 内部的 token mixing**。DECEM 榜一公开说 "DIN + MLP"（MLP = block 内 FFN），UniRec 方案 1 的 `interest_token` 也是作为 NS-token 进入 backbone —— 都暗示 **integrated 才是 DIN 原始形态**。
+
+**机制**：把 `DINInterestExtractor` 从 `PCVRHyFormer._apply_din_interest_bypass`（只做 1 次）移到每个 `MultiSeqHyFormerBlock` 内部（做 `num_blocks=2` 次），注入点 = Query Decoding 之后、Token Fusion 之前：
+```python
+interest = self.din_extractor(target_repr, next_seqs, next_masks)  # (B, D)
+decoded_qs = [q_i + self.din_alpha * interest.unsqueeze(1) for q_i in decoded_qs]
+```
+每 block 独立 DIN + 独立 learnable `din_alpha`（init 0.1）+ 渐进细化（每 block 见 encoder 细化过的 seq）。Zero effect on RankMixer token count / 整除性约束。
+
+**已完成**（2026-05-11 CEST 05:15 · agent 阶段 B · 西班牙凌晨）:
+- ✅ [ADR-010](../30-decisions/ADR-010-din-integrated-in-block.md) 起草（Proposed）
+- ✅ [EXP-039](../40-experiments/EXP-039-t28-din-integrated-halftrain-2026-05-11.md) 实验计划 + run.sh 就位
+- ✅ `MultiSeqHyFormerBlock` 加 `enable_din_integrated` + `din_alpha` per-block（~60 行 model.py）
+- ✅ `PCVRHyFormer` 加 kwargs + 共享 `_compute_target_repr` helper（~20 行）
+- ✅ `train.py` `--enable_din_integrated` + `--din_integrated_alpha_init` CLI（~15 行）
+- ✅ `infer.py` cfg.get fallback（2 行）
+- ✅ 本地 smoke 3 矩阵全过：S1 off（353,334,977 params backward-compat）/ S2 on（353,536,579 Δ+201,602 = 2 × 100,801 符合理论）/ S3 infer 1000 predictions 训推一致
+- ✅ py_compile + ReadLints 全过
+
+**判决阈值**（vs T25 bypass E3 Dev **0.843696**，不是 baseline 0.842443；要证 T28 值得替换 T25）:
+- ≥ 0.847（+0.003 vs T25）→ 🎯 强信号立即 evaluation
+- [0.8452, 0.847) → 🟡 T28 优于 T25 边缘 → 1 eval quota 验证
+- [0.8437, 0.8452) → ⚪ 持平 T25 → 保留备选
+- < 0.8437 → ❌ Deprecated
+
+**LB 阈值**（若 S2 通过）：vs T25 bypass LB 0.843433
+- LB ≥ 0.850 → **Top 20 直达**
+- LB ≥ 0.847 → SOTA 突破，T28 替换 T25
+- LB ≥ 0.844 → 优于 T25，方法学真信号
+
+**下一步**（等 2026-05-11 07:00 CEST LB 回流后决定）:
+1. 按 EXP-036/037/038/039 合并决策树分配 4 slot（T29-A + T29-B + T28 + 1 seed/eval 校准）
+2. **Job Name**: `t28-din-integrated-halftrain-gap05-seed42`
+3. **注意**：首次 evaluation 必须勾选"上传自定义 infer.py"（新 kwarg · team-memory 铁律）
+4. **注意**：**首次 T28 不开 `--enable_torch_compile`**（避免 dynamo 干扰方法学判断，仅开 AMP bf16）
+5. **注意**：**T28 与 T29 首次 ablation 不叠加**（保持 `--ns_groups_json ""` 和 `--enable_din_integrated` 分离）
+
+**当前优先级**：**最高**（与 T29 并列，DIN 方向深挖 · DECEM 公开 work 方向的深化版）。
+
+---
+
+### T29 `[~]` Tokenization Fix · 启用 ns_groups.json 修改 fid 拼接顺序（DECEM 榜一方向）
+
+**触发**（2026-05-11 CEST 04:30）：EXP-035 Kaggle 视角 audit 把 "Tokenization 修复" 列为 DECEM 4 个公开 work 方向中**唯一未消化的方向**。agent 深度审视后确认：`baseline/run.sh` 过去 48 天一直写 `--ns_groups_json ""`（空字符串）走 singleton fallback，等于**fid 按匿名编号序随机拼接进 RankMixerNSTokenizer 的 chunk**。DECEM 原话"简单做了一些修复，让其更加合理化"大概率指这件事。
+
+**机制**：`RankMixerNSTokenizer` 里 `groups` 决定 fid 的 concat 顺序，相邻 fid 进同一 chunk → 共享一个 Linear projection → fid 的梯度耦合。当前"随机顺序"让 chunk 内部大/中/小 vocab 的 fid 混杂，Linear 难以同时优化。
+
+**已完成**（2026-05-11 CEST 04:30 · agent 阶段 A · 西班牙凌晨）:
+- ✅ [ADR-009](../30-decisions/ADR-009-tokenization-fix-ns-groups.md) 起草（Proposed）
+- ✅ [EXP-038](../40-experiments/EXP-038-t29-tokenization-fix-halftrain-2026-05-11.md) 实验计划落档
+- ✅ 生成 `scripts/gen_ns_groups_vocab_tier.py`（按 vocab tier 生成 ns_groups JSON）
+- ✅ 生成 `baseline/ns_groups_vocab_tier.json`（T29-B 配置）
+- ✅ 本地 smoke 两个变体全通过：train + infer 都 OK，参数量不变（353,334,977）验证"只改顺序不改容量"
+- ✅ py_compile 全过
+
+**2 个变体**：
+- **T29-A**：启用 `baseline/ns_groups.json`（4/26 原作者手工分组 U1~U7 + I1~I4）—— 最贴近 DECEM "简单修复" 语义
+- **T29-B**：启用 `baseline/ns_groups_vocab_tier.json`（按 vocab tier 分 3 组：small ≤ 100 < mid ≤ 2000 < large）—— 机制驱动，同 chunk 内 fid embedding 饱和速度相似
+
+**判决阈值**（vs `icq-half-gap05` E3 Dev 0.842443 · gap=0.05 可信 dev）:
+- E3 Dev ≥ 0.8437（Δ+0.0013 = 3× rerun 噪声 0.0003 + 采样偏差）→ 🎯 真信号立即 evaluation
+- [0.8433, 0.8437) → 🟡 seed=3 rerun
+- [0.8421, 0.8433) → ⚪ 持平 Deprecated
+- < 0.8421 → ❌ 负向关闭
+
+**LB 阈值**（若 S2 通过消耗 1 eval quota）：vs `icq-half-gap05` LB 0.839223
+- LB ≥ 0.847 → SOTA 破 + 优先叠加 T25 DIN + gap=0
+- LB ≥ 0.842 → 真信号保留并叠加
+- < 0.839 → 持平 Deprecated
+
+**下一步**（等 2026-05-11 07:00 CEST EXP-036/037 LB 回流后）:
+1. 按 EXP-036/037 decision tree 决定 4 slot 分配（T29-A + T29-B 占 2 slot）
+2. **注意**：平台上需上传 `baseline/ns_groups.json` + `baseline/ns_groups_vocab_tier.json` 两个 JSON（无 Python 代码改动，可 Copy 上次 T25 DIN job）
+3. 若 S2 通过，S3 LB 校准，S4 与 T25 DIN 叠加
+
+**当前优先级**：**最高**（Top 20 冲刺主路径，5/14 前 LB 0.850 目标的关键依赖）。
+
+---
+
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
 **决策（2026-04-26）**：暂缓启动。理由：
@@ -433,6 +518,10 @@
 ---
 
 ## Changelog
+
+- **2026-05-11 西班牙凌晨 05:20（UTC+2 · 🎯 T28 DIN Integrated 代码就位 · agent 阶段 B · 零 quota 消耗 ~34 分钟）**：① **实现**：把 T25 bypass 的 `DINInterestExtractor` 从 classifier 前（1 次）移到每个 `MultiSeqHyFormerBlock` 内部（num_blocks=2 次）。注入点 = Query Decoding 后、Token Fusion 前：`decoded_qs = [q_i + self.din_alpha * interest.unsqueeze(1) for q_i in decoded_qs]`。每 block 独立 DIN + 独立 learnable `din_alpha`（init 0.1）+ 渐进细化（每 block 见 encoder 细化过的 seq）。② **代码改动**: `baseline/model.py` ~60 行（MultiSeqHyFormerBlock + PCVRHyFormer + 新 `_compute_target_repr` shared helper）/ `baseline/train.py` ~15 行（2 新 CLI flag）/ `baseline/infer.py` 2 行（cfg fallback）。`dataset.py / trainer.py / utils.py` 零改动。③ **本地 smoke 3 矩阵全过**: S1 T28 off → 353,334,977 params（与 pre-T28 bit-identical backward-compat 完美）/ S2 T28 on → 353,536,579 params（Δ+201,602 = 2 blocks × 100,801 符合理论估算）/ S3 T28 on + infer.py → 1000 predictions 无 state_dict 错误训推一致。py_compile + ReadLints 全过。④ **判决阈值**（vs T25 bypass E3 Dev 0.843696 而非 baseline 0.842443 —— 要证值得替换 T25）: ≥0.847 强信号 / [0.8452, 0.847) 疑似优于 T25 / [0.8437, 0.8452) 持平 T25 / <0.8437 Deprecated。⑤ **首次 T28 不开 torch.compile**（避免 dynamo 干扰方法学判断），只开 AMP bf16。**不与 T29 Tokenization fix 叠加**（保 `--ns_groups_json ""` SOTA 路径，严格单变量）。**不与 T25 bypass 叠加**（`--enable_din_interest` off）。⑥ **首次 evaluation 必须上传自定义 infer.py**（新 kwarg · team-memory 铁律）。⑦ **ADR-010 + EXP-039 落档**，T28 task `[~]` 加入 active.md，30-decisions/README.md 索引更新。⑧ **与 T29 的关系**：完全正交（tokenizer 层 vs block 层），S4 可叠加。⑨ **今日 4 slot 最优分配**（等 7:00 CEST LB 回流最终定）：三情景决策树（见顶部审视）。
+
+- **2026-05-11 西班牙凌晨 04:55（UTC+2 · 🎯 Tokenization 方向代码就绪 · agent 阶段 A 产出 · 零 quota 消耗 ~45 min）**：用户深度战略反思请求 + aggressive 5/14 冲 0.850 承诺触发。① **定位 Tokenization 根因**：`run.sh` 2026-04-26 commit `fb2450b` 起写 `--ns_groups_json ""`（空字符串）→ `os.path.exists=False` → fallback 到 singleton 分组 ≡ fid 编号序 concat（匿名化等价随机）。4/26 原作者设计的 `baseline/ns_groups.json`（U1~U7 + I1~I4 手工语义分组）**过去 48 天从未被启用过**。② **机制分析**: `RankMixerNSTokenizer` groups 控制 fid concat 顺序 → 相邻 fid 进同一 chunk → 共享一个 Linear projection → fid 梯度耦合。当前"随机顺序"让同 chunk 内大/中/小 vocab 混杂。③ **DECEM 榜一情报对齐**: DECEM 5/8 帖明说 "Tokenization 做了小修改让其合理化"，本项目 **0 投入**。EXP-035 audit 中列为头号未消化线索。④ **2 个变体就绪**: T29-A = 启用 `baseline/ns_groups.json`（贴近 DECEM "简单修复" 语义），T29-B = `baseline/ns_groups_vocab_tier.json`（按 vocab tier 分 3 组 · 新生成）。⑤ **本地 smoke 全过**: `py_compile` OK / T29-A train 5 steps + infer 1000 predictions OK / T29-B 同样 OK / 参数量两者都是 `353,334,977`（与无 ns_groups 版本相同，证明**只改顺序不改容量**）/ sidecar `ns_groups*.json` 自动写入 best_model/ 且 infer.py 正确 resolve。⑥ **文档落档**: `ADR-009-tokenization-fix-ns-groups.md`（Proposed）+ `EXP-038-t29-tokenization-fix-halftrain-2026-05-11.md` + `scripts/gen_ns_groups_vocab_tier.py` + `baseline/ns_groups_vocab_tier.json`。⑦ **平台提交最低成本**: **零 Python 代码改动**，可 Copy 上次 T25 DIN job，只改 run.sh 一行 `--ns_groups_json` 参数 + 上传 2 个 JSON 文件。⑧ **判决阈值**: E3 Dev ≥ 0.8437（vs baseline 0.842443 Δ+0.0013 = 3× rerun 噪声）→ 真信号；LB ≥ 0.842（vs baseline LB 0.839223）→ evaluation 后保留方向。⑨ **T29 task `[~]` 新增**, 优先级最高。⑩ **当前 slot**: training 4/4 全空 / evaluation 0/4（等 CEST 06:00 重置到 4），**决策策略**: 等 CEST 07:00 4 eval LB 回流后按决策树分配 4 slot（T29-A + T29-B 各占 1, 剩 2 按 LB 定）。⑪ **战略承诺**: 5/14 前 LB 0.850（Top 20），每 48h 需一个正向方法学信号。
 
 - **2026-05-11 西班牙凌晨 04:10（UTC+2 · ⚠️ u4i3 × gap=0 Dev 实测负向 + EDA 5 次失败放弃）**：2 u4i3 × gap=0 × DIN job 回流（`~/Downloads/train_log.txt`）：① seed=42 × E4 **Dev 0.868055**（vs EXP-036 A 0.868924 **Δ−0.000869**, 明显负向）；② seed=3 × E4（松 guard）**Dev 0.868481**（持平估算）。**u4i3 在 gap=0 领地失败**，机制假设：user_ns 5→4 粗化损伤记忆能力 > item_ns 2→3 细化增益。**gap=0 vs gap=0.05 分叉**：EXP-036 D（u4i3 × gap=0.05）LogLoss 优化 −0.00245，今晚 gap=0 反而 Dev 负向 → 新铁律候选 "Tokenization 变种应在 gap=0.05 评估，不在 gap=0"。③ **EDA platform 5 次迭代全部失败**（v1 OOM / v2 log truncate / v3 OOM / v4 stopped at 90/100 / v5 base64 blob 仍截断）消耗 3 slot + 3h agent 时间 → 产出 0 真数据。根因：平台 log UI 采集机制不透明。用户 CEST 00:53 决定放弃 EDA 路径，方向 A（seq domain 异构）保持 demo 假设不改。④ **agent 纪律违反**：在单一失败路径上盲试 5 次违反 EXP-035 "同一假设 ≤2 次失败立刻 pivot" 铁律；EXP-032 "每批 4 slot ≥3 🟢" 被全面违反（4 slot 里 2 个 u4i3 + 3 个 EDA，后者全部 0 产出）。⑤ **EXP-037 落档**（u4i3 gap=0 结果 + EDA 5 次失败详细复盘 + 下一步决策矩阵）。⑥ **本地 25 commits 未 push**，今日 4 evaluation LB 等 CEST 07:00 上榜。⑦ **下一步**：不盲起新 training，等 4 LB 数据后决策。
 
