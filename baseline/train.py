@@ -420,6 +420,23 @@ def parse_args() -> argparse.Namespace:
                              '--enable_dense_bypass integration pattern). Orthogonal to '
                              '--target_item_seq_injection (T16 additive, which modifies '
                              'seq encoder inputs). Default off (back-compat).')
+    parser.add_argument('--enable_din_integrated', action='store_true', default=False,
+                        help='T28: DIN target-aware interest injected INSIDE each '
+                             'HyFormer block (not as a classifier-time bypass like '
+                             '--enable_din_interest). Each block computes its own '
+                             'composite interest vector from its just-encoded '
+                             'sequences and adds it (per-block learnable scalar '
+                             'alpha, init 0.1) to every decoded_q_i before token '
+                             'fusion into the RankMixer. Orthogonal to --enable_din_interest '
+                             '(can be combined, but first ablation should keep T28 '
+                             'on and T25 bypass off). Adds ~num_blocks * 104k dense '
+                             'params (~208k at num_blocks=2 / d_model=64). '
+                             'Zero effect on OneTrans path.')
+    parser.add_argument('--din_integrated_alpha_init', type=float, default=0.1,
+                        help='T28: initial value of the per-block learnable scalar '
+                             'alpha that scales the DIN interest injection. Default '
+                             '0.1 (safe partial injection). Set to 0.0 for identity '
+                             'init (requires training to pick up signal).')
     parser.add_argument('--enable_fafe', action='store_true', default=False,
                         help='T25 / H2: Feature-aware Feature Embedding. When set, '
                              'each fid in the RankMixer NS tokenizer passes through '
@@ -674,6 +691,8 @@ def main() -> None:
         "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
         "enable_din_interest": args.enable_din_interest,
+        "enable_din_integrated": args.enable_din_integrated,
+        "din_integrated_alpha_init": args.din_integrated_alpha_init,
         "enable_fafe": args.enable_fafe,
     }
 

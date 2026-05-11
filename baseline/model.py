@@ -1168,6 +1168,8 @@ class MultiSeqHyFormerBlock(nn.Module):
         causal: bool = False,
         rank_mixer_mode: str = 'full',
         rank_mixer_ffn_mode: str = 'shared',
+        enable_din_integrated: bool = False,
+        din_integrated_alpha_init: float = 0.1,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -1199,6 +1201,24 @@ class MultiSeqHyFormerBlock(nn.Module):
             for _ in range(num_sequences)
         ])
 
+        # T28 · DIN integrated inside each block. When enabled, a per-block
+        # DINInterestExtractor computes a target-aware composite interest
+        # vector from this block's encoded sequences, and it is added
+        # (with learnable scalar alpha, init 0.1) to every decoded_q_i
+        # BEFORE token fusion. Zero effect on RankMixer T-divisibility
+        # (no new tokens). When disabled, behaviour is bit-identical to
+        # the pre-T28 block.
+        self.enable_din_integrated = bool(enable_din_integrated)
+        if self.enable_din_integrated:
+            self.din_extractor = DINInterestExtractor(
+                d_model=d_model,
+                num_heads=num_heads,
+                num_sequences=num_sequences,
+                dropout=dropout,
+            )
+            self.din_alpha = nn.Parameter(
+                torch.full((1,), float(din_integrated_alpha_init)))
+
         # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
         self.mixer = RankMixerBlock(
@@ -1218,6 +1238,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         seq_padding_masks: list,
         rope_cos_list: Optional[List[torch.Tensor]] = None,
         rope_sin_list: Optional[List[torch.Tensor]] = None,
+        target_repr: Optional[torch.Tensor] = None,
     ) -> Tuple[list, torch.Tensor, list, list]:
         """Processes one multi-sequence HyFormer block step.
 
@@ -1228,6 +1249,8 @@ class MultiSeqHyFormerBlock(nn.Module):
             seq_padding_masks: List of (B, L_i) masks, length S.
             rope_cos_list: List of (1, L_i, head_dim) tensors, length S.
             rope_sin_list: List of (1, L_i, head_dim) tensors, length S.
+            target_repr: (B, D) target-item representation. Required when
+                ``enable_din_integrated`` is True; ignored otherwise.
 
         Returns:
             A tuple (next_q_list, next_ns, next_seq_list, next_masks), where
@@ -1263,6 +1286,23 @@ class MultiSeqHyFormerBlock(nn.Module):
                 rope_cos=rc, rope_sin=rs,
             )
             decoded_qs.append(decoded_q_i)
+
+        # 2.5. T28 · DIN integrated interest injection into decoded_q_i.
+        # The composite interest vector (B, D) is computed from this
+        # block's *just-encoded* next_seqs (not the pre-block seq_tokens),
+        # so each block sees a progressively refined interest signal.
+        if self.enable_din_integrated:
+            if target_repr is None:
+                raise ValueError(
+                    "MultiSeqHyFormerBlock: target_repr is required when "
+                    "enable_din_integrated=True.")
+            interest = self.din_extractor(
+                target_repr, next_seqs, next_masks)  # (B, D)
+            interest_broadcast = interest.unsqueeze(1)  # (B, 1, D)
+            decoded_qs = [
+                q_i + self.din_alpha * interest_broadcast
+                for q_i in decoded_qs
+            ]
 
         # 3. Token Fusion: concatenate all decoded_q + ns_tokens
         combined = torch.cat(decoded_qs + [ns_tokens], dim=1)  # (B, Nq*S + Nns, D)
@@ -2034,6 +2074,20 @@ class PCVRHyFormer(nn.Module):
         # dense_bypass integration pattern). Zero effect on RankMixer token
         # count / divisibility constraint.
         enable_din_interest: bool = False,
+        # T28 · DIN integrated INSIDE each HyFormer block. Each block
+        # computes its own composite target-aware interest vector from its
+        # just-encoded sequences and injects it (with a per-block learnable
+        # scalar alpha, init 0.1) into every decoded_q_i BEFORE token
+        # fusion into the RankMixer. Unlike T25 bypass (which injects a
+        # single interest vector at classifier-time, outside the token
+        # mixing), T28 lets each block's RankMixer see target-aware
+        # queries and propagate through subsequent blocks. Orthogonal to
+        # T25 (can be combined) but the first ablation keeps T28 on and
+        # T25 off to avoid attribution ambiguity. Adds
+        # ~num_blocks * (4 * CrossAttn + merge Linear) Dense params, i.e.
+        # ~208k at num_blocks=2 / num_sequences=4 / d_model=64.
+        enable_din_integrated: bool = False,
+        din_integrated_alpha_init: float = 0.1,
         # T25 / H2 · Feature-aware Feature Embedding. When True, each fid's
         # raw embedding passes through a per-fid LayerNorm+Linear transform
         # (in the RankMixer NS tokenizer only, as an MVP) before chunked
@@ -2173,6 +2227,15 @@ class PCVRHyFormer(nn.Module):
                 dropout=dropout_rate,
             )
 
+        # T28 · DIN integrated inside each HyFormer block. The flag is
+        # stored here so self.blocks construction (below) can read it;
+        # the per-block DINInterestExtractor is created inside
+        # MultiSeqHyFormerBlock itself. din_integrated_alpha_init is
+        # forwarded as-is (each block gets an independent learnable
+        # alpha initialized to this scalar).
+        self.enable_din_integrated = bool(enable_din_integrated)
+        self.din_integrated_alpha_init = float(din_integrated_alpha_init)
+
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
         if rank_mixer_mode == 'full' and d_model % T != 0 and not use_onetrans:
@@ -2289,6 +2352,8 @@ class PCVRHyFormer(nn.Module):
                     causal=seq_causal,
                     rank_mixer_mode=rank_mixer_mode,
                     rank_mixer_ffn_mode=rank_mixer_ffn_mode,
+                    enable_din_integrated=self.enable_din_integrated,
+                    din_integrated_alpha_init=din_integrated_alpha_init,
                 )
                 for _ in range(num_hyformer_blocks)
             ])
@@ -2601,9 +2666,18 @@ class PCVRHyFormer(nn.Module):
         ns_tokens: torch.Tensor,
         seq_tokens_list: list,
         seq_masks_list: list,
-        apply_dropout: bool = True
+        apply_dropout: bool = True,
+        target_repr: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Runs the HyFormer multi-sequence block stack."""
+        """Runs the HyFormer multi-sequence block stack.
+
+        Args:
+            q_tokens_list / ns_tokens / seq_tokens_list / seq_masks_list:
+                standard block inputs.
+            apply_dropout: whether to apply emb_dropout (train path only).
+            target_repr: (B, D) target-item representation, required when
+                ``enable_din_integrated`` is True (each block uses it).
+        """
         if apply_dropout:
             q_tokens_list = [self.emb_dropout(q) for q in q_tokens_list]
             ns_tokens = self.emb_dropout(ns_tokens)
@@ -2634,6 +2708,7 @@ class PCVRHyFormer(nn.Module):
                 seq_padding_masks=curr_masks,
                 rope_cos_list=rope_cos_list,
                 rope_sin_list=rope_sin_list,
+                target_repr=target_repr,
             )
 
         B = curr_qs[0].shape[0]
@@ -2688,19 +2763,29 @@ class PCVRHyFormer(nn.Module):
         TargetItemSeqInjector's convention (keeps the two target-aware
         mechanisms on the same footing).
         """
-        # Layout inside ns_tokens (from _build_ns_tokens):
-        #   [user_ns (num_user_ns) | optional user_dense | item_ns (num_item_ns) | optional item_dense]
-        # We slice out the item_ns block to get target_repr = mean(item_ns).
-        # This is robust to presence/absence of user_dense (it comes BEFORE
-        # item_ns in the layout).
+        target_repr = self._compute_target_repr(ns_tokens)  # (B, D)
+        din_interest = self.din_extractor(
+            target_repr, seq_tokens_list, seq_masks_list)  # (B, D)
+        return torch.cat([output, din_interest], dim=-1)
+
+    def _compute_target_repr(self, ns_tokens: torch.Tensor) -> torch.Tensor:
+        """Slice the item_ns block from ns_tokens and mean-pool to (B, D).
+
+        Used as a shared helper by T16 TargetItemSeqInjector, T25 DIN
+        bypass, and T28 DIN integrated — all three mechanisms share this
+        "target = mean(item_ns)" convention so their interactions stay
+        predictable.
+
+        Layout inside ns_tokens (from _build_ns_tokens):
+            [user_ns (num_user_ns) | optional user_dense
+             | item_ns (num_item_ns) | optional item_dense]
+        Robust to presence/absence of user_dense (it comes BEFORE item_ns).
+        """
         user_dense_offset = 1 if self.has_user_dense else 0
         item_ns_start = self.num_user_ns + user_dense_offset
         item_ns_end = item_ns_start + self.num_item_ns
         item_ns = ns_tokens[:, item_ns_start:item_ns_end, :]  # (B, num_item_ns, D)
-        target_repr = item_ns.mean(dim=1)  # (B, D)
-        din_interest = self.din_extractor(
-            target_repr, seq_tokens_list, seq_masks_list)  # (B, D)
-        return torch.cat([output, din_interest], dim=-1)
+        return item_ns.mean(dim=1)  # (B, D)
 
     def _build_seq_tokens(
         self, inputs: ModelInput
@@ -2751,6 +2836,13 @@ class PCVRHyFormer(nn.Module):
         seq_tokens_list = self._maybe_inject_target_into_seq(
             ns_tokens, seq_tokens_list)
 
+        # T28 · target_repr shared across all HyFormer blocks when DIN
+        # integrated is enabled. Compute once to avoid re-slicing per block.
+        target_repr = (
+            self._compute_target_repr(ns_tokens)
+            if self.enable_din_integrated else None
+        )
+
         if self.use_onetrans:
             output = self._run_onetrans_blocks(
                 seq_tokens_list, seq_masks_list, ns_tokens,
@@ -2760,7 +2852,8 @@ class PCVRHyFormer(nn.Module):
                 ns_tokens, seq_tokens_list, seq_masks_list)
             output = self._run_multi_seq_blocks(
                 q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-                apply_dropout=self.training)
+                apply_dropout=self.training,
+                target_repr=target_repr)
 
         if self.has_dense_bypass:
             output = self._apply_dense_bypass(output, inputs)
@@ -2779,6 +2872,11 @@ class PCVRHyFormer(nn.Module):
         seq_tokens_list = self._maybe_inject_target_into_seq(
             ns_tokens, seq_tokens_list)
 
+        target_repr = (
+            self._compute_target_repr(ns_tokens)
+            if self.enable_din_integrated else None
+        )
+
         if self.use_onetrans:
             output = self._run_onetrans_blocks(
                 seq_tokens_list, seq_masks_list, ns_tokens,
@@ -2788,7 +2886,8 @@ class PCVRHyFormer(nn.Module):
                 ns_tokens, seq_tokens_list, seq_masks_list)
             output = self._run_multi_seq_blocks(
                 q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-                apply_dropout=False)
+                apply_dropout=False,
+                target_repr=target_repr)
 
         if self.has_dense_bypass:
             output = self._apply_dense_bypass(output, inputs)
