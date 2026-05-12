@@ -20,6 +20,10 @@
 
 **决策（2026-05-01）**：full train 只作为高置信候选复核，不再作为默认探索路径。所有非平凡代码改动 / 超参想法先走 fast proxy，再决定是否消耗完整训练与评估额度。
 
+**2026-05-12 CEST 21:20 补充**：
+- ✅ **所有 new training job 默认 `--keep_topk_ckpt 4`**（保存 top 4 ckpt，规避 "best_model 自动选错"风险，给 eval 多选择空间 · EXP-019 + 杭仔情报教训同向）
+- ✅ **Half-train 默认 4 epoch + 松 LogLoss guard**（`delta=0.003 patience=2`）· 本赛题 E3-E4 是"最佳甜蜜点"不是"欠拟合"（EXP-019 铁律：full E6 Dev 更高但 LB 降 0.003）
+
 **实施顺序**：
 1. ✅ 在训练链路补快速实验开关：`max_train_steps`、`limit_train_rgs`、`limit_valid_rgs`
 2. 建立固定 proxy 流程：静态检查 → 小样本 smoke → 1 epoch / limited RG → 2~3 epoch 半程确认 → full train

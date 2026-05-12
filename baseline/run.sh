@@ -46,6 +46,7 @@ python3 -u "${SCRIPT_DIR}/train.py" \
     --num_epochs 4 \
     --logloss_rebound_delta 0.003 \
     --logloss_rebound_patience 2 \
+    --keep_topk_ckpt 4 \
     --enable_torch_compile \
     --enable_amp \
     --amp_dtype bfloat16 \
