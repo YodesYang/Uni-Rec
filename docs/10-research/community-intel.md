@@ -871,3 +871,143 @@ However, Round 1 uses a Delayed Feedback mechanism: some submission results wil
 ### 原始快照位置
 
 `docs/99-raw/community-snapshots/xhs-decem-2026-05-08/` （6 张截图 + 本节文字整理），不走 `diff_with_previous.sh` 流程，手工管理。
+
+---
+
+## 工业赛道 · DECEM 公开 Tricks 总结 2/2 页 + 群聊补充（2026-05-12 晚抓取 · 37 张截图）
+
+> **来源**：2026-05-12 CEST 19:09 用户 + 小红书 + 微信群（"广小鹅的冒险岛" / "广告算法大赛交流" 各 500 人）37 张截图
+> **原始快照位置**：`docs/99-raw/community-snapshots/xhs-decem-0512/` (全文 OCR 摘录在同目录 `README.md`)
+> **本节只装方法论级可借鉴点**；原话引用 / 讨论时间戳见原始快照
+
+### 关键帖子 1：DECEM 发售 ¥39.9 的 `2026 腾讯广告算法大赛改进 Tricks 总结（个人观点仅供参考）`
+
+**定位**：DECEM（Industrial Track Rank 1 LB 0.852181）付费笔记，用户收到的 **2/2 页截图已完整 OCR**（1/2 页缺失）。6 大方向（按 DECEM 编号）:
+
+#### Trick 1 · 时间分桶边界按分位数重设计（与我们 T12 时间特征不同）
+
+- **现状**：baseline `BUCKET_BOUNDARIES` 是手工 64 个对数边界，5 秒到 1 年
+- **问题**：手工边界在某些数据分布上有"空挡"或"过度集中"桶，浪费 Embedding 容量
+- **改进**：
+  - 按等比例分位（1/100，2/100，...）重新设定边界
+  - 或在距离较近时段（比如 7 天内）密集等距分桶
+  - 不同 domain 序列时间 diff 对齐不同，建议各自分桶处理
+
+**ROI 估算**：DECEM 本人实测 +0.001（群聊原话），代码成本 ~30 行（改 `baseline/dataset.py` 的 `BUCKET_BOUNDARIES` constant，或做成 per-domain CLI 参数）
+
+**对口本项目**：T12 已做 `hour_of_day/day_of_week` 时间特征（✅），但 **time_diff 桶边界** 从未调整。**未消化**。
+
+#### Trick 2 · 序列长度域特定 seq_max_lens
+
+- **现状**：`a:256, b:256, c:512, d:512` 都手工指定
+- **问题**：d 域某字段长度 p99 > 2000 tokens（用户提到 sample 里看到），256/512 截断在超长序列域可能不够
+- **改进**：
+  - 对每个域统计真实非零长度的 `p99/p95`
+  - 按 domain 真实情况设置 `seq_max_lens`
+  - 或配合 LongerEncoder (Top-K 稀疏注意力) 处理长序列
+
+**ROI 估算**：用户"牛马艺术家-工业" 亲测 "从 1500 回到 baseline 的 1024 涨点"——**反向印证**（baseline 默认更好）。但 p99 自适应设置值得试，**+0~0.002 LB**，代码成本 ~10 行。
+
+**对口本项目**：我们完全按 baseline 默认（`seq_a:256,seq_b:256,seq_c:512,seq_d:512`）。**未消化 p99 分析**。
+
+#### Trick 3 · 缺失值 "is-missing" 独立信号
+
+- **现状**：所有 null / 0 / -1 统一编码为 0 (padding)
+- **问题**：大量 null 字段（DECEM 列出 `86,94,99-104,108,109`），如果缺失率与转化率高度相关（如 user_id 缺失 = 未登录），**把缺失当 0 就丢了关键信号**
+- **改进**：
+  - 加 "missing" 专用 slot（vocab_size 配置区分），把 padding=0 独立
+  - **缺失指示位**：把"是否为空"作为额外的二值特征 concat 进模型（广告业务"缺失本身作为信号"）
+
+**ROI 估算**：DECEM 未明确说幅度，推测 +0.001~0.003 LB（广告业务常识级收益），代码成本 ~50 行（改 `baseline/dataset.py` 特征提取 + `model.py` 新增 is_missing embedding）
+
+**对口本项目**：我们完全按 baseline，**没有独立 is-missing 信号**。对广告稀疏特征是重要漏洞。**未消化**。
+
+#### Trick 4 · 重新设计 `ns_groups.json`（按**相关性**而非随机序）
+
+- **现状（DECEM 观察）**：baseline 默认配置走 rankmixer 分组，不使用 `ns_groups.json`
+- **改进**：
+  - GroupNSTokenizer 重同组特征共享一个 token，**相关性高的特征共享**
+  - 加 **SENet** 特征重要度：对 NS tokens 使用 gate-style 的 channel-wise reweighting
+  - SENet 的 weight 也可以用来指示特征重要性
+
+**ROI 估算**：我们 T29 已尝试（vocabtier LB 0.840603 Δ+0.00138 · 弱正向）。但 DECEM 说的是**按相关性**分，不是按 vocab 大小 —— 我们的做法和 DECEM 的**方向对但具体做法不同**。SENet gate 完全未做。
+
+**对口本项目**：T29 vocabtier 已弱正向（可叠加），但**相关性聚类 + SENet** 两个子方向未做。**部分消化**。
+
+#### Trick 5 · 交叉特征 FM/DCN-v2 分支
+
+- **现状（DECEM 观察）**：模型完全靠 Embedding+Attention 隐式学交叉
+- **改进**：
+  - 加 FM 或 DCN-v2 分支，把所有 user_int 和 item_int embedding 先过一层 DCN/FM 交叉，与 Transformer 输出 concat 后过分类头
+
+**ROI 估算**：⚠️ **未确认正向** —— DECEM 本人 tricks 文档提了但群聊承认 "**我没做，不知道**"；用户"27搜广推蛋仔"亲测 "试了下 掉了"。**风险高**。
+
+**对口本项目**：完全没做。**未消化，但 ROI 不明**。
+
+#### Trick 6 · Target Attention (DIN) · 更深的实现
+
+- **现状（DECEM 观察）**：baseline 四个 HyFormer Block 内部做 self-attention，没有显式 target item 或 target attention
+- **改进**（DECEM 给的两种 DIN 集成思路）：
+  - **思路 A**：在 MultiSeqHyFormerBlock 的 cross-attention 里，让 Q tokens 的初始值由 item embedding 引导：**Q_init = MLP(item_emb)** 而非 MLP(GlobalInfo)
+  - **思路 B**：加一个 DIN 分支 `q_i = softmax(Q_target · K_seq)`，结果与 Transformer 输出 fusion
+
+**ROI 估算**：DECEM 实测 +0.001（群聊原话"我这里的提升是 +0.001"），冰淇淋确认 "跟我提升一样"。**+0.001~0.003 LB**，代码成本 ~50 行。
+
+**对口本项目**：
+- 我们 **T25 bypass** 走的是 **思路 B 的简化版**（classifier 前 bypass），已证 +0.004 LB（比 DECEM 的 +0.001 好 4 倍，可能我们本来基线更低）
+- **T28 integrated**（每 block DIN）已证**过度，负向 −0.001 LB**
+- **DECEM 的"思路 A" Q_init=MLP(item_emb)** 我们**未做**，与 T25 / T28 机制完全不同（改 Query Generator 初始化，而非并行 bypass 或 block 内注入）
+
+---
+
+### 关键帖子 2：杭仔（群聊昵称）公开的 LB 截图 · 2026-05-10 凌晨 LB 0.850012
+
+**原始截图**：`xhs-decem-0512/Screenshot_2026-05-12-18-50-36-*.jpg`
+
+| Eval ID | LB | Inference | Last Updated |
+|---|---|---|---|
+| eval_1778373440941 | **0.850012** ⭐ | 170.23s | 2026-05-10 08:49 |
+| eval_1778365943951 | **0.848366** | 182.99s | 2026-05-10 06:43 |
+| eval_1778343916188 | **0.845012** | 854.7s | 2026-05-10 00:50 |
+| eval_1778294954858 | **0.841897** | 1024.06s | 2026-05-09 11:56 |
+
+**杭仔自述技术路线**（群聊截图 OCR 摘录）：
+- "用 transformer+cross attention 提取序列特征的模块，**全换成 din 的提升很大**"
+- DIN 的 target **只用 item**（不是所有 ns tokens）
+- query generator **分开的**（没 merge）
+- **DIN 替代后 global token 不存在了**
+- "还有其他一些常规的时间特征，和别的基本上都是**小红书偷来的上分点** 哈哈哈"
+- 训练速度：**6 小时 15 个 epoch**（单 epoch ~24 分钟，比我们 75 分钟快 3×），**2 小时就训练好了**（疑指一个关键 config 2h 达 0.848）
+- 推理速度：**170s**（vs 我们 500s），暗示模型 d_model 更小 or 序列更短
+- "best epoch 和上一个 epoch 测试集直接差了 5 个千分点，所以手动保存了一版中间的"（**主动手动保存中间 epoch** 规避 best 错选）
+
+**诚实度警告**：
+- 同群用户"爱吃菠萝🍍"质疑"真有点烟雾弹啊"
+- DECEM 附和："**肯定实现细节的问题**" + "做 6 不可能掉分的"
+- 杭仔自述 "其实挺迷的"
+- **操作结论**：杭仔的方案大方向可参考（**DIN 完全替代 Transformer 序列模块** + 小红书偷点），但具体实现不可直接照搬
+
+---
+
+### 对口本项目当前战略的 4 个判决修正
+
+| DECEM / 杭仔 情报 | 我们当前状态 | 战略修正 |
+|---|---|---|
+| **Trick 1 时间桶边界分位数** | T12 仅做 hour_of_day/day_of_week，未调 time_diff 桶 | **🟢 T30 候选** · 代码 ~30 行，预期 +0.001 LB |
+| **Trick 3 is-missing 信号** | baseline 统一 padding=0，未做 | **🟢 T31 候选** · 代码 ~50 行，预期 +0.001~0.003 LB |
+| **Trick 6 Q_init=MLP(item_emb)** | T25 bypass work / T28 integrated 证伪 / Q_init 未做 | **🟢 T32 候选** · 代码 ~50 行，预期 +0.001~0.003 LB，与 T25 bypass 机制正交可叠加 |
+| 杭仔 "DIN 完全替代 Transformer" | 我们是 DIN bypass（并行 旁路，不替代）| ⚠️ 大改动风险高，DECEM 说"不要尝试过大改动"，**暂不做** |
+| DECEM "不要尝试过大改动" | 我们 T28 integrated 已证 "改动过深反害" | ✅ 已印证团队 T25 单次 DIN +0.004 LB 恰合 DECEM 精发风格 |
+| Scaling up 无效（再次验证）| 我们 d_model=128 gap +0.028 早已证 | ✅ 已关闭 |
+
+### 最重要的 3 条判决（给下一批 training 用）
+
+1. **Top 20 ceiling 修正** · DECEM 单 trick +0.001 的风格 + 我们 T25 bypass 已吃 +0.004 = 剩下 5 个 tricks 最多吃 +0.005 → 综合 ceiling **0.849**（5/14 Top 20 0.850 **勉强可达**，难度大）
+2. **T30/T31/T32 方向全部是 gap=0.05 可叠加路径**，不再继续 gap=0 冲 SOTA 上沿（M5 已证 seed=3 负向，M9 回流前不扩方向）
+3. **固定 seed 结果仍不固定** · 群聊用户"岚峰"再次观察 → 与我们 team-memory `CUDA non-determinism` 铁律一致，加深认识
+
+---
+
+### 原始快照位置
+
+`docs/99-raw/community-snapshots/xhs-decem-0512/` （37 张截图 + `README.md` 完整 OCR 摘录），手工管理。

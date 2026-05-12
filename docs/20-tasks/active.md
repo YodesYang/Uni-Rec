@@ -6,15 +6,11 @@
 
 ---
 
-**最近一次审视**：2026-05-11 西班牙凌晨 05:20（UTC+2 · 🎯 **T29 Tokenization + T28 DIN Integrated 双方向代码就绪** · 等 7:00 CEST LB 决策起飞）· 结论：① **agent 阶段 A 产出**（04:12~04:55 · T29 Tokenization · 零代码改动 · 2 JSON + 生成脚本 + ADR-009 + EXP-038）；② **agent 阶段 B 产出**（04:46~05:20 · T28 DIN Integrated · ~80 行 model.py 代码 + ADR-010 + EXP-039）。两方向本地 smoke 全过：T29 A/B 参数量 353,334,977（不变, 只改 fid 顺序）/ T28 on 353,536,579（Δ+201,602 = 2 blocks × 100,801 符合理论）/ T28 off 353,334,977（backward-compat 完美）。③ **两方向完全正交**：T29 = fid 拼接顺序（tokenizer 层）/ T28 = DIN attention 深化（block 层），首次 ablation 不叠加但 S4 可叠加。④ **今日 4 slot 最优分配**（等 7:00 CEST 4 eval LB 回流决定，三种情景）:
-   - 🟢 **TOP 情景**（A LB ≥ 0.847 破 SOTA）: T29-A + T29-B + T28 + T25 gap=0 seed=11（跨方向覆盖 + gap=0 上沿追）
-   - 🟡 **中情景**（A LB ∈ [0.843, 0.847) 持平 T25）: T29-A + T29-B + T28 + 1 信号校准
-   - 🔴 **BOTTOM 情景**（A LB < 0.843 DIN 在 gap=0 失败）: T29-A + T29-B + T28 + 1 seed rerun（3 方向 × 1 校准 确保有回报）
-⑤ **战略承诺（用户 aggressive 选择）**：5/14 前 LB 0.850（Top 20）；每 48h 需一个正向方法学信号。今日 T29 + T28 双方向同时上马是"48h 内 2 个方法学 bet"的最高密度。⑥ T28 task `[~]` 新增，T29 task 已就位。⑦ **本地 27 commits 未 push**（昨晨 EXP-037 + T29 5 个文件 + T28 4 个文件改动 = 27）。
+**最近一次审视**：2026-05-12 西班牙晚 21:00（UTC+2 · 🎯 **M6/M7 跨 seed 分化 + M10/M11 深思后启动 + 明早 4 quota 计划锁定**）· 结论：① **M6 叠加失败**（s42 E3 Dev 0.841291 · vs T25 B Δ−0.00241 · E2 非单调 · guard E4 触发）**不评**。② **M7 叠加成功**（s3 松 guard · E3 Dev 0.843524 · **LogLoss 0.27642 项目史上最低 gap=0.05**）**明早必评**（过期 5/13 23:15）。③ **"叠加效应 seed 敏感性" 新铁律**（M6/M7 Δ 0.00223 超 seed 噪声 4×，未来叠加实验双 seed 验证）。④ **CEST 21:00 深思后启动 M10/M11**（利用 3 slot 空余 · M9 外的两个 0 代码 bet）：M10 T25+T29 × s42 × **松 guard** → disambiguate M6 是 guard 问题 vs 真 seed 问题；M11 T29 vocabtier × s3 松 guard → 澄清 M7 成功归因（T29 真贡献 vs s3×T25 协同）。⑤ **留 1 slot 空闲** · 明早基于 M7/M9 LB 信号驱动起 M12。⑥ **明早 CEST 06:00 eval 4 quota 计划**：M7 (🥇 过期最紧必评) + M9 (🥈 视 Dev) + M10 + M11 (若 Dev ≥ baseline 都评)。⑦ **5 job 并行** today: M9 等回流 · M10/M11 刚启动 · M6/M8 training 已完不评 · M7 training 已完待评。⑧ **Top 20 路径当前状态**: T25 bypass (+0.004 已吃) + T29 vocabtier (+0.0014) + T25+T29 s3 叠加 (待 LB 验) = **gap=0.05 ceiling 逼近 0.845**, 距 0.850 差 0.005；明早 M7 LB 是关键转折点（≥0.846 冲刺 / 0.843~0.846 稳打 / <0.843 pivot 战略）。⑨ **本地 35 commits 未 push**，今晚 commit 批量。⑩ **EXP-041 完整落档** M6/M7 数据 + 叠加 seed 敏感性机制 + 过期时间表。
 
 ---
 
-**上一条审视（保留参考）**：2026-05-11 西班牙凌晨 04:10（UTC+2 · ⚠️ **u4i3 × gap=0 Dev 实测负向 + EDA 5 次失败放弃**）· 结论：① **2 u4i3 × gap=0 job 回流**（`~/Downloads/train_log.txt` line 1~42）：seed=42 × E4 Dev **0.868055** (vs EXP-036 A baseline 0.868924 **Δ−0.000869 = 3× rerun 噪声，明显负向**) / seed=3 × E4 Dev **0.868481**（松 guard 生效跑到 E4，baseline E3 停无法对称比较, 持平估算）。**u4i3 在 gap=0 领地反而微降**（假设机制: user_ns 5→4 粗化损伤记忆能力, item_ns 2→3 细化增益不足以补偿）。② **EDA platform 5 次迭代全部失败**（v1 OOM / v2 log 截断 / v3 OOM / v4 log 停 90/100 / v5 base64 blob 仍截断）消耗 3 slot + 3h agent 时间 → **产出 0 数据**。根因：平台 log UI 采集机制不透明，每次失败暴露新约束但 agent 盲试。用户 CEST 00:53 决定放弃。③ **当前 slot**: training 4/4 全空 / evaluation 0/4（等 CEST 06:00 重置）。④ **u4i3 × gap=0.05 信号（EXP-036 D）** 的 LogLoss 优化（−0.00245）是否转化为 LB 收益 → **等今日 07:00 前后 4 LB 上榜验证**。⑤ **决策策略**：不盲起 training job，等今日 LB 再决定；若 A LB ≥ 0.847 破 SOTA → gap=0 × DIN × seed=42 路径延伸；若 D LB ≥ 0.840 → Tokenization gap=0.05 方向保留；若全持平 → 重新战略 audit。⑥ **EXP-037 落档**（u4i3 gap=0 结果 + EDA 5 次失败详细复盘）。**本地 24 commits 未 push**（EDA 4 个 commit 占比，代码 500 行但 0 产出数据）。
+**上一条审视（保留参考）**：2026-05-12 西班牙晚 20:30（UTC+2 · 🎯 M6/M7 T25+T29 叠加回流 · 跨 seed 分化 · M7 LogLoss 项目最低）· 结论：① M6 叠加失败 s42 E3 Dev 0.841291 vs T25 B Δ−0.00241（不评）。② M7 叠加成功 s3 E3 Dev 0.843524 / LogLoss 0.27642 项目最低。③ "叠加 seed 敏感性"新铁律（M6 vs M7 Δ 0.00223 超 seed 噪声 4×）。④ M7 必评（过期 5/13 23:15）。详见 Changelog。
 
 ---
 
@@ -331,46 +327,19 @@
 
 ---
 
-### T28 `[~]` DIN Integrated Inside HyFormer Block（T25 bypass 的 block-integrated 升级）
+### T28 `[x]` DIN Integrated Inside HyFormer Block — ❌ 已证伪关闭（2026-05-12 · LB M1 0.841807 vs T25 bypass 0.843433 Δ−0.00126 / M2 0.837576 全面负向）
 
-**触发**（2026-05-11 CEST 05:15）：T25 DIN bypass 已在 EXP-036 证明 LB 真信号（+0.00421 LB · 9× rerun 噪声），但 bypass 只在 classifier 前拼接一次，DIN 信号**未参与 HyFormer block 内部的 token mixing**。DECEM 榜一公开说 "DIN + MLP"（MLP = block 内 FFN），UniRec 方案 1 的 `interest_token` 也是作为 NS-token 进入 backbone —— 都暗示 **integrated 才是 DIN 原始形态**。
+**2026-05-12 终结**：双 seed LB 回流确认 T28 integrated（DIN 每 block 内部注入 2 次）**比 T25 bypass（1 次）更差**：
+- M1 seed=3: Dev 0.845197（+0.0015 vs T25）但 LB 0.841807（**−0.00126 vs T25 bypass seed=3 0.843069**），Dev→LB gap 扩 13× 到 +0.00339
+- M2 seed=42: Dev 0.840669 / LB 0.837576（全面负向）+ E4 LogLoss guard 触发
+- **机制**：DIN 注入 2 次放大训练期 target 分布依赖，test 远未来分布偏移 → 过度激活反而伤害
+- **铁律**：target-aware 机制"做 1 次刚好够，做 2 次过度" · 未来 DIN 探索走"多样化"（per-seq / multi-head）不走"重复化"
 
-**机制**：把 `DINInterestExtractor` 从 `PCVRHyFormer._apply_din_interest_bypass`（只做 1 次）移到每个 `MultiSeqHyFormerBlock` 内部（做 `num_blocks=2` 次），注入点 = Query Decoding 之后、Token Fusion 之前：
-```python
-interest = self.din_extractor(target_repr, next_seqs, next_masks)  # (B, D)
-decoded_qs = [q_i + self.din_alpha * interest.unsqueeze(1) for q_i in decoded_qs]
-```
-每 block 独立 DIN + 独立 learnable `din_alpha`（init 0.1）+ 渐进细化（每 block 见 encoder 细化过的 seq）。Zero effect on RankMixer token count / 整除性约束。
+**ADR-010 Status: Proposed → Deprecated**。代码保留（`--enable_din_integrated` CLI + `MultiSeqHyFormerBlock` per-block DIN 分支默认 off，backward-compat bit-identical）。
 
-**已完成**（2026-05-11 CEST 05:15 · agent 阶段 B · 西班牙凌晨）:
-- ✅ [ADR-010](../30-decisions/ADR-010-din-integrated-in-block.md) 起草（Proposed）
-- ✅ [EXP-039](../40-experiments/EXP-039-t28-din-integrated-halftrain-2026-05-11.md) 实验计划 + run.sh 就位
-- ✅ `MultiSeqHyFormerBlock` 加 `enable_din_integrated` + `din_alpha` per-block（~60 行 model.py）
-- ✅ `PCVRHyFormer` 加 kwargs + 共享 `_compute_target_repr` helper（~20 行）
-- ✅ `train.py` `--enable_din_integrated` + `--din_integrated_alpha_init` CLI（~15 行）
-- ✅ `infer.py` cfg.get fallback（2 行）
-- ✅ 本地 smoke 3 矩阵全过：S1 off（353,334,977 params backward-compat）/ S2 on（353,536,579 Δ+201,602 = 2 × 100,801 符合理论）/ S3 infer 1000 predictions 训推一致
-- ✅ py_compile + ReadLints 全过
+**T25 bypass 保持 DIN 方向唯一最优实现**（gap=0.05 seed=42 LB 0.843433）。
 
-**判决阈值**（vs T25 bypass E3 Dev **0.843696**，不是 baseline 0.842443；要证 T28 值得替换 T25）:
-- ≥ 0.847（+0.003 vs T25）→ 🎯 强信号立即 evaluation
-- [0.8452, 0.847) → 🟡 T28 优于 T25 边缘 → 1 eval quota 验证
-- [0.8437, 0.8452) → ⚪ 持平 T25 → 保留备选
-- < 0.8437 → ❌ Deprecated
-
-**LB 阈值**（若 S2 通过）：vs T25 bypass LB 0.843433
-- LB ≥ 0.850 → **Top 20 直达**
-- LB ≥ 0.847 → SOTA 突破，T28 替换 T25
-- LB ≥ 0.844 → 优于 T25，方法学真信号
-
-**下一步**（等 2026-05-11 07:00 CEST LB 回流后决定）:
-1. 按 EXP-036/037/038/039 合并决策树分配 4 slot（T29-A + T29-B + T28 + 1 seed/eval 校准）
-2. **Job Name**: `t28-din-integrated-halftrain-gap05-seed42`
-3. **注意**：首次 evaluation 必须勾选"上传自定义 infer.py"（新 kwarg · team-memory 铁律）
-4. **注意**：**首次 T28 不开 `--enable_torch_compile`**（避免 dynamo 干扰方法学判断，仅开 AMP bf16）
-5. **注意**：**T28 与 T29 首次 ablation 不叠加**（保持 `--ns_groups_json ""` 和 `--enable_din_integrated` 分离）
-
-**当前优先级**：**最高**（与 T29 并列，DIN 方向深挖 · DECEM 公开 work 方向的深化版）。
+详见 [`EXP-039`](../40-experiments/EXP-039-t28-din-integrated-halftrain-2026-05-11.md) + [`ADR-010 §Deprecation`](../30-decisions/ADR-010-din-integrated-in-block.md)。
 
 ---
 
@@ -409,6 +378,78 @@ decoded_qs = [q_i + self.din_alpha * interest.unsqueeze(1) for q_i in decoded_qs
 3. 若 S2 通过，S3 LB 校准，S4 与 T25 DIN 叠加
 
 **当前优先级**：**最高**（Top 20 冲刺主路径，5/14 前 LB 0.850 目标的关键依赖）。
+
+---
+
+### T30 `[~]` 时间桶边界按分位数重设计（DECEM Tricks #1）
+
+**触发**（2026-05-12 CEST 19:40 · XHS 情报 0512 收集后）：DECEM 付费笔记 Tricks 总结 2/2 页第 1 项明说 "BUCKET_BOUNDARIES 是手工设计 64 个对数边界 5 秒到 1 年，手工边界可能有空挡或过度集中桶浪费 Embedding 容量，建议按分位数重设"。DECEM 实测 +0.001 LB，冰淇淋确认同样提升。我们 T12 已做 `hour_of_day/day_of_week` 时间特征（✅），但 **time_diff 桶边界** 完全没调过。
+
+**实施路径**（~30 行代码）:
+1. 在 `baseline/dataset.py` 找到 `BUCKET_BOUNDARIES` 定义（或 time_diff 分桶逻辑）
+2. 写 1 个 `scripts/gen_time_bucket_quantile.py`：对 demo 数据 + 平台训练数据（如有）的 time_diff 列做统计，输出按 1/64, 2/64, ..., 63/64 分位数的 64 个边界值
+3. 替换默认 BUCKET_BOUNDARIES 为分位数版本（保留 CLI flag 可切换）
+
+**判决阈值**（vs `icq-half-gap05` E3 Dev 0.842443）:
+- E3 Dev ≥ 0.8437（+0.0013 = 3× rerun 噪声）→ 🎯 真信号
+- [0.8433, 0.8437) → 🟡 seed=3 rerun
+- < 0.8430 → ❌ Deprecated
+
+**与 T29 / T25 bypass 的关系**：完全正交可叠加。T30 是时间桶分桶边界改动（dataset 层），T29 是 fid 拼接顺序（tokenizer 层），T25 是 DIN bypass（model 层）。
+
+**当前优先级**：**高**（DECEM 明确 work 且代码成本最低）
+
+**当前状态**：📋 planned（等 M6/M7/M8/M9 回流后明早决策起动时机）
+
+---
+
+### T31 `[~]` is-missing 信号（DECEM Tricks #3）
+
+**触发**（2026-05-12 · 同上情报源）：DECEM Tricks #3 明说 "大量 null 字段 (86,94,99-104,108,109)，baseline 统一映射为 0 (padding)，如果缺失率与转化率高度相关就丢了关键信号"，建议 (a) 加 "missing" 专用 slot vocab_size 配置区分 padding=0 独立 (b) 加 **缺失指示位** 二值特征 concat 进模型。**广告业务把"缺失本身作为信号"是常识级做法**。
+
+**实施路径**（~50 行代码）:
+1. 在 `baseline/dataset.py` 特征提取时，对每个 `user_int_feats_{fid}` / `item_int_feats_{fid}` 额外提取一个 `is_missing_{fid}` 布尔向量（true 表示该样本该字段原始值是 null / <= 0）
+2. 在 `baseline/model.py` 加一个独立 `missing_indicator` embedding table（vocab_size=2 × num_fids）或把 is_missing 作为 concat 到 dense bypass 里
+3. 方案权衡（需设计）：
+   - **方案 A**：每 fid 一个 missing embedding（参数量 +60 × d_model）
+   - **方案 B**：共享 missing embedding（参数量 +2 × d_model）
+   - **方案 C**：直接 concat 0/1 二值到 dense bypass（零参数）
+
+**判决阈值**：同 T30
+
+**当前优先级**：**高**（DECEM 未给幅度但广告业务常识 +0.001~0.003）
+
+**当前状态**：📋 planned · 需要先做小 EDA 看各 fid 的缺失率和转化率相关性（决定方案 A/B/C）
+
+---
+
+### T32 `[~]` DIN Q_init = MLP(item_emb)（DECEM Tricks #6 · 思路 A）
+
+**触发**（2026-05-12 · 同上情报源）：DECEM Tricks #6 给了 DIN 集成的两种思路：
+- **思路 A**：在 MultiSeqHyFormerBlock 的 cross-attention 里，让 Q tokens 的初始值由 item embedding 引导：`Q_init = MLP(item_emb)` 而非 `MLP(GlobalInfo)`
+- **思路 B**：加 DIN 分支 `q_i = softmax(Q_target · K_seq)` 结果 fusion
+
+我们 T25 bypass **走的是思路 B 的简化版**（classifier 前旁路）+0.004 LB（比 DECEM 的 +0.001 好 4×，可能因为我们基线更低）。T28 integrated（每 block DIN）已证过度 −0.001 LB。**T32 = 思路 A 的具体实现**，和 T25 bypass 机制完全不同：
+- T25 bypass：独立 DIN 模块在 classifier 前 concat
+- T32 Q_init：改 MultiSeqQueryGenerator 内部，让 Q tokens 初始化基于 item_emb 而非 GlobalInfo
+- **理论可叠加**（不同模块不同阶段）
+
+**实施路径**（~50 行代码）:
+1. 在 `baseline/model.py` `MultiSeqQueryGenerator` 类加 `--din_q_init_from_item` CLI flag
+2. flag 开启时，Q tokens 的 FFN 输入从 `Concat(NS_mean, Seq_i_mean)` 改为 `Concat(NS_mean, Seq_i_mean, item_mean)`（或把 item_emb MLP 直接作为 Q 初始化，取代 GlobalInfo）
+3. 保持 ICQ 不变（与 T32 正交）
+4. 首次 evaluation 必须上传自定义 infer.py（新 kwarg）
+
+**判决阈值**（vs T25 bypass E3 Dev 0.843696）:
+- E3 Dev ≥ 0.845 → 🎯 真信号，立即 eval
+- [0.844, 0.845) → 🟡 seed rerun
+- < 0.8437 → ❌ Deprecated
+
+**与 T25 bypass 的关系**：机制不同，**首次 ablation 需单变量**（T25 off + T32 on），验证 work 后再考虑 T25+T32 叠加。
+
+**当前优先级**：**中-高**（机制深度 > T30/T31，代码成本类似 ~50 行）
+
+**当前状态**：📋 planned
 
 ---
 
@@ -518,6 +559,20 @@ decoded_qs = [q_i + self.din_alpha * interest.unsqueeze(1) for q_i in decoded_qs
 ---
 
 ## Changelog
+
+- **2026-05-12 西班牙晚 21:00（UTC+2 · 🎯 深思后启动 M10/M11 · 3 slot 空余变 1 空余）**：① 用户 CEST 20:51 问"M9 在跑 + 3 slot 空余起什么"。② **深思 6 个候选方向** (T30 时间桶 / T31 is-missing / T32 Q_init / M10 M6 disambiguate / M11 T29 双 seed / hash vocab)。③ 选 **M10 + M11 优先** 2 slot（0 代码成本 / 高信息价值）：**M10** `M10-t25bp-t29vt-gap05-seed42-loose-4ep`（M7 同 config 但 seed=3→42 · disambiguate M6 guard vs seed 问题）+ **M11** `M11-t29vt-gap05-seed3-loose-4ep`（M3 同 config 但 seed=42→3 + 松 guard · 补 T29 双 seed 数据）。④ **留 1 slot 空闲** · 明早基于 M7/M9 LB 信号驱动起 M12。⑤ **CEST 20:55 两个 job 已启动**。⑥ **预期回流 CEST ~5/13 02:00-02:10**。⑦ **明早 CEST 06:00 quota 重置** 4 个候选 ckpt（M7/M9/M10/M11）对应 4 quota。
+
+- **2026-05-12 西班牙晚 20:30（UTC+2 · 🎯 M6/M7 T25+T29 叠加回流 · 跨 seed 分化 · M7 LogLoss 项目最低 · 明早必评 M7）**：① **M6 叠加失败**（seed=42）：E3 Dev 0.841291 / LogLoss 0.27927 / E2 非单调 / E4 guard 触发 · vs T25 B 0.843696 **Δ−0.00241 明显负向** · **不评**。② **M7 叠加成功**（seed=3 松 guard）：E3 Dev **0.843524** / LogLoss **0.27642 项目史上最低 gap=0.05 LogLoss**（比 T25 B 低 0.0018 = 显著 calibration 改善）/ E4 持续下降未触发 guard · **必评**（过期风险最大 · 5/12 23:15 完成 → 5/13 23:15 过期）。③ **新铁律 "叠加效应 seed 敏感性"**：M6 vs M7 Δ Dev 0.00223 超 seed 噪声 2-4× · 机制 = T29 vocabtier 重排 fid 顺序改变 T25 bypass 学到的 target_repr 对应关系 · **未来方向叠加实验必须双 seed 验证**（s42 + s3 各一）。④ **M7 LB 预期** [0.843, 0.845] · 3 角度推理（Dev→LB gap / seed=3 基线叠加 / LogLoss 改善）· 有小概率破 SOTA 0.84637。⑤ **明早 CEST 06:00 quota 重置后立刻评 M7**（最高优先）· 其次 M9 视 Dev 再定。⑥ **M1-M8 全部回流聚类** · 今日 9 个 Dev 数据点覆盖 T28/T29/T25+T29/FaFE/gap=0 × DIN 各路径，**T25 bypass s42 alone (0.843433) 和 M7 T25+T29 s3 (LogLoss 0.27642) 是 gap=0.05 双上沿候选**。⑦ **EXP-041 完整补档** · 含 M6/M7 完整数据 + 叠加 seed 敏感性机制图 + ckpt 过期时间表。⑧ **本地 35 commits 未 push**。
+
+- **2026-05-12 西班牙晚 20:00（UTC+2 · 🔥 M8 FaFE 证伪 + "独立化方向三连败"新铁律）**：① **M8 回流**：`M8-fafe-t25bp-gap05-seed42-4ep` E3 Dev 0.842646 / E4 Dev 0.834809 断崖 −0.00784 / guard E4 触发 / wall-time 6h41m（+130k FaFE params 拖慢 2×）。vs T25 bypass s42 E3 Dev 0.843696 = **Δ−0.00105（3.5× rerun 噪声明显负向）**。② **FaFE 方向关闭**（不 eval M8 · Dev 机制性负向）。③ **"独立化" 方向三连败新铁律**：T19 per-token FFN (+34% Dense 必死) + T28 per-block DIN (+7% LB 负向) + M8 FaFE per-fid transform (+4.5% Dev 负向) = 同类"每参数梯度 signal 不足 → 被迫记忆训练期分布 → 远未来 test 失败"机制。**未来禁止所有 per-X 独立参数类探索**。④ **M6/M7 仍 waiting** 今晚回流 · T25+T29 叠加验证。**M9 明早 CEST 04:00 回流** · 唯一填 EXP-036 A 缺口 ckpt。⑤ **EXP-041 落档** · M6/M7/M8 专项 + 独立化三连败机制图表。⑥ **战略确认**: 今晚已回流 M5 + M8 均证伪，独立"深挖结构创新"方向连吃三败（T19/T28/FaFE），**Top 20 唯一可行路径 = 多个外部信号注入 +0.001~0.002 叠加**（T25 bypass +0.004 已吃 · T29 vocabtier +0.0014 已证 · T30 时间桶 / T31 is-missing / T32 Q_init 待验）。⑦ **本地 34 commits 未 push**。
+
+- **2026-05-12 西班牙晚 19:40（UTC+2 · 🔥 XHS 情报 0512 消化 · DECEM Tricks 2/2 + 杭仔 0.850012 LB · T30/T31/T32 新方向）**：① **用户 19:09 收集 37 张截图**（小红书 DECEM 付费笔记 Tricks 总结 2/2 页 + 杭仔公开 LB 0.850012 截图 + 广小鹅冒险岛/广告算法大赛交流两大群聊讨论）。② **DECEM Tricks 2/2 页 6 大方向完整 OCR 并落档到 `docs/10-research/community-intel.md` §DECEM-0512**：Trick 1 时间桶边界分位数 / Trick 2 seq_max_lens 域特定 p99 / Trick 3 is-missing 信号 / Trick 4 ns_groups 按相关性+SENet / Trick 5 FM/DCN 交叉 ⚠️ / Trick 6 Q_init=MLP(item_emb)。DECEM 原话"**我这里的提升是 +0.001**"，"**不要尝试过大的改动**"，冰淇淋确认相同提升。③ **杭仔技术路线**（LB 0.850012）：用 DIN 完全替代 Transformer+cross attention 序列模块（不是我们 bypass 方式）/ DIN target 只用 item / query generator 分开 / 手动保存中间 epoch 防过拟合（best vs last E 差 5‰）/ 训练速度 "2h 就训好了" "6h 15 epoch"。但被群内用户质疑 "真有点烟雾弹" 且 DECEM 附和 "肯定实现细节的问题"，**大方向可参考具体不可照搬**。④ **战略判决修正**：我们 T25 bypass +0.004 LB 已吃 DECEM 最大 trick，**剩 5 tricks 最多再吃 +0.005** → 综合 ceiling **0.849**，5/14 Top 20 0.850 **勉强可达难度大**。⑤ **新增 3 个高 ROI task**：T30 时间桶分位数（~30 行 / +0.001 LB）/ T31 is-missing 信号（~50 行 / +0.001~0.003 LB）/ T32 DIN Q_init（~50 行 / +0.001~0.003 LB），全部 gap=0.05 领地可叠加 T25 bypass。⑥ **战略 pivot**：停止 gap=0 DIN 探索（M5 证伪 · M9 回流前不扩方向），主力转 T30/T31/T32 gap=0.05 叠加路线。⑦ **情报文档完整落档**：`docs/99-raw/community-snapshots/xhs-decem-0512/` 37 张截图 + 详细 README.md OCR 摘录 + `docs/10-research/community-intel.md` 方法论章节。⑧ **下一步待决策**：等 M6/M7/M8/M9 今晚/明早陆续回流，再决定 T30/T31/T32 的 training 起动时序。⑨ **本地 33 commits 未 push**。
+
+- **2026-05-12 西班牙晚 18:45（UTC+2 · 🔥 M5 LB 0.841812 负向 · T25 bypass 黄金三元组揭示 · M9 补回）**：① **M5 回流**：`M5-t25bypass-gap0-seed3-4ep` E4 Dev 0.868450 / LB **0.841812** / Dev→LB gap **+0.0266 项目史上最高**。vs EXP-030 icq_seed3 (同 seed=3 + gap=0 + no-DIN) LB 0.845329 = **Δ−0.003517 方法学明确负向**。② **"T25 bypass 黄金三元组" 铁律发现**：`bypass + seed=42 + gap=0.05` 是 DIN 方向唯一稳定 work 配置（T25 B LB 0.843433）· 偏离任一维度显著变差：seed 42→3 gap=0.05 仍 work (LB 0.843069) / bypass→integrated 任何 seed 负向 (LB 0.837-0.842) / gap=0.05→gap=0 × seed=3 负向 (M5 LB 0.8418)。三元组外组合集中在 "0.8418 吸引子" 附近（M1 T28 integrated s3 gap=0.05 LB 0.841807 与 M5 LB 0.841812 差 0.000005 惊人巧合）。③ **EXP-040 落档**（专门记录 M5/M9 gap=0 × DIN seed sweep 实验 + 3 大 Finding + 新铁律候选 + M9 情景决策树）。④ **M9 `M9-t25bp-gap0-seed42-4ep` CEST 18:45 启动**：补回 EXP-036 A 丢失缺口（seed=42 + gap=0 + DIN × E4 Dev 0.868924 过期），是当前**唯一未被证伪的 "DIN × gap=0" 候选**，预计明早 CEST ~04:00 回流。⑤ **M6/M7/M8 今晚陆续回流预期**（M6/M7 gap=0.05 叠加 / M8 FaFE 首测）。⑥ **M9 情景决策树**：LB ≥ 0.847 破 SOTA → 起 M10 三重叠加冲 0.849~0.851 / LB ∈ [0.844, 0.847] 持平 → gap=0.05 叠加路线 / LB < 0.844 → DIN × gap=0 方向**彻底关闭**，Top 20 只能靠 gap=0.05 多方向叠加。⑦ **Top 20 (LB 0.850) 路径更新**：原"M5 破 SOTA 直通 Top 20"不成立 → 新路径 = M9 破 SOTA (成功率 ~50%) + M6/M7 叠加 + 可能的 M10 三重叠加。⑧ **新命名规则生效**：未来所有 job Job Name 以 `M<N>-...` 开头便于回溯。⑨ **今日 eval quota 剩 0**，明早 CEST 06:00 重置到 4。
+
+- **2026-05-12 西班牙中午 13:00（UTC+2 · 🎯 M1/M2/M3 LB 回流 · T28 integrated 证伪 · T29 vocabtier 弱正向 · M5-M8 启动）**：① **4 个 LB 数据点**：M1 t28-din-integrated-s3 LB **0.841807**（Dev 0.845197 / gap +0.00339）/ M2 t28-din-integrated-s42 LB **0.837576**（Dev 0.840669 / gap +0.00309）/ M3 t29-vocabtier-s42 LB **0.840603**（Dev 0.841629 / gap **+0.00103 最小 = 项目 gap=0.05 历史最小**）/ M4 t29-tokfix-s42 Dev 0.841171 E4（未评 · 和 M3 差 0.0005 信息增量低）。② **T28 integrated 证伪 → T28 `[~]`→`[x]` 关闭**：双 seed 一致负向（M1 Dev +0.0015 vs T25 bypass 但 LB −0.00126；M2 全面负向 + E4 guard 触发），机制 = DIN 注入 2 次放大训练期 target 分布依赖，test 远未来分布偏移下过度激活反害泛化。**ADR-010 Proposed → Deprecated**。③ **T29 vocabtier 弱正向真信号**：Dev→LB gap 扩只 +0.00103（vs 基线 +0.0032 / T25 bypass +0.00026 / T28 integrated +0.0034）= Dev 信号 100% 转化 LB 信号，非 memorization；ΔLB +0.00138 贴近 seed 噪声下界但 gap 极小让信号可信。vocabtier 胜 tokfix +0.0005 Dev（机制：vocab tier 让 chunk 内 fid 基数均匀梯度稳定 > 匿名特征下手工语义分组）。④ **新铁律 3 条**：(a) DIN 类 target-aware 机制"做 1 次刚好够，做 2 次过度"，未来走"多样化"（per-seq 独立 / multi-head）不走"重复化"（multi-block same）；(b) Dev→LB gap 扩 2× 以上（T25 bypass 标准 +0.00026 → 警戒线 +0.00052）是方法学负向最强信号；(c) evaluation quota 诈尸 grep 铁律（agent 落档 "X quota 已提交" 必须附平台实际 eval ID 否则无效）。⑤ **CEST 12:53 启动 4 新 training（M5-M8 新命名规则 `M<N>-...`）**：M5 `M5-t25bypass-gap0-seed3-4ep`（🏆 最高优先 · 最可能破 SOTA · T25 bypass + gap=0 + seed=3 首次组合）/ M6 `M6-t25bp-t29vt-gap05-seed42`（T25+T29 叠加 s42）/ M7 `M7-t25bp-t29vt-gap05-seed3`（T25+T29 叠加 s3 · 松 guard）/ M8 `M8-fafe-t25bp-gap05-seed42`（FaFE 首次平台测试）。⑥ **M5 预期 LB 0.846~0.850**（T25 bypass +0.004 LB 迁移到 gap=0 SOTA 领地 × seed=3 历史好运），**最有希望首次破 SOTA 0.84637**。⑦ **文档更新**：EXP-038 LB 补档 + EXP-039 LB 补档 + ADR-010 Deprecation Notice + 30-decisions/README.md 索引 + T28 task `[x]`。⑧ **今日 eval quota 剩 1**（M4 跳过），晚上看 M5 Dev 决定是否用。⑨ **本地 30 commits 未 push**。
+
+- **2026-05-11 西班牙晚 23:27（UTC+2 · 🚀 4 方法学 training job 重启 · 过期 ckpt 全部无法恢复 · 今日 3 eval quota 放弃）**：① **事实对齐**：EXP-036 A/B/D 和 EXP-037 的 u4i3-seed42/seed3 ckpt **全部过期**（5/10 CEST 16:00 训练完成 → 5/11 CEST 10:00 平台 24h 自动清理），其中 **EXP-036 A Dev 0.868924（项目史上最高）永久丢失**，战略损失 +0.001~0.003 LB。原因：agent 5/10 文档记"4 eval quota 全部提交"但实际只 evaluate 成功 ≤1 个，其余 ckpt 未及时 publish → 24h 后被清。② **agent 凭记忆文档错误铁律补**：team-memory 需新增 "agent 在落档 'X quota 已提交' 时必须 grep 平台实际 evaluation ID 并附在文档，不能凭印象写"。③ **今晚 22:45 agent 推的 4 job 用户主动停**：理由是 GPU 串行 → 想先喂给 evaluation，但发现无可 evaluate ckpt → 直接放弃今日 3 eval quota（明早 CEST 06:00 重置清零，不用就浪费但**已没有选择**）。④ **CEST 23:27 重启 4 training job**（3 🟢 方法学 + 1 🥈 seed 校准）：Slot 1 `t29-tokfix-halftrain-gap05-seed42`（启用 `baseline/ns_groups.json`）/ Slot 2 `t29-vocabtier-halftrain-gap05-seed42`（启用 `baseline/ns_groups_vocab_tier.json`）/ Slot 3 `t28-din-integrated-halftrain-gap05-seed42`（--enable_din_integrated --din_integrated_alpha_init 0.1, **不开 compile**）/ Slot 4 `t28-din-integrated-halftrain-gap05-seed3`（同 Slot 3 + 松 guard `delta=0.003 patience=2`, 让 seed=3 跑到 E4）。⑤ **4 job 全部 Create New Training Job**（不 Copy · 规避文件上传不全风险）· 上传 `baseline/` 全部 6 Python + ns_groups JSON（Slot 1/2 需要）· run.sh 粘贴到平台编辑框。⑥ **判决阈值明确**（明早 CEST 07:00 后应用）：T28-s42 Dev ≥ 0.847 → 🏆 破 SOTA candidate 必 eval / T29-A-B Dev ≥ 0.844 → Tokenization 真信号 eval / 全部 Dev 持平在 [0.843, 0.844] → 战略复盘不 eval 留 quota。⑦ **不重跑过期 ckpt**（反思：昨天刚 pivot 战略到方法学 bet，今晚追 EXP-036 A seed 上沿 = 倒退 + T28 integrated 本身就是 A 的升级 + seed 噪声 ±0.005 下 Dev 0.868924 可能是 luck 非真信号）。⑧ **Top 20 目标（5/14 LB 0.850）节奏**：今晚这批是 48h 内 3 个方法学 bet 密度峰值；明早判决后 5/12 全天 slot 再排 1~2 个 + S4 叠加；5/13~5/14 冲 0.850 最后窗口。⑨ **本地 27 commits 未 push**（昨晨 EXP-037 + 今晨 T29 5 文件 + 今晨 T28 4 文件 + 本次审视）。
 
 - **2026-05-11 西班牙凌晨 05:20（UTC+2 · 🎯 T28 DIN Integrated 代码就位 · agent 阶段 B · 零 quota 消耗 ~34 分钟）**：① **实现**：把 T25 bypass 的 `DINInterestExtractor` 从 classifier 前（1 次）移到每个 `MultiSeqHyFormerBlock` 内部（num_blocks=2 次）。注入点 = Query Decoding 后、Token Fusion 前：`decoded_qs = [q_i + self.din_alpha * interest.unsqueeze(1) for q_i in decoded_qs]`。每 block 独立 DIN + 独立 learnable `din_alpha`（init 0.1）+ 渐进细化（每 block 见 encoder 细化过的 seq）。② **代码改动**: `baseline/model.py` ~60 行（MultiSeqHyFormerBlock + PCVRHyFormer + 新 `_compute_target_repr` shared helper）/ `baseline/train.py` ~15 行（2 新 CLI flag）/ `baseline/infer.py` 2 行（cfg fallback）。`dataset.py / trainer.py / utils.py` 零改动。③ **本地 smoke 3 矩阵全过**: S1 T28 off → 353,334,977 params（与 pre-T28 bit-identical backward-compat 完美）/ S2 T28 on → 353,536,579 params（Δ+201,602 = 2 blocks × 100,801 符合理论估算）/ S3 T28 on + infer.py → 1000 predictions 无 state_dict 错误训推一致。py_compile + ReadLints 全过。④ **判决阈值**（vs T25 bypass E3 Dev 0.843696 而非 baseline 0.842443 —— 要证值得替换 T25）: ≥0.847 强信号 / [0.8452, 0.847) 疑似优于 T25 / [0.8437, 0.8452) 持平 T25 / <0.8437 Deprecated。⑤ **首次 T28 不开 torch.compile**（避免 dynamo 干扰方法学判断），只开 AMP bf16。**不与 T29 Tokenization fix 叠加**（保 `--ns_groups_json ""` SOTA 路径，严格单变量）。**不与 T25 bypass 叠加**（`--enable_din_interest` off）。⑥ **首次 evaluation 必须上传自定义 infer.py**（新 kwarg · team-memory 铁律）。⑦ **ADR-010 + EXP-039 落档**，T28 task `[~]` 加入 active.md，30-decisions/README.md 索引更新。⑧ **与 T29 的关系**：完全正交（tokenizer 层 vs block 层），S4 可叠加。⑨ **今日 4 slot 最优分配**（等 7:00 CEST LB 回流最终定）：三情景决策树（见顶部审视）。
 

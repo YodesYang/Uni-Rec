@@ -78,6 +78,55 @@ alwaysApply: true
 
 - **🎯 Kaggle 金牌视角战略 audit · 每 48h 强制**（2026-05-10 CEST 09:55 · EXP-035 落档 · 用户反问 "请从 Kaggle/TAAC 金牌选手视角深入思考" 触发）：48h audit 发现 agent 过去 48h 消耗 ~13 training slot + ~12 eval → **净 LB SOTA 增益 = 0**（仍是 5/4 的 0.84637）。**5 个致命错误模式**：(a) **过度 seed sweep**：1 假设 × N seed 不是 N 正交实验，第 4~5 seed 信息熵增量 ≈ 0; (b) **混淆"均值 vs 上沿"**：SOTA = 单点上沿不是均值，在低山头（gap=0.05 均值 0.842）永远爬不过高山头（gap=0 SOTA 0.846）必须**切换领地**; (c) **忽略 DECEM 情报的 Tokenization 修改**：榜一明说 work 的 4 个方向我们只验了 3 个; (d) **recency reweight 未做**（但 audit 后发现数据 D-1 占 63% 已隐式 recency, ROI 降级）; (e) **多次凭记忆陈述错误**（baseline / quota / num_epochs 三次）。**铁律**: ① **每 48h agent 主动做战略 audit**（列"消耗 vs 净 LB 增益" 账目 + 对照 DECEM/Seed/community-intel 未消化清单 + 强制 pivot to 未投入 channel）; ② **同一方法学假设占用 training slot 不超过 2 seed**（除最终上沿搜索阶段）; ③ **SOTA 搜索按"领地"分离**: gap=0.05 用于方法学验证（dev 可信）, gap=0 用于 SOTA 冲分（更多 data + 真实 LB 上沿）; ④ **DECEM 情报未消化清单**: 当前 **Tokenization 修改** 是 TOP 1 未做线索（DECEM 2026-05-08 原话"Tokenization 设计的小修改"）; ⑤ **agent 不再给具体概率数字**（带 recency bias 乱跳，一天内从 "90%" 跳到 "15%"），改为**定性 ceiling 估算**（"可能达到 0.848" 而非 "概率 35%"）。**操作化**: 每次 48h 大批 training slot 回流后，agent 先做"消耗 vs 增益" audit 再提下批建议。详见 [`EXP-035`](../40-experiments/EXP-035-kaggle-gold-retrospective-2026-05-10.md)。
 
+- **🔥 DIN 类 target-aware 机制"做 1 次刚好够，做 2 次过度" · Dev→LB gap 扩 2× 是方法学负向最强信号**（2026-05-12 CEST 12:45 · EXP-039 双 seed LB 证伪 T28 integrated 触发）：T25 DIN bypass（classifier 前 1 次）LB 0.843433 gap +0.00026 ⭐ → T28 integrated（每 block 内部 2 次）LB **0.841807 gap +0.00339 扩 13×**（seed=3）/ **LB 0.837576 全面负向**（seed=42）。**机制**: DIN 重复注入 = 放大 "对训练期 target 分布的依赖"，但 test 是远未来分布偏移 → 过度激活反害泛化。**3 条铁律**: ① **target-aware attention 类注入次数有"刚好够"上界**：1 次（bypass）work，2 次（per-block）过度，未来禁止"同一 DIN × N 次" 路线; ② **DIN 探索走"多样化"不走"重复化"**：✅ Per-seq 独立 DIN（每 seq domain 不同 pooling 策略）/ ✅ Multi-head target query（单 block 多 head 不同 aspect）/ ❌ Multi-block same DIN（T28 证伪）; ③ **Dev→LB gap 扩 2× 以上是方法学负向最强信号**（警戒线 +0.00052，即 T25 bypass 标准 +0.00026 × 2），新方向 Dev 正向时必须看 gap 变化。**连带铁律**: 任何 "重复使用已 work 机制" 的想法（DIN/FaFE/时间特征/target injection 类）都要先问 "重复化是否放大训练期偏差"，在远未来 test 场景下这类放大几乎必负。详见 [`EXP-039 §Lessons`](../40-experiments/EXP-039-t28-din-integrated-halftrain-2026-05-11.md) + [`ADR-010 §Deprecation`](../30-decisions/ADR-010-din-integrated-in-block.md)。
+
+- **🔥 T25 DIN bypass "黄金三元组" 铁律**（2026-05-12 CEST 18:45 · EXP-040 M5 LB 回流触发 · 对全部 gap=0.05/gap=0 × seed sweep × DIN 变体数据聚类后得出）：经过 5 seed × gap=0.05 × T25 bypass + 1 × (gap=0 × seed=3) + 2 × (T28 integrated) 共 8 个 LB 数据点聚类，**DIN 方向唯一稳定 work 配置 = bypass + seed=42 + gap=0.05**（T25 B LB **0.843433** ⭐ 上沿）。**偏离三元组任一维度立刻显著变差**：① bypass → integrated（任何 seed 任何 gap）= LB 0.837~0.842 · T28 完全关闭 ② seed=42 → seed=3 × gap=0.05 × bypass：LB 0.843069（仍 work 但微降） ③ **seed=3 × gap=0 × bypass (M5) = LB 0.841812**（Δ−0.004 vs 三元组） ④ seed=7/11/5 × gap=0.05 × bypass：LB 0.841~0.842（全部 seed 在 gap=0.05 上 work 但 seed=42 独上沿） ⑤ seed=42 × gap=0 × bypass = **唯一未知**（EXP-036 A 过期丢失，M9 正在重训补回 · CEST 明早 04:00 回流）。**关键吸引子观察**：M1 T28 integrated s3 gap=0.05 LB 0.841807 与 M5 T25 bypass s3 gap=0 LB 0.841812 差 0.000005 = 惊人巧合，假说 "seed=3 × DIN 任何变体 = LB ~0.8418 吸引子" 需更多数据。**操作铁律**: ① **DIN 方向只在 gap=0.05 领地做 seed sweep 和方法学叠加**，不再贸然把 DIN 移到 gap=0 领地（M9 例外：补回数据缺口）; ② **新方法学 × gap=0 至少需要 2 seed 验证才能下 "work" 判决**（单 seed 可能是坏种子）; ③ **gap=0.05 和 gap=0 的 "DIN 增益可迁移性" 不可假设**，EXP-036 的"DIN 在 gap=0 Dev 增益 1/4 of gap=0.05"观察只对 Dev 成立，LB 不成立。详见 [`EXP-040`](../40-experiments/EXP-040-m5-m9-gap0-din-seed-sweep-2026-05-12.md)。
+
+- **🎯 DECEM 榜一精发风格基线：单 trick +0.001 LB，不要尝试过大改动**（2026-05-12 CEST 19:40 · XHS 情报 0512 消化 · DECEM 付费 Tricks 2/2 页 + 群聊多人确认）：DECEM（Industrial Track Rank 1 LB 0.852181）微信群原话 "**不要尝试过大的改动，我这里的提升是 +0.001**"，冰淇淋附和 "跟我提升一样"，群聊多人确认这是"精发风格"。DECEM 总结的 6 大方向（BUCKET_BOUNDARIES 分位数 / seq_max_lens p99 / is-missing 信号 / ns_groups 按相关性+SENet / FM/DCN 交叉 / DIN Q_init=MLP(item_emb)），每个方向实测 +0.001，**累积 ~+0.006 LB**。我们 T25 bypass +0.004 LB 已吃最大 trick（可能因我们基线更低），**剩下 5 tricks 最多再 +0.005** → **综合 ceiling 0.849**。**Top 20 目标（0.850）修正**: 5/14 前 **勉强可达难度大**，需要 seed luck + 2-3 tricks 全 work。**操作铁律**: ① **未来每个新 trick 的 Dev 预期降到 +0.0003~0.001**（vs 之前的 "架构级 +0.005"），判决阈值从 +0.0013 降到 +0.0005（3× rerun 噪声的保守估计）; ② **禁止"大改动" 路线**（如杭仔"DIN 完全替代 Transformer 序列模块"这种 backbone 级重写），虽然可能 work 但 5/14 ddl 前没时间做 + debug + seed sweep; ③ **T30/T31/T32 每个方向只起 1 seed half-train**，验证 +0.0005 真信号即叠加进主路径，不做 seed sweep（seed sweep 只用于最终 SOTA 冲分阶段）; ④ **Top 20 真实路径重构**: 不是 "单方向突破 +0.005"，而是 **"叠加 3~4 个 +0.001 微增益"** → T25 bypass (+0.004 已吃) + T29 vocabtier (+0.0014) + T30 时间桶 (+0.001) + T31 is-missing (+0.001~0.003) + T32 Q_init (+0.001~0.003) = 累积 +0.008~+0.012 = LB 0.847~0.851（均值）。详见 [`docs/10-research/community-intel.md` §DECEM-0512](../../docs/10-research/community-intel.md)。
+
+- **⚠️ "杭仔 0.850012" 情报可参考但细节不可照搬**（2026-05-12 · 同批情报补充）：用户"杭仔"在微信群 Sun 02:51 贴出 platform LB 0.850012 截图 + 自述技术路线"DIN 完全替代 transformer+cross attention 序列模块"。但同群用户质疑"真有点烟雾弹"，DECEM 附和"肯定实现细节的问题"。**操作判决**：① 杭仔的**大方向可参考**（DIN 工业赛道真 work + 小红书偷点 + 手动保存中间 epoch），但**具体实现不可直接照搬**（"全换成 DIN" 涉及 Query Generator / Cross Attention / RankMixer 三处同时改，debug 成本高且无公开代码）; ② **"手动保存中间 epoch 防 best 错选" 是可复用的 infra 做法**，我们 `keep_topk_ckpt=4` 已经在做，进一步可考虑保存每个 epoch 的 ckpt 而不只是 top-k，容忍后验选最优; ③ **"训练速度 6h/15ep ≈ 24min/ep"** 暗示杭仔的模型更小（我们 75min/ep）或有工程优化，短期不照抄; ④ **推理时间 170s vs 我们 500s** 同样暗示模型规模差异，不是 compile 差异（compile 影响 < 2×，170/500 = 3×）。
+
+- **🔥 "独立化参数" 方向三连败铁律 · 本数据规模下禁止 per-X 独立参数类探索**（2026-05-12 CEST 20:00 · EXP-041 M8 FaFE 回流触发 · 综合 T19/T28/FaFE 三次独立证伪）：三次独立化方向实验全部负向关闭:
+
+  | 方向 | 机制 | Dense 增量 | 结果 |
+  |---|---|---|---|
+  | **T19 Per-token FFN** (EXP-034 / ADR-007) | 每 token 独立 FFN 参数 | +34% (+993k) | ❌ Dev 负向 + E2 guard 触发 + DECEM 情报印证"pure model 改造都掉分" |
+  | **T28 DIN integrated** (EXP-039 / ADR-010) | 每 block 独立 DIN 子模块 | +7% (+202k) | ❌ LB −0.00126 vs T25 bypass · Dev 升 LB 降（memorization）· 两 seed 一致负向 |
+  | **M8 FaFE** (EXP-041 / T25/H2) | 每 fid 独立 LayerNorm+Linear transform | +4.5% (+130k) | ❌ E3 Dev −0.00105 vs T25 bypass + E4 断崖 −0.00784 + guard 触发 |
+
+  **机制共性**: **"per-X 独立参数" 在 1.9M 样本 × 4 epoch × batch 128 的有限梯度预算下，每个独立参数分到的梯度 signal 不足**（T19 每参数平均 30 steps / T28 每参数 60 steps / FaFE 每 fid 参数 40 steps），**被迫记忆训练期局部分布 → test 远未来分布偏移下必然过拟合**。与 T25 bypass +0.004 LB 的 **共享 cross-attention 机制** 形成鲜明对比（T25 的 `DINInterestExtractor` 是跨 seq 域共享参数的单一模块）。
+
+  **铁律**:
+  - ❌ **禁止"per-X 独立参数"类探索**: per-domain loss weight / per-fid vocab size / per-sample dynamic routing / per-feature attention head / MoE soft routing / per-token FFN / per-fid LayerNorm+Linear / per-block same module 都属此类
+  - ✅ **允许"共享参数 + 外部信号注入"**: T25 bypass 共享 DIN 模块 (✅) / T29 改 fid 顺序零参数 (✅) / T30 时间桶改 constant 零参数 (✅) / T31 is-missing 加独立 small vocab (✅ 因为是单一共享 embedding 不是 per-fid) / T32 Q_init 改初始化来源零新参数 (✅)
+  - 🎯 **判决启发式**: 新方向提案先数 "per-X 独立参数量"，若 per-X 数量 > 5 且每 X 分到的梯度 steps < 60 → **极高概率过拟合**，直接转向共享参数版本
+  - 🎯 **平台大数据量复赛阶段可重开此类探索**（10× 数据 = 10× 梯度预算），但 5/25 初赛 ddl 前不碰
+
+  详见 [`EXP-041`](../40-experiments/EXP-041-m6-m7-m8-gap05-stacking-2026-05-12.md) + [`EXP-039`](../40-experiments/EXP-039-t28-din-integrated-halftrain-2026-05-11.md) + [`EXP-034`](../40-experiments/EXP-034-t19-perffn-halftrain-2026-05-09.md)。
+
+- **🔥 方向叠加 seed 敏感性铁律 · 未来叠加实验必须双 seed 验证**（2026-05-12 CEST 20:30 · EXP-041 M6/M7 回流触发 · T25+T29 叠加双 seed 结果反向分化）：T25 bypass (+0.004 LB 已证) + T29 vocabtier (+0.0014 LB 已证) 两个**单独 work**的方向叠加:
+
+  | Job | Seed | E3 Dev | Δvs T25 bypass alone (0.843696) |
+  |---|---|---|---|
+  | **M6** T25+T29 | **42** | **0.841291** | **−0.00241 负向** (vs T25 alone) |
+  | **M7** T25+T29 | **3** | **0.843524** | +0.00093 中性偏正 |
+
+  **Δ Dev (M6 vs M7) = 0.00223 超 seed 噪声 ±0.0005 约 4×** → **叠加效应对 seed 高度敏感**。机制: T29 vocabtier 重排 user_int / item_int 的 fid 拼接顺序改变 NS tokens 表达 → T25 bypass 的 `DINInterestExtractor` 计算的 target_repr 依赖 NS tokens 稳定性 → seed=42 原顺序已优化被破坏 / seed=3 新路径刚好适配。**"两个单独 work 的方向叠加不是总 work"**。
+
+  **铁律**:
+  - ❌ **禁止单 seed 验证叠加** · 不能从"seed=42 叠加失败" 就下"叠加方向死" 判决（M6 可能骗判）
+  - ❌ **禁止单 seed 叠加 work 就上 SOTA 路径** · 不能从"seed=3 叠加 work" 就把叠加作为默认（M7 可能是异常值）
+  - ✅ **叠加实验标配**: seed=42 + seed=3 双 seed 同时跑，等**两个 seed 都 ≥ baseline + 0.0005** 才算真叠加 work
+  - ✅ **单 seed 叠加 work 可作候选**（M7 证 T25+T29 s3 work），但要补 seed=42 其他变体（松 guard / 不同 alpha）验证是否**只对 seed=3 friendly**
+  - 🎯 **未来 T30/T31/T32 方向单变量验证后不直接叠加**，每个叠加组合单 seed 试 + 双 seed 确认 · 总 training cost 增 2× 但减风险 10×
+  - 🎯 **"seed 敏感吸引子" 观察加深**: M5 (seed=3 × gap=0 × DIN = LB 0.8418) 和 M6 (seed=42 × T25+T29 叠加 Dev 负向) 都是 seed-specific 负向案例，**某些 seed 与某些机制组合存在不兼容**，机制尚不明确
+
+  详见 [`EXP-041 §M6/M7 跨 seed 分化`](../40-experiments/EXP-041-m6-m7-m8-gap05-stacking-2026-05-12.md) + [`EXP-040 §黄金三元组`](../40-experiments/EXP-040-m5-m9-gap0-din-seed-sweep-2026-05-12.md)。
+
+- **⚠️ 平台 ckpt 24h 自动清理 + evaluation quota "诈尸" grep 铁律**（2026-05-11 CEST 23:30 事实对齐 + 2026-05-12 再确认）：平台训练完成的 ckpt **24 小时内不 publish 就被自动清理**，过期后 **LB 永久无法评估**（已踩坑：EXP-036 A Dev 0.868924 项目史上最高 Dev 5/10 CEST 16:00 完成 → 5/11 CEST 10:00 清理 → 战略损失 +0.001~0.003 LB）。**铁律**: ① **训练完成的 ckpt 必须在 12h 内 publish 到 Model Management**（避免 24h 边界误差）; ② **agent 落档"X quota 已提交"时必须附平台实际 evaluation ID**（不能凭印象写"4 quota 全用"而实际只 eval 成功 1 个 → 导致其余 ckpt 超 24h 被清 · EXP-036 教训）; ③ **evaluation quota 不用就每日 CEST 06:00 清零**（北京 12:00 · 不累积），但**已训练 ckpt 过期比 quota 过期更严重**（quota 明天还有，ckpt 过期永久丢失）; ④ **GPU 资源串行**: evaluation 和 training 争 0.2 GPU → 有未 publish 的 ckpt 时**优先让 evaluation 跑**，training 排后面。
+
+ "15%"），改为**定性 ceiling 估算**（"可能达到 0.848" 而非 "概率 35%"）。**操作化**: 每次 48h 大批 training slot 回流后，agent 先做"消耗 vs 增益" audit 再提下批建议。详见 [`EXP-035`](../40-experiments/EXP-035-kaggle-gold-retrospective-2026-05-10.md)。
+
 - **🔥 Dev / LB 测的是两种不同能力，不是同一指标的精度差**（2026-05-10 CEST 16:40 · 金牌视角 audit · 修订 "DIN 边际递减" 归因）：2026-05-10 16:10 "最近一次审视" 归因 "gap=0 下 DIN gain +0.000305 ≪ gap=0.05 下 +0.00125 → data completeness 消耗大部分 DIN 贡献（边际递减）" 是**错误归因**，真实机制：**gap=0 dev 和 gap=0.05 dev 测的是两种不同能力**，不能线性比较增量。(1) **gap=0 dev** 在时间上紧挨 train，target item / seq token 的 id 分布共享 → 主要考"近未来记忆能力"，ceiling 约 **0.870**（headroom 从 baseline 0.8686 只剩 0.0014）; (2) **gap=0.05 dev** 跨越 row-level 时间 gap → 主要考"远未来泛化能力"，ceiling 约 **0.846**（headroom 从 baseline 0.842 有 0.004）; (3) **LB** 是 gap=0.05 dev 的极端放大版，同考泛化能力。**DIN 机制**是 target-aware filter，专治"target 未在 train 直接出现过"的场景 → **gap=0 上无用武之地**（直接 embedding lookup 就够记忆），**gap=0.05 和 LB 上才是 DIN 用武之地**。**实测验证**: DIN 在 gap=0.05 LB 实测 **+0.00421**（t25-din LB 0.843433 vs baseline LB 0.839223），落在我预测的 [0.002, 0.005] 区间内。**铁律**: ① **以 gap=0.05 dev 作为 LB 代理主判决指标**（精度 ±0.003，ceiling 约 0.846），**gap=0 dev 只用于排除欠拟合和 seed luck 上沿冲分**; ② "DIN 类 / target-aware 类 / 泛化增益类" 改动（multi-head target attn / deeper DIN / FaFE / ID mask）的 ROI **必须在 gap=0.05 配置下 evaluate**，在 gap=0 上跑出 ±0.0003 信号**是结构性无信号**不是机制失效; ③ **gap=0 dev 饱和后不可继续调参**（ceiling 0.870 - SOTA 0.868924 = 0.001 headroom 已接近尽头，继续调参对 LB 零传递）; ④ "dev→LB gap = 标量" 的模型**错的**，真实是 "两种能力的比值"；"gain × headroom 归一化" 才是方法学 ROI 正确比较方式。**同时修正**: 2026-05-10 16:10 审视、16:25 今晚 2 slot 决策（u4i3 × gap=0）**都基于错归因**，今晚 2 job 的信息价值低于预期（gap=0 dev 测不出 u4i3 真实价值），需用其 E4 ckpt **evaluate 拿 LB 才能判决 u4i3**，不靠 Dev 判决。
 
 
