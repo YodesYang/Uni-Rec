@@ -1,24 +1,118 @@
 # EXP-039 · T28 DIN Integrated Half-train · 2026-05-11 早
 
-> **Status**: 📋 实验计划 · 代码 + smoke 已就位 · 等 7:00 CEST 4 eval LB 回流 + T29 决策后启动
-> **日期**: 2026-05-11 CEST 05:15 agent 起草 · 西班牙凌晨
-> **关联**：[ADR-010](../30-decisions/ADR-010-din-integrated-in-block.md) · [EXP-033](EXP-033-t25-din-halftrain-2026-05-09.md)（T25 bypass 前身）· [EXP-036](EXP-036-gap0-t25-seed-sweep-tokenization-2026-05-10.md)（T25 LB 真信号）· [EXP-038](EXP-038-t29-tokenization-fix-halftrain-2026-05-11.md)（T29 并行方向）
+> **Status**: ❌ **Deprecated**（2026-05-12 CEST 12:45 · M1/M2 双 seed LB 回流后方向关闭）· T28 integrated **比 T25 bypass 更差**
+> **日期**: 2026-05-11 CEST 05:15 agent 起草 · 5/11 CEST 23:27 重启 · 5/12 回流
+> **关联**：[ADR-010](../30-decisions/ADR-010-din-integrated-in-block.md) Deprecated · [EXP-033](EXP-033-t25-din-halftrain-2026-05-09.md)（T25 bypass 仍是 DIN 方向最优实现）· [EXP-036](EXP-036-gap0-t25-seed-sweep-tokenization-2026-05-10.md) · [EXP-038](EXP-038-t29-tokenization-fix-halftrain-2026-05-11.md)
 
 ---
 
-## TL;DR
+## 🔥 LB 回流结果（2026-05-12 CEST 12:45）· T28 方向证伪
 
-消化 DECEM 5/8 帖 "**DIN + MLP**" 方向的深化版：把 T25 bypass 的 DIN target-aware attention **从 classifier 前（bypass 1 次）移到每个 HyFormer block 内部（integrated 2 次 @ num_blocks=2）**。DIN 由"最小风险 add-on"升级为"参与 RankMixer token mixing"的一等公民。
+### M1 · T28 DIN integrated × seed=3 (`t28-din-integrated-halftrain-gap05-seed3`)
 
-**代码状态**：
-- ✅ `MultiSeqHyFormerBlock` 加 `enable_din_integrated` + `din_alpha` per-block
-- ✅ `PCVRHyFormer` 加 kwargs + 共享 `_compute_target_repr` helper
-- ✅ `train.py` `--enable_din_integrated` + `--din_integrated_alpha_init` CLI
-- ✅ `infer.py` cfg fallback
-- ✅ 本地 smoke S1/S2/S3 全过（backward-compat / T28 on / 训推一致）
-- ✅ py_compile + ReadLints 无错
+| Epoch | Dev AUC | Dev LogLoss |
+|---|---|---|
+| E1 | 0.834999 | — |
+| E2 | 0.842233 | — |
+| **E3** ⭐ | **0.845197** | **0.27543** |
+| E4 | 0.843646 | 0.27682 |
 
-**等待**：7:00 CEST LB 回流 + T29 决策树 → 决定 T28 是否优先起动（预期今天 slot 3 或 4）
+**stop_reason**: `max_epochs_completed` (松 guard `delta=0.003 patience=2`)
+**best_checkpoint**: global_step45504 E3
+**wall-time**: 8h33m
+
+**LB 回流** (eval_id: 1778581029331): **LB 0.841807** / inference 638.37s
+
+### M2 · T28 DIN integrated × seed=42 (`t28-din-integrated-halftrain-gap05-seed42`)
+
+| Epoch | Dev AUC | Dev LogLoss |
+|---|---|---|
+| E1 | 0.819896 | — |
+| E2 | 0.837817 | — |
+| **E3** ⭐ | **0.840669** | **0.27913** |
+| E4 | 0.838688 | 0.28109 |
+
+**stop_reason**: `logloss_rebound_epoch_4` ⚠️（E4 LogLoss 反弹触发严格 guard）
+**best_checkpoint**: global_step45504 E3
+**wall-time**: 5h44m
+
+**LB 回流** (eval_id: 1778581020580): **LB 0.837576** / inference 511.23s
+
+---
+
+## 严格判决对照表
+
+**Baseline**（EXP-030 `icq-half-gap05`）: E3 Dev **0.842443** / LB **0.839223** / gap +0.0032
+**T25 bypass 锚点**（EXP-036 T25 B seed=42）: Dev 0.843696 / LB **0.843433** / gap +0.000263
+**T25 bypass seed=3**（EXP-030 · gap=0.05）: LB **0.843069**
+
+| 代号 | 方向 | E3 Dev | ΔDev vs T25 | LB | ΔLB vs T25 同 seed | 判决 |
+|---|---|---|---|---|---|---|
+| T25 bypass s42 | 参考 | 0.843696 | — | 0.843433 | — | ✅ Gold standard |
+| T25 bypass s3 | 参考 | — | — | 0.843069 | — | ✅ seed=3 锚 |
+| **M1** | **T28 integrated s3** | 0.845197 | **+0.001501** | **0.841807** | **−0.001262** ❌ | Dev ↑ LB ↓ |
+| **M2** | **T28 integrated s42** | 0.840669 | −0.003027 | **0.837576** | **−0.005857** ❌❌ | 全面负向 |
+
+---
+
+## 核心发现：T28 integrated 证伪
+
+### Finding 1: Dev 上升但 LB 下降 = 训练期 memorization
+
+- M1 Dev 0.845197 **比 T25 bypass 高 +0.0015** 但 LB **比 T25 bypass 低 −0.00126**
+- Dev→LB gap 从 T25 bypass 的 +0.000263 扩大到 **+0.003390**
+- **Dev 增量 100% 是训练期记忆，没有转化为 test 泛化**
+
+### Finding 2: DIN 重复注入（>1 次）反而过拟合
+
+**机制假说**：
+1. T28 每 block DIN 注入 × 2 次 = 让模型更深度依赖 target-aware pattern
+2. Target-aware pattern 在 train/dev 共享的近期分布下会增强（+Dev）
+3. 但 test 是远未来 → target pool 分布偏移 → DIN 过度激活反而伤害（−LB）
+4. **T25 bypass 做 1 次是"刚好够"，T28 做 2 次是"过度"**
+
+### Finding 3: seed 间 LB 差异在噪声边界（Δ 0.004）
+
+- M1 s3 LB 0.841807 vs M2 s42 LB 0.837576 = Δ **0.004231**
+- 接近 seed 噪声 ±0.005 上界
+- 但 s42 LogLoss guard E4 触发 → 说明 s42 已进入过拟合区
+- T28 方法学净贡献 = 负向（即使按最优 seed 也不如 T25 bypass）
+
+### Finding 4: T28 wall-time 成本 1.9×（5h44m / 8h33m vs T29 2h59m）
+
+- T29 用 compile+AMP: 2h45m
+- T28 **不开 compile** (ADR-010 决定首次规避 dynamo): 5h44m~8h33m
+- 即便开 compile 也至少 4h+，而 LB **更差**
+- **时间成本也不值得**
+
+---
+
+## ❌ 方向关闭决定
+
+- **ADR-010 Status: Proposed → Deprecated**
+- **T28 integrated 方向永久关闭**
+- **T25 bypass 保持 DIN 方向唯一最优实现**
+- 代码保留（`--enable_din_integrated` CLI + MultiSeqHyFormerBlock 分支），默认 off 完全 backward-compat
+- **不做 T28 其他 variant**（alpha 扫 / block-integrated × 1 block only / etc）—— Finding 1/2 说明机制性负向，细调无意义
+
+---
+
+## Lessons（新 team-memory 铁律）
+
+### 铁律：DIN 类 target-aware attention 注入次数有"刚好够"的上界
+
+- **1 次（bypass 到 classifier 前）**: ✅ T25 证 +0.004 LB
+- **2 次（每 block 内部）**: ❌ T28 证 −0.001 LB vs T25
+- **推论**：target-aware 机制在当前数据规模 + 远未来 test 分布偏移下，**重复使用会放大"对 train 期 target 分布的依赖"**，不是信号增强而是泛化损失
+- **未来 DIN 方向探索**应该走"**多样化**"而非"**重复化**"：
+  - ✅ Per-seq 独立 DIN（每 seq domain 用不同的 attention pooling 策略）
+  - ✅ Multi-head target query（1 个 block 里多个 head，各 head 关注不同 aspect）
+  - ❌ Multi-block same DIN（T28 证伪）
+
+### 铁律：Dev→LB gap 扩大 = 方法学负向的最强信号
+
+- T28 M1: Dev 升 +0.0015 但 gap 从 +0.00026 扩到 +0.0034（扩 13×）→ 真实 LB 下降
+- 判决新规：**新方向 Dev 正向时优先看 gap 变化，若 gap 扩 2× 以上（T25 bypass 标准 +0.00026 → 警戒线 +0.00052）应警觉**
 
 ---
 

@@ -66,4 +66,4 @@
 | [ADR-007](./ADR-007-rank-mixer-per-token-ffn.md) | RankMixerBlock Per-token FFN（修正仓库 shared FFN 与论文原版偏差） | Accepted | 2026-05-04 | T19 |
 | [ADR-008](./ADR-008-torch-compile-amp-default.md) | 默认训练路径启用 torch.compile + AMP bf16（工程加速，训练开推理不开） | Accepted with caveats | 2026-05-09 | T27 |
 | [ADR-009](./ADR-009-tokenization-fix-ns-groups.md) | Tokenization Fix · 启用 ns_groups.json 修改 fid 拼接顺序（DECEM 榜一 Tokenization 修复方向） | Proposed | 2026-05-11 | T29 |
-| [ADR-010](./ADR-010-din-integrated-in-block.md) | DIN Integrated Inside HyFormer Block · T25 bypass 的 block-integrated 升级（DECEM "DIN + MLP" 深化） | Proposed | 2026-05-11 | T28 |
+| [ADR-010](./ADR-010-din-integrated-in-block.md) | DIN Integrated Inside HyFormer Block · T25 bypass 的 block-integrated 升级（DECEM "DIN + MLP" 深化） | ❌ **Deprecated**（2026-05-12 · EXP-039 双 seed LB 证伪） | 2026-05-11 | T28（已关闭）|

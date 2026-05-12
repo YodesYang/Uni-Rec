@@ -1,5 +1,46 @@
 # ADR-010 · DIN Integrated Inside HyFormer Block（T28）
 
+> **Status**: ❌ **Deprecated**（2026-05-12 CEST 12:45 · EXP-039 M1/M2 双 seed LB 回流后证伪 · 下文保留原 Proposed 内容作历史决策血缘参考）
+> **Date**: 2026-05-11 Proposed · 2026-05-12 Deprecated
+> **Related Tasks**: T28 `[x]` 关闭 · T25 bypass 保持唯一 DIN 最优实现
+> **Related Experiments**: EXP-039（M1 seed=3 LB 0.841807 / M2 seed=42 LB 0.837576 · 双 seed 一致证伪）
+> **External References**:
+> - DIN 原论文 (Alibaba KDD 2018)：target-aware attention pooling
+> - UniRec（hojiahao/TAAC2026 41 stars）方案 1：DIN + MLP + `interest_token` 生成机制
+> - 小红书 DECEM（Industrial Track Rank 1, LB 0.852181, 2026-05-08 帖子）："我在前期就做了的 DIN + MLP"
+> - EXP-033（T25 DIN bypass 实装 · smoke + ADR-009 前身）
+> - EXP-036（T25 B LB 0.843433 · Δ+0.00421 vs baseline · 真信号）
+
+---
+
+## ❌ Deprecation Notice（2026-05-12 CEST 12:45）
+
+**一句话**：T28 integrated（DIN 每 block 内部注入 2 次）**在 LB 上比 T25 bypass（DIN classifier 前 1 次）更差**，方向永久关闭。
+
+**实测数据**：
+
+| 方向 | E3 Dev | LB | Dev→LB gap | 判决 |
+|---|---|---|---|---|
+| T25 bypass seed=42 (参考) | 0.843696 | **0.843433** | +0.000263 ⭐ | Gold standard |
+| T25 bypass seed=3 (参考) | — | **0.843069** | — | seed 锚 |
+| T28 integrated seed=3 (M1) | **0.845197** ↑ | 0.841807 ↓ | **+0.003390** 🔺扩 13× | ❌ Dev ↑ LB ↓ |
+| T28 integrated seed=42 (M2) | 0.840669 | 0.837576 | +0.003093 | ❌❌ 全面负向 |
+
+**机制**：DIN 注入 2 次放大 "对训练期 target 分布的依赖"，但 test 是远未来 → target pool 分布偏移 → DIN 过度激活反而伤害泛化。**"做 1 次刚好够，做 2 次过度"** 的典型过拟合模式。
+
+**后续路径**：
+- **不做 T28 variant**（alpha 扫 / 1 block only / etc）—— 机制性负向，细调无意义
+- **T25 bypass 保持 DIN 方向唯一最优实现**
+- **未来 DIN 探索方向改为"多样化"而非"重复化"**：✅ Per-seq 独立 DIN / ✅ Multi-head target query / ❌ Multi-block same DIN
+
+**代码保留**：`--enable_din_integrated` + `MultiSeqHyFormerBlock` 里的 per-block DIN 分支默认 off，不回滚。
+
+**详见** [EXP-039 §Lessons](../40-experiments/EXP-039-t28-din-integrated-halftrain-2026-05-11.md)。
+
+---
+
+## （下方为原 Proposed 内容 · 保留历史决策血缘）
+
 > **Status**: **Proposed**（2026-05-11 CEST 05:15 起草 · 等 T29 或 T28 half-train 回流判决）
 > **Date**: 2026-05-11 Proposed
 > **Related Tasks**: T28（待 open，本 ADR 作为依据）· T25（T28 是 T25 的"block-integrated 升级"）

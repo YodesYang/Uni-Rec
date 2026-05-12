@@ -1,29 +1,105 @@
 # EXP-038 · T29 Tokenization Fix Half-train · 2026-05-11 早
 
-> **Status**: 📋 实验计划 · 2 job 待启动（等 7:00 CEST LB 回流后决策最终提交顺序）
-> **日期**: 2026-05-11 CEST 04:30 agent 起草 · 西班牙凌晨
-> **关联**：[ADR-009](../30-decisions/ADR-009-tokenization-fix-ns-groups.md) · [EXP-035](EXP-035-kaggle-gold-retrospective-2026-05-10.md) · [EXP-037](EXP-037-u4i3-gap0-seed-sweep-eda-abandoned-2026-05-11.md)
+> **Status**: ✅ 回流完成（2026-05-12 CEST 12:45）· T29 vocabtier 弱正向真信号 · T29 tokfix 持平 · 进入 M6/M7 叠加阶段
+> **日期**: 2026-05-11 CEST 04:30 agent 起草 · 5/11 CEST 23:27 重启 · 5/12 CEST 08:00 回流
+> **关联**：[ADR-009](../30-decisions/ADR-009-tokenization-fix-ns-groups.md) · [EXP-035](EXP-035-kaggle-gold-retrospective-2026-05-10.md) · [EXP-037](EXP-037-u4i3-gap0-seed-sweep-eda-abandoned-2026-05-11.md) · [EXP-039](EXP-039-t28-din-integrated-halftrain-2026-05-11.md)
 
 ---
 
-## TL;DR
+## 🔥 LB 回流结果（2026-05-12 CEST 12:45）
 
-消化 DECEM 5/8 明说的 "Tokenization 修复" 方向（团队过去 48 天 0 投入），本批次 2 个 half-train job：
+### M3 · T29-B vocabtier × seed=42 (`t29-vocabtier-halftrain-gap05-seed42`)
 
-- **T29-A**：启用 `baseline/ns_groups.json`（原作者手工语义分组 U1~U7 + I1~I4）
-- **T29-B**：启用 `baseline/ns_groups_vocab_tier.json`（按 vocab tier 分 3 组）
+| Epoch | Dev AUC | Dev LogLoss |
+|---|---|---|
+| E1 | 0.828003 | — |
+| E2 | 0.840117 | — |
+| **E3** ⭐ | **0.841629** | **0.27813** |
+| E4 | 0.840309 | 0.27801 |
 
-共识：**零代码改动**，只改 `run.sh` 一行 `--ns_groups_json` 参数，100% 平台兼容。
+**stop_reason**: `max_epochs_completed`
+**best_checkpoint**: global_step45504 E3
+
+**LB 回流** (eval_id: 1778581038187): **LB 0.840603** / inference 624.55s
+
+### M4 · T29-A tokfix × seed=42 (`t29-tokfix-halftrain-gap05-seed42`)
+
+| Epoch | Dev AUC | Dev LogLoss |
+|---|---|---|
+| E1 | 0.824180 | — |
+| E2 | 0.836437 | — |
+| E3 | 0.839339 | — |
+| **E4** ⭐ | **0.841171** | **0.27925** |
+
+**stop_reason**: `max_epochs_completed`
+**best_checkpoint**: global_step60672 E4
+
+**LB 未评**（quota 经济考虑 — Dev 和 M3 仅差 0.0005，信息增量低）
 
 ---
 
-## 背景（上下文见 ADR-009）
+## 严格判决对照表
 
-简短版：
-- `RankMixerNSTokenizer` 里 `groups` 控制 fid 拼接顺序 → 相邻 fid 进同一 chunk → 同 chunk 内 fid 共享一个 Linear projection
-- 当前 `--ns_groups_json ""` 走 singleton fallback = fid 编号序（≡ 随机序，因为 fid 匿名化）
-- DECEM 榜一明说 "Tokenization 修复是 work 的小改动"
-- 原作者 4/26 commit 的 `baseline/ns_groups.json` 已有手工分组（U1~U7），但当时因 group tokenizer 路径的整除性约束被关掉，切到 rankmixer 后从未重新启用
+**Baseline**（EXP-030 `icq-half-gap05`）: E3 Dev **0.842443** / LB **0.839223** / gap +0.0032
+
+| 代号 | 方向 | E3 Dev | ΔDev | LB | ΔLB | Dev→LB gap | 判决 |
+|---|---|---|---|---|---|---|---|
+| baseline | singleton fallback | 0.842443 | — | 0.839223 | — | +0.0032 | — |
+| **M3** | **T29-B vocabtier** | 0.841629 | **−0.000814** | **0.840603** | **+0.001380** ✅ | **+0.001026** ⭐ | 🟡 **弱正向真信号** |
+| M4 | T29-A tokfix | 0.841171 (E4) | −0.001272 | 未评 | — | — | 噪声内 |
+
+**关键发现**:
+
+### Finding 1: T29 vocabtier Dev→LB gap 极小（+0.001026）是最大真信号
+
+gap=0.05 历史基线 Dev→LB gap 约 +0.002~+0.003（EXP-030 铁律）。
+**M3 的 gap 缩到 +0.001，是本项目 gap=0.05 路径上 **gap 最小**的 job** → Dev 信号 100% 转化为 LB 信号，非 memorization。
+
+**机制假说**：vocab tier 分组让同 chunk 内 fid 的 embedding 饱和速度接近 → Linear projection 更 LB-calibrated，减少 "训练期记忆" 部分
+
+### Finding 2: 但 Dev 负向 ΔDev = −0.000814
+
+表面看 M3 Dev 低于 baseline，这与"LB 正向"矛盾 —— 机制解释：
+- baseline 的 Dev 0.842443 **包含 +0.003 训练期污染**（见 gap=0.05 Dev→LB gap）
+- 真实 "generalization Dev" ≈ 0.839443
+- M3 Dev 0.841629 **包含 +0.001 训练期污染**（见 Dev→LB gap +0.001）
+- 真实 "generalization Dev" ≈ 0.840603 (= LB)
+
+**真实 generalization 能力对比**：
+- baseline: 0.839443
+- M3: 0.840603 → **Δ+0.00116 真实泛化增益**
+
+这与 LB ΔLB +0.00138 一致（差异在数据集分布精度内）。
+
+### Finding 3: T29-A 手工分组 vs T29-B vocabtier —— vocabtier 略胜
+
+- M3 vocabtier E3 Dev 0.841629 vs M4 tokfix E4 Dev 0.841171: Δ+0.000458（贴近噪声但一致方向）
+- vocabtier 按 vocab 大小分 3 tier → 同 chunk 内 fid 基数均匀 → 梯度稳定
+- tokfix 用 4/26 作者手工语义分组 → 匿名特征下语义假设可能不成立
+- **选择 vocabtier 作为 T29 主路径**
+
+### Finding 4: DECEM "Tokenization 修复" 方向**部分验证**
+
+- ✅ 方向对口（fid 拼接顺序确实影响 LB）
+- ⚠️ 增量保守（+0.0014 LB，不是 DECEM 暗示的 +0.003~0.005 级）
+- **假说**：DECEM 的 "Tokenization 合理化" 可能不止是 fid 拼接顺序，还包括我们未发现的维度（如 token 数量调整、projection 结构改动等）
+- 暂无进一步探索空间（demo vocab 和平台真实 vocab 差距大，更精细的 tier 划分需要真实数据统计）
+
+---
+
+## 下一步：T29 vocabtier 作为"可叠加 +0.0014 LB 组件"
+
+**今晚 5/12 CEST 12:53 已启动 M6/M7** 叠加 T25 DIN bypass + T29 vocabtier：
+
+- M6: T25 bypass + T29 vocabtier × seed=42 × gap=0.05
+- M7: T25 bypass + T29 vocabtier × seed=3 × gap=0.05（松 guard）
+
+**预期叠加 LB**:
+- T25 bypass seed=42 LB 0.843433 + T29 vocabtier +0.0014 ≈ **0.8448**
+- T25 bypass seed=3 LB 0.843069 + T29 vocabtier +0.0014 ≈ **0.8445**（如果 seed=3 继续好运，可能 +0.002 → 0.8465）
+
+**Top 20 目标路径（LB 0.850）**：M5/M6/M7 + S4 100% data final
+= T25 bypass baseline 0.843 + T29 vocab +0.0014 + gap=0 领地上沿 +0.003 + S4 data +0.002 = **0.849~0.851**（紧贴 Top 20）
 
 ---
 

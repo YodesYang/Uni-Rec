@@ -47,6 +47,13 @@ EXP-036（今日早上）给出 u4i3 × gap=0.05 × E3 Dev 0.843743 的**正向 
 **best_checkpoint**: global_step63764.auc=0.868055.best_model
 **Top-K**: rank1 E4 0.868055 / rank2 E3 0.867706 / rank3 E2 0.866301
 
+**🔥 LB 回流（2026-05-11 CEST 23:29）**: `t25-din-u4i3-gap0-seed42-4ep_eval_1778533657188` **LB 0.839927**
+- vs EXP-019 seed=42 gap=0 no-DIN E4 LB 0.84637 (SOTA) → **Δ−0.006443**（方法学明确负向）
+- vs gap=0.05 baseline 0.839223 → 几乎持平
+- Dev→LB gap = +0.02813（gap=0 领地偏高端）
+- **机制确认**：u4i3 双重损伤 = user_ns 粗化（5→4）损伤记忆 > item_ns 细化（2→3）增益 = Dev Δ−0.0009 + LB Δ−0.006
+- **u4i3 tokenization 方向整体证伪关闭**（gap=0 和 gap=0.05 都不应继续投入）
+
 ### Job 2 · seed=3 × u4i3 × gap=0 × DIN × 4ep（松 guard）
 
 **Source**：`~/Downloads/train_log.txt` line 22~42（2026-05-11 03:11:40 BJT 回流）
