@@ -1222,22 +1222,29 @@ class MultiSeqHyFormerBlock(nn.Module):
 
         # T33 / ADR-011 · TokenFormer NLIR gating.
         # When enabled, each cross-attention output is modulated by a
-        # sigmoid-gated multiplicative transformation over the block
-        # input Q (the gate source), implementing TokenFormer §4.4
-        # Eq. 16-18: I = X + sigmoid(X @ W_g) ⊙ A, where X = block-input
-        # query tokens, A = pure cross-attention delta. Mechanism:
-        # mitigate Sequential Collapse Propagation by injecting
-        # non-linear multiplicative interaction into the otherwise
-        # purely-linear cross-attention output. A single Linear(D, D)
-        # is SHARED across all S sequence domains within this block
-        # (keeps parameter increment at +D² ≈ 4k per block, does not
-        # violate team-memory "per-X independent params" red line).
-        # Default off → bit-identical to pre-T33 behaviour.
+        # sigmoid-gated multiplicative transformation using the LN-
+        # normalized block input as gate source, implementing
+        # TokenFormer §4.4 Eq. 16-18:
+        #   G = LN(X) @ W_g
+        #   I = X + sigmoid(G) ⊙ A_raw
+        # where X = block-input query tokens, LN(X) = the same pre-LN
+        # tensor that the cross-attention's Q projection saw, and
+        # A_raw = Attn(LN(X), LN(K), V) is the pure attention delta.
+        # This keeps gate and attention on the same representation
+        # (论文 "same X drives both"), preserves Xavier init's zero-mean
+        # unit-variance assumption, and avoids sigmoid saturation risk
+        # in deeper blocks where raw X's variance grows. We reuse the
+        # CrossAttention's norm_q at forward time — it's the same LN.
+        # A single Linear(D, D) is SHARED across all S sequence domains
+        # within this block (keeps parameter increment at +D² ≈ 4k per
+        # block, does not violate team-memory "per-X independent params"
+        # red line). Default off → bit-identical to pre-T33 behaviour.
         self.enable_nlir_gating = bool(enable_nlir_gating)
         if self.enable_nlir_gating:
             self.nlir_gate = nn.Linear(d_model, d_model)
             # Xavier uniform init + bias=0 centers sigmoid(gate) ≈ 0.5
-            # at initialization so no direction is pre-saturated.
+            # at initialization (valid under the LN-normalized gate
+            # source assumption · LN outputs mean≈0 var≈1).
             nn.init.xavier_uniform_(self.nlir_gate.weight)
             nn.init.zeros_(self.nlir_gate.bias)
 
@@ -1308,15 +1315,28 @@ class MultiSeqHyFormerBlock(nn.Module):
                 rope_cos=rc, rope_sin=rs,
             )
             # T33 · NLIR gating (ADR-011). CrossAttention returns
-            # X + A (already residual-connected). We extract pure A,
-            # gate it with sigmoid(X @ W_g) using the *original*
-            # block-input X as the gate source (matches TokenFormer
-            # Eq. 16-18), then re-assemble: decoded = X + gate ⊙ A.
+            # X + A_raw (already residual-connected with pre-LN: A_raw
+            # = Attn(LN_q(X), LN_kv(K), V)). We extract pure A_raw by
+            # subtracting X, then gate it with sigmoid(LN_q(X) @ W_g)
+            # — using the **same LN-normalized query** as the attention
+            # input, matching TokenFormer §4.4 Eq. 16 where G is computed
+            # from the normalized block input (their backbone is PreNorm
+            # RMSNorm). Using raw X instead would (a) violate論文 "same
+            # X drives both attn and gate" principle, (b) break Xavier
+            # init's zero-mean unit-variance assumption since raw X's
+            # variance grows with block depth due to residual accumulation,
+            # (c) risk sigmoid saturation in block 2+. LN_q is already
+            # instantiated inside CrossAttention so we reuse it for free
+            # (zero new params, gradient couples attn and gate naturally).
             # When disabled, the block is bit-identical to pre-T33.
             if self.enable_nlir_gating:
                 x_in = q_tokens_list[i]            # (B, Nq, D) — pre-attn input
-                attn_delta = decoded_q_i - x_in    # (B, Nq, D) — pure A
-                gate = torch.sigmoid(self.nlir_gate(x_in))  # (B, Nq, D)
+                attn_delta = decoded_q_i - x_in    # (B, Nq, D) — pure A_raw
+                # Reuse attention's pre-LN on Q. This is the EXACT same
+                # tensor (LN(X)) that the attention's Q projection saw,
+                # keeping gate and attention on the same representation.
+                x_norm = self.cross_attns[i].norm_q(x_in)
+                gate = torch.sigmoid(self.nlir_gate(x_norm))  # (B, Nq, D)
                 decoded_q_i = x_in + gate * attn_delta
             decoded_qs.append(decoded_q_i)
 
