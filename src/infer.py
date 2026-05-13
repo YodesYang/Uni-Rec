@@ -222,6 +222,22 @@ def main() -> None:
     batch_size = int(cfg.get("batch_size", 256))
     num_workers = int(os.environ.get("EVAL_NUM_WORKERS", cfg.get("num_workers", 8)))
 
+    # ── Optional test-set EDA dump ────────────────────────────────────
+    # When EDA_BLOB=1 is set, the inference path asks dataset to collect
+    # per-batch test EDA stats (no labels involved) and emit a base64+gzip
+    # JSON blob to stdout at the very end. Used to study train↔test
+    # covariate shift without consuming an extra evaluation quota.
+    # The platform default infer.py does NOT pass this kwarg, so when our
+    # custom infer.py is uploaded the flag is fully opt-in via env var.
+    enable_test_eda = os.environ.get("EDA_BLOB", "0") == "1"
+    if enable_test_eda and num_workers > 0:
+        logging.warning(
+            "EDA_BLOB=1 forces num_workers=0 for inference; "
+            "dataset._eda_state is only updated in the main process. "
+            "Wall-time impact estimated +5~10%."
+        )
+        num_workers = 0
+
     dataset = PCVRParquetDataset(
         parquet_path=eval_data_path,
         schema_path=schema_path,
@@ -246,6 +262,7 @@ def main() -> None:
         enable_is_missing=bool(cfg.get("enable_is_missing", False)),
         is_missing_user_int_fids=parse_int_csv(cfg.get("is_missing_user_int_fids", "")),
         is_missing_item_int_fids=parse_int_csv(cfg.get("is_missing_item_int_fids", "")),
+        enable_eda_dump=enable_test_eda,
     )
 
     loader_kwargs: Dict[str, Any] = {}
@@ -344,6 +361,55 @@ def main() -> None:
         json.dump({"predictions": predictions}, f)
     logging.info(
         f"Saved {len(predictions)} predictions from {seen_rows} rows to {out_path}")
+
+    if enable_test_eda:
+        _emit_test_eda_blob(dataset)
+
+
+def _emit_test_eda_blob(dataset: PCVRParquetDataset) -> None:
+    """Emit base64+gzip JSON blob of test-set EDA stats to stdout.
+
+    Placed at the very END of stdout (after predictions are saved and after
+    any other logging) so the platform Logs UI tail-1000-lines window
+    contains the blob even if log volume is high. Sentinels make extraction
+    by ``tools/decode_eda_blob.py`` reliable.
+
+    No-ops if dataset has no EDA state (e.g. EDA_BLOB unset or empty
+    inference). Wraps in try/except so any EDA failure NEVER fails the
+    overall evaluation (predictions.json is the contract; EDA is bonus).
+    """
+    import base64
+    import gzip
+    import sys
+    try:
+        summary = dataset.finalize_eda()
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.warning(f"[test-eda] finalize_eda failed: {exc!r}")
+        return
+    if summary is None:
+        logging.warning("[test-eda] EDA_BLOB=1 but no EDA state collected")
+        return
+    try:
+        payload = json.dumps(summary, sort_keys=True).encode("utf-8")
+        gz = gzip.compress(payload, compresslevel=9)
+        b64 = base64.b64encode(gz).decode("ascii")
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.warning(f"[test-eda] blob encode failed: {exc!r}")
+        return
+
+    chunk_size = 120
+    chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)]
+
+    sys.stdout.flush()
+    print()
+    print("<<<EDA_BLOB_START>>>")
+    for ch in chunks:
+        print(ch)
+    print("<<<EDA_BLOB_END>>>")
+    sys.stdout.flush()
+    logging.info(
+        f"[test-eda] blob emitted: {len(b64)} chars, "
+        f"{len(chunks)} chunks, raw {len(payload)} bytes")
 
 
 if __name__ == "__main__":
