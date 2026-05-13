@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import PCVRParquetDataset, FeatureSchema, NUM_TIME_BUCKETS
+from dataset import PCVRParquetDataset, FeatureSchema, NUM_TIME_BUCKETS, parse_bucket_boundaries, parse_int_csv
 from model import ModelInput, PCVRHyFormer
 
 
@@ -242,6 +242,10 @@ def main() -> None:
         enable_time_of_day_features=bool(cfg.get("enable_time_of_day_features", False)),
         enable_hour_only_features=bool(cfg.get("enable_hour_only_features", False)),
         disable_seq_fids=_parse_disable_seq_fids(cfg.get("disable_seq_fids", "")),
+        bucket_boundaries=parse_bucket_boundaries(cfg.get("time_bucket_boundaries", "")),
+        enable_is_missing=bool(cfg.get("enable_is_missing", False)),
+        is_missing_user_int_fids=parse_int_csv(cfg.get("is_missing_user_int_fids", "")),
+        is_missing_item_int_fids=parse_int_csv(cfg.get("is_missing_item_int_fids", "")),
     )
 
     loader_kwargs: Dict[str, Any] = {}

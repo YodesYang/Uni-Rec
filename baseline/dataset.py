@@ -107,8 +107,16 @@ class FeatureSchema:
 # out of shared memory when many DataLoader workers are active.
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-# Time-delta bucket boundaries (64 edges -> 65 buckets: 0=padding, 1..64).
-BUCKET_BOUNDARIES = np.array([
+# Time-delta bucket boundaries (63 edges -> 64 buckets: 0=padding, 1..63).
+#
+# Defaults to a hand-designed log-scale ladder from 5s to 1yr. Can be overridden
+# per-run via ``PCVRParquetDataset(bucket_boundaries=...)`` / CLI
+# ``--time_bucket_boundaries`` (T30). The override length MUST equal
+# ``len(DEFAULT_BUCKET_BOUNDARIES)`` (= 63) so that the embedding table shape
+# stays bit-identical between default and tuned runs — only the edge positions
+# move, the number of slots does not, which keeps ``NUM_TIME_BUCKETS`` a
+# compile-time constant and preserves checkpoint compatibility.
+DEFAULT_BUCKET_BOUNDARIES = np.array([
     5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60,
     120, 180, 240, 300, 360, 420, 480, 540, 600,
     900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3300, 3600,
@@ -121,16 +129,69 @@ BUCKET_BOUNDARIES = np.array([
     31536000,
 ], dtype=np.int64)
 
+# Back-compat alias. Historical callers (and EDA sanity-check code) imported
+# ``BUCKET_BOUNDARIES`` directly. Keep the name pointing at the default ladder;
+# *runtime* bucketization uses the per-dataset override (see
+# ``PCVRParquetDataset._bucket_boundaries``) rather than this module-level
+# constant so overrides do not affect unrelated imports.
+BUCKET_BOUNDARIES = DEFAULT_BUCKET_BOUNDARIES
+
 # Total number of time-bucket embedding slots (= number of boundaries + 1, with
 # padding=0 included).
 #
-# This constant is uniquely determined by the length of BUCKET_BOUNDARIES; on
-# the model side, ``nn.Embedding(num_embeddings=NUM_TIME_BUCKETS)`` must match
-# this value exactly, otherwise an IndexError may be raised at runtime.
-#
-# That is why ``train.py`` / ``infer.py`` only expose the boolean flag
-# ``--use_time_buckets`` and derive the concrete bucket count from here.
-NUM_TIME_BUCKETS = len(BUCKET_BOUNDARIES) + 1
+# This constant is uniquely determined by the length of DEFAULT_BUCKET_BOUNDARIES;
+# on the model side, ``nn.Embedding(num_embeddings=NUM_TIME_BUCKETS)`` must
+# match this value exactly, otherwise an IndexError may be raised at runtime.
+# Because T30 overrides keep ``len(...)`` unchanged, this constant is also
+# correct for tuned runs.
+NUM_TIME_BUCKETS = len(DEFAULT_BUCKET_BOUNDARIES) + 1
+
+
+def parse_bucket_boundaries(spec: str | None) -> np.ndarray:
+    """Parse a CLI-supplied bucket-boundary specification into a numpy array.
+
+    - ``None`` or empty string → returns ``DEFAULT_BUCKET_BOUNDARIES`` (a copy,
+      so callers can mutate without affecting the module-level default).
+    - Otherwise expects a comma-separated list of positive integers representing
+      time-delta bucket edges in seconds, strictly increasing. Must have
+      EXACTLY ``len(DEFAULT_BUCKET_BOUNDARIES)`` values (= 64) to preserve
+      embedding-table shape compatibility.
+
+    Returns:
+        np.ndarray of dtype int64 with shape (64,).
+
+    Raises:
+        ValueError: on length mismatch, non-monotonic values, or non-positive
+            entries.
+    """
+    if spec is None or not str(spec).strip():
+        return DEFAULT_BUCKET_BOUNDARIES.copy()
+    parts = [p.strip() for p in str(spec).split(',') if p.strip()]
+    expected = len(DEFAULT_BUCKET_BOUNDARIES)
+    if len(parts) != expected:
+        raise ValueError(
+            f"time_bucket_boundaries: got {len(parts)} values, expected "
+            f"{expected} (= fixed embedding slot count). Either supply exactly "
+            f"{expected} comma-separated positive integers, or leave the flag "
+            "empty to use the default ladder."
+        )
+    try:
+        vals = np.array([int(p) for p in parts], dtype=np.int64)
+    except ValueError as e:
+        raise ValueError(
+            f"time_bucket_boundaries: failed to parse '{spec}' as integers: {e}"
+        ) from e
+    if (vals <= 0).any():
+        raise ValueError(
+            f"time_bucket_boundaries: all values must be strictly positive "
+            f"seconds; got {vals.tolist()}"
+        )
+    if (np.diff(vals) <= 0).any():
+        raise ValueError(
+            f"time_bucket_boundaries: values must be strictly increasing; "
+            f"got {vals.tolist()}"
+        )
+    return vals
 
 # Synthetic user-dense feature ids. They are not read from parquet columns;
 # they are appended in-memory when the corresponding CLI flags are enabled.
@@ -141,6 +202,36 @@ TIME_OF_DAY_FEATURE_FID = 900004  # impression hour/dow/weekend (5 dims)
 TIME_OF_DAY_FEATURE_DIM = 5       # hour_sin, hour_cos, dow_sin, dow_cos, is_weekend
 HOUR_ONLY_FEATURE_FID = 900005
 HOUR_ONLY_FEATURE_DIM = 2        # hour_sin, hour_cos only (no DOW/weekend)
+
+# T31 · is-missing bitmap synthetic feature. One float per selected user_int /
+# item_int fid carrying 1.0 when the raw parquet cell was null / <=0, else 0.0.
+# Concatenated to user_dense so the model receives "missingness" as an
+# independent dense signal in addition to the reserved embedding slot (which is
+# ALSO populated via vocab_size+1 when enable_is_missing is active — belt +
+# suspenders per DECEM Trick 3).
+IS_MISSING_FEATURE_FID = 900006
+
+
+def parse_int_csv(spec: str | None) -> Optional[List[int]]:
+    """Parse a comma-separated list of positive integers (e.g. fids).
+
+    - ``None`` or empty string → ``None`` (caller may interpret as "default").
+    - Otherwise returns a list of ints, deduplicated, sorted ascending.
+
+    Raises ValueError on non-integer or non-positive entries.
+    """
+    if spec is None or not str(spec).strip():
+        return None
+    parts = [p.strip() for p in str(spec).split(',') if p.strip()]
+    try:
+        vals = sorted({int(p) for p in parts})
+    except ValueError as e:
+        raise ValueError(
+            f"failed to parse '{spec}' as comma-separated integers: {e}"
+        ) from e
+    if any(v <= 0 for v in vals):
+        raise ValueError(f"all fids must be positive; got {vals}")
+    return vals
 
 
 class HistoryCVRStore:
@@ -295,6 +386,10 @@ class PCVRParquetDataset(IterableDataset):
         disable_seq_fids: Optional[List[int]] = None,
         enable_eda_dump: bool = False,
         eda_reservoir_size: int = 20000,
+        bucket_boundaries: Optional[np.ndarray] = None,
+        enable_is_missing: bool = False,
+        is_missing_user_int_fids: Optional[List[int]] = None,
+        is_missing_item_int_fids: Optional[List[int]] = None,
     ) -> None:
         """
         Args:
@@ -418,6 +513,39 @@ class PCVRParquetDataset(IterableDataset):
         # EDA state (lazy init on first batch to avoid unused allocation).
         # Layout documented at _update_eda_stats() / finalize_eda().
         self._eda_state: Optional[Dict[str, Any]] = None
+        # T30 · per-run time-bucket boundaries. None means "use the default
+        # hand-designed ladder" which keeps historical behavior bit-identical.
+        # Overrides MUST have len == len(DEFAULT_BUCKET_BOUNDARIES) so the
+        # embedding table shape (NUM_TIME_BUCKETS) is unaffected.
+        if bucket_boundaries is None:
+            self._bucket_boundaries = DEFAULT_BUCKET_BOUNDARIES
+        else:
+            arr = np.asarray(bucket_boundaries, dtype=np.int64)
+            if arr.ndim != 1 or arr.shape[0] != len(DEFAULT_BUCKET_BOUNDARIES):
+                raise ValueError(
+                    f"bucket_boundaries must be a 1D array of length "
+                    f"{len(DEFAULT_BUCKET_BOUNDARIES)}; got shape {arr.shape}"
+                )
+            self._bucket_boundaries = arr
+        # T31 · is-missing signal. When enabled, null / <=0 values of selected
+        # user_int / item_int fids are routed to a reserved vocab slot (vs+1)
+        # rather than the padding slot (0) — embedding-level signal. In
+        # parallel, a per-fid is-missing bitmap is appended to user_dense —
+        # dense-level signal. Both signals are redundant by design (DECEM
+        # Trick 3, belt+suspenders) and cost negligible parameters.
+        self.enable_is_missing = bool(enable_is_missing)
+        # Resolved at feature-plan build time (after self._user_int_cols etc.
+        # are populated). None at __init__ entry means "use default fid sets".
+        self._is_missing_user_int_fids_arg = is_missing_user_int_fids
+        self._is_missing_item_int_fids_arg = is_missing_item_int_fids
+        # These three lists are populated by _resolve_is_missing_plan():
+        #   _is_missing_user_int_plan: [(ci, offset, fid), ...] for user_int
+        #   _is_missing_item_int_plan: [(ci, offset, fid), ...] for item_int
+        #   _is_missing_dense_offset: int offset into user_dense where the
+        #       bitmap begins. -1 when disabled.
+        self._is_missing_user_int_plan: List[Tuple[int, int, int]] = []
+        self._is_missing_item_int_plan: List[Tuple[int, int, int]] = []
+        self._is_missing_dense_offset: int = -1
         self.enable_history_cvr_features = enable_history_cvr_features
         self.history_cvr_cache_path = history_cvr_cache_path
         self.history_cvr_time_mode = history_cvr_time_mode
@@ -537,10 +665,21 @@ class PCVRParquetDataset(IterableDataset):
         # Load schema.json.
         self._load_schema(schema_path, seq_max_lens or {})
 
+        # T31 · is-missing · finalize the list of selected fids and bump the
+        # vocab_size of each selected fid by +1 (reserving the top slot as the
+        # "missing" sentinel), plus extend user_dense_schema with the bitmap
+        # columns. Must happen AFTER _load_schema (needs _user_int_cols etc.
+        # populated) and BEFORE the _buf_user_dense / _user_int_plan allocation
+        # (which both snapshot dims post-adjustment).
+        self._resolve_is_missing_plan()
+
         # ---- Pre-compute column index lookup ----
         pf = pq.ParquetFile(self._parquet_files[0])
         schema_names = pf.schema_arrow.names
         self._col_idx = {name: i for i, name in enumerate(schema_names)}
+
+        # T31 · now that col_idx exists, link the is-missing plan entries.
+        self._link_is_missing_plan_col_idx()
 
         # ---- Pre-allocate numpy buffers ----
         B = batch_size
@@ -571,6 +710,39 @@ class PCVRParquetDataset(IterableDataset):
             ci = self._col_idx.get(f'item_int_feats_{fid}')
             self._item_int_plan.append((ci, dim, offset, vs))
             offset += dim
+
+        # T31 · pre-compute fast-lookup sets of selected fids for use in the
+        # _convert_batch hot loop. Derived from the plans built above so
+        # fid→fid membership is O(1). Empty when enable_is_missing=False.
+        self._is_missing_user_int_fids_set: set[int] = {
+            fid for _, _, fid in self._is_missing_user_int_plan
+        }
+        self._is_missing_item_int_fids_set: set[int] = {
+            fid for _, _, fid in self._is_missing_item_int_plan
+        }
+        # Also pre-compute per-plan (ci, dim, offset, vs, is_selected) tuples
+        # to avoid re-hashing fids in the hot path. Map ci → fid once.
+        user_int_ci_to_fid = {
+            self._col_idx.get(f'user_int_feats_{fid}'): fid
+            for fid, _, _ in self._user_int_cols
+        }
+        item_int_ci_to_fid = {
+            self._col_idx.get(f'item_int_feats_{fid}'): fid
+            for fid, _, _ in self._item_int_cols
+        }
+        self._user_int_plan_x = [
+            (ci, dim, offset, vs,
+             user_int_ci_to_fid.get(ci) in self._is_missing_user_int_fids_set)
+            for ci, dim, offset, vs in self._user_int_plan
+        ]
+        self._item_int_plan_x = [
+            (ci, dim, offset, vs,
+             item_int_ci_to_fid.get(ci) in self._is_missing_item_int_fids_set)
+            for ci, dim, offset, vs in self._item_int_plan
+        ]
+        # Kept as attributes for use in the hot loop (fid recovery from ci).
+        self._ci_to_user_int_fid = user_int_ci_to_fid
+        self._ci_to_item_int_fid = item_int_ci_to_fid
 
         self._user_dense_plan = []
         offset = 0
@@ -694,6 +866,168 @@ class PCVRParquetDataset(IterableDataset):
 
             # max_len: from seq_max_lens arg; unspecified domains fall back to 256.
             self._seq_maxlen[domain] = seq_max_lens.get(domain, 256)
+
+    def _resolve_is_missing_plan(self) -> None:
+        """T31 · Decide which user_int / item_int fids carry is-missing signal
+        and register the bookkeeping.
+
+        Effects (only when ``self.enable_is_missing`` is True):
+        - Mutates ``self._user_int_cols`` / ``self._item_int_cols`` in place to
+          bump the vocab_size of each selected fid by +1. The new top slot
+          (= original_vs) is reserved as the "missing" sentinel.
+        - Mutates ``self.user_int_vocab_sizes`` / ``self.item_int_vocab_sizes``
+          accordingly (per-column expansion for multi-dim fids is not needed
+          since selected fids are scalar; see assert below).
+        - Extends ``self.user_dense_schema`` with ``IS_MISSING_FEATURE_FID`` of
+          length ``len(user_int_selected) + len(item_int_selected)``.
+        - Populates ``self._is_missing_user_int_plan`` /
+          ``self._is_missing_item_int_plan`` for fast lookup in
+          ``_convert_batch``. Entries are ``(col_idx, user_int_scalar_offset,
+          fid)``.
+        - Sets ``self._is_missing_dense_offset`` to the starting offset in
+          user_dense where the bitmap begins.
+
+        No-op when ``self.enable_is_missing`` is False — preserves the exact
+        pre-T31 buffer layout for backward compatibility.
+        """
+        if not self.enable_is_missing:
+            return
+
+        # Default to all scalar user_int fids when caller passes None.
+        # For item_int, default to EMPTY set because DECEM only lists user_int
+        # fids as high-null. Item_int is opt-in via explicit fid list.
+        all_user_scalar = [fid for fid, vs, dim in self._user_int_cols
+                           if dim == 1]
+        all_item_scalar = [fid for fid, vs, dim in self._item_int_cols
+                           if dim == 1]
+
+        if self._is_missing_user_int_fids_arg is None:
+            selected_user = set(all_user_scalar)
+        else:
+            selected_user = set(self._is_missing_user_int_fids_arg)
+        if self._is_missing_item_int_fids_arg is None:
+            selected_item: set[int] = set()
+        else:
+            selected_item = set(self._is_missing_item_int_fids_arg)
+
+        # Intersect with actual schema; drop fids not in schema (warn).
+        unknown_user = selected_user - set(fid for fid, _, _ in self._user_int_cols)
+        unknown_item = selected_item - set(fid for fid, _, _ in self._item_int_cols)
+        if unknown_user:
+            logging.warning(
+                f"[T31] is_missing_user_int_fids: ignoring unknown fids "
+                f"{sorted(unknown_user)} (not in schema)")
+        if unknown_item:
+            logging.warning(
+                f"[T31] is_missing_item_int_fids: ignoring unknown fids "
+                f"{sorted(unknown_item)} (not in schema)")
+        selected_user -= unknown_user
+        selected_item -= unknown_item
+
+        # Restrict to scalar dim=1 fids (multi-dim is_missing is ambiguous;
+        # would need per-position bitmap which is out of scope for T31).
+        non_scalar_user = {fid for fid, vs, dim in self._user_int_cols
+                           if fid in selected_user and dim != 1}
+        non_scalar_item = {fid for fid, vs, dim in self._item_int_cols
+                           if fid in selected_item and dim != 1}
+        if non_scalar_user:
+            logging.warning(
+                f"[T31] is_missing: skipping non-scalar user_int fids "
+                f"{sorted(non_scalar_user)} (dim != 1 is out of scope)")
+        if non_scalar_item:
+            logging.warning(
+                f"[T31] is_missing: skipping non-scalar item_int fids "
+                f"{sorted(non_scalar_item)} (dim != 1 is out of scope)")
+        selected_user -= non_scalar_user
+        selected_item -= non_scalar_item
+
+        # Nothing selected → disable cleanly. This avoids a zero-width dense
+        # FEATURE_FID add (which would make FeatureSchema silently noop but
+        # leave self.enable_is_missing True confusingly).
+        if not selected_user and not selected_item:
+            logging.warning(
+                "[T31] enable_is_missing=True but no valid fids selected; "
+                "effectively disabled (no schema / dense changes).")
+            self.enable_is_missing = False
+            return
+
+        # (1) Bump vocab_size by +1 in both _user_int_cols and
+        # user_int_vocab_sizes. The new top slot becomes the "missing"
+        # sentinel. For scalar fids (dim=1), the per-column sizes list is
+        # also dim=1 so a single-position bump suffices.
+        def _bump(cols: List[List[int]], vocab_sizes: List[int],
+                  schema: 'FeatureSchema', selected: set[int]) -> None:
+            offset = 0
+            for i, (fid, vs, dim) in enumerate(cols):
+                if fid in selected:
+                    assert dim == 1, \
+                        f"is_missing supports scalar fids only; fid={fid} "\
+                        f"has dim={dim} (should have been filtered out)"
+                    cols[i] = [fid, vs + 1, dim]
+                    vocab_sizes[offset] = vs + 1
+                offset += dim
+
+        _bump(self._user_int_cols, self.user_int_vocab_sizes,
+              self.user_int_schema, selected_user)
+        _bump(self._item_int_cols, self.item_int_vocab_sizes,
+              self.item_int_schema, selected_item)
+
+        # (2) Extend user_dense_schema with bitmap columns at the tail.
+        # Important: this add MUST happen AFTER all other enable_* adds
+        # in _load_schema so the bitmap sits at a deterministic offset.
+        self._is_missing_dense_offset = self.user_dense_schema.total_dim
+        n_bitmap = len(selected_user) + len(selected_item)
+        self.user_dense_schema.add(IS_MISSING_FEATURE_FID, n_bitmap)
+
+        # (3) Build plan lists for _convert_batch. Use sorted order so the
+        # bitmap layout is deterministic (user_int fids first ascending,
+        # then item_int fids ascending). The layout is reproducible from
+        # (selected_user_sorted, selected_item_sorted) at infer time.
+        user_int_offsets: Dict[int, int] = {}
+        cur = 0
+        for fid, vs, dim in self._user_int_cols:
+            user_int_offsets[fid] = cur
+            cur += dim
+        item_int_offsets: Dict[int, int] = {}
+        cur = 0
+        for fid, vs, dim in self._item_int_cols:
+            item_int_offsets[fid] = cur
+            cur += dim
+
+        sorted_user_fids = sorted(selected_user)
+        sorted_item_fids = sorted(selected_item)
+        # col_idx filled later (after self._col_idx exists); store fid for now.
+        # Placeholder entries: (col_idx=-1, int_buf_offset, fid). Will be
+        # re-linked after self._col_idx is built.
+        self._is_missing_user_int_plan = [
+            (-1, user_int_offsets[fid], fid) for fid in sorted_user_fids
+        ]
+        self._is_missing_item_int_plan = [
+            (-1, item_int_offsets[fid], fid) for fid in sorted_item_fids
+        ]
+
+        logging.info(
+            f"[T31] enable_is_missing=True · user_int fids={sorted_user_fids} "
+            f"· item_int fids={sorted_item_fids} · user_dense offset="
+            f"{self._is_missing_dense_offset} · bitmap dim={n_bitmap}")
+
+    def _link_is_missing_plan_col_idx(self) -> None:
+        """T31 · Resolve (-1, offset, fid) entries in the is-missing plans to
+        (col_idx, offset, fid) using ``self._col_idx``.
+
+        Called once after ``self._col_idx`` is populated. Splitting this out
+        keeps ``_resolve_is_missing_plan`` runnable before parquet inspection.
+        """
+        if not self.enable_is_missing:
+            return
+        self._is_missing_user_int_plan = [
+            (self._col_idx.get(f'user_int_feats_{fid}'), off, fid)
+            for _, off, fid in self._is_missing_user_int_plan
+        ]
+        self._is_missing_item_int_plan = [
+            (self._col_idx.get(f'item_int_feats_{fid}'), off, fid)
+            for _, off, fid in self._is_missing_item_int_plan
+        ]
 
     def __len__(self) -> int:
         # Ceiling per Row Group; this is an upper bound on the true batch count.
@@ -1237,15 +1571,31 @@ class PCVRParquetDataset(IterableDataset):
         # range.
         user_int = self._buf_user_int[:B]
         user_int[:] = 0
-        for ci, dim, offset, vs in self._user_int_plan:
+        # T31 · collect per-fid missing masks when enabled, for the
+        # user_dense bitmap below. Keyed by fid so we don't depend on
+        # plan iteration order when filling the bitmap.
+        user_int_missing_masks: Optional[Dict[int, np.ndarray]] = (
+            {} if self.enable_is_missing else None)
+        for ci, dim, offset, vs, is_sel in self._user_int_plan_x:
             col = batch.column(ci)
             if dim == 1:
                 arr = col.fill_null(0).to_numpy(zero_copy_only=False).astype(np.int64)
+                # T31 · derive missing mask BEFORE the <=0 → 0 collapse so
+                # both null and <=0 are treated as "missing".
+                if is_sel:
+                    missing = arr <= 0
                 arr[arr <= 0] = 0
                 if vs > 0:
                     self._record_oob('user_int', ci, arr, vs)
                 else:
                     arr[:] = 0
+                # T31 · route missing rows to the reserved top slot
+                # (vs - 1 post-bump) and record the mask for the dense bitmap.
+                if is_sel:
+                    arr[missing] = vs - 1
+                    fid = self._ci_to_user_int_fid.get(ci)
+                    if fid is not None:
+                        user_int_missing_masks[fid] = missing
                 user_int[:, offset] = arr
             else:
                 padded, _ = self._pad_varlen_int_column(col, dim, B)
@@ -1258,15 +1608,24 @@ class PCVRParquetDataset(IterableDataset):
         # ---- item_int ----
         item_int = self._buf_item_int[:B]
         item_int[:] = 0
-        for ci, dim, offset, vs in self._item_int_plan:
+        item_int_missing_masks: Optional[Dict[int, np.ndarray]] = (
+            {} if self.enable_is_missing else None)
+        for ci, dim, offset, vs, is_sel in self._item_int_plan_x:
             col = batch.column(ci)
             if dim == 1:
                 arr = col.fill_null(0).to_numpy(zero_copy_only=False).astype(np.int64)
+                if is_sel:
+                    missing = arr <= 0
                 arr[arr <= 0] = 0
                 if vs > 0:
                     self._record_oob('item_int', ci, arr, vs)
                 else:
                     arr[:] = 0
+                if is_sel:
+                    arr[missing] = vs - 1
+                    fid = self._ci_to_item_int_fid.get(ci)
+                    if fid is not None:
+                        item_int_missing_masks[fid] = missing
                 item_int[:, offset] = arr
             else:
                 padded, _ = self._pad_varlen_int_column(col, dim, B)
@@ -1427,18 +1786,20 @@ class PCVRParquetDataset(IterableDataset):
 
                 ts_expanded = timestamps.reshape(-1, 1)
                 time_diff = np.maximum(ts_expanded - ts_padded, 0)
-                # np.searchsorted returns values in [0, len(BUCKET_BOUNDARIES)].
-                # After +1 the nominal range is [1, len(BUCKET_BOUNDARIES)+1];
+                # np.searchsorted returns values in [0, len(boundaries)].
+                # After +1 the nominal range is [1, len(boundaries)+1];
                 # the upper bound only appears when time_diff exceeds the
                 # largest boundary (~1 year) and would index past
-                # nn.Embedding(NUM_TIME_BUCKETS=len(BUCKET_BOUNDARIES)+1).
-                # Clip raw result to [0, len(BUCKET_BOUNDARIES)-1] so the final
-                # bucket id (after +1) stays within [1, len(BUCKET_BOUNDARIES)]
+                # nn.Embedding(NUM_TIME_BUCKETS=len(boundaries)+1).
+                # Clip raw result to [0, len(boundaries)-1] so the final
+                # bucket id (after +1) stays within [1, len(boundaries)]
                 # and is always a valid Embedding index. Time-diffs beyond the
                 # largest boundary collapse into the last bucket.
+                # T30: use per-run boundaries (defaults to DEFAULT_BUCKET_BOUNDARIES).
+                boundaries = self._bucket_boundaries
                 raw_buckets = np.clip(
-                    np.searchsorted(BUCKET_BOUNDARIES, time_diff.ravel()),
-                    0, len(BUCKET_BOUNDARIES) - 1,
+                    np.searchsorted(boundaries, time_diff.ravel()),
+                    0, len(boundaries) - 1,
                 )
                 buckets = raw_buckets.reshape(B, max_len) + 1
                 buckets[ts_padded == 0] = 0
@@ -1521,6 +1882,31 @@ class PCVRParquetDataset(IterableDataset):
             ho[:, 0] = np.sin(2.0 * np.pi * hours / 24.0)
             ho[:, 1] = np.cos(2.0 * np.pi * hours / 24.0)
             dense_offset += HOUR_ONLY_FEATURE_DIM
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
+        # T31 · is-missing bitmap. Written at _is_missing_dense_offset, which
+        # was recorded at schema-build time to match user_dense_schema layout.
+        # The bitmap ordering is (user_int_fids ascending) followed by
+        # (item_int_fids ascending), matching _is_missing_user_int_plan /
+        # _is_missing_item_int_plan sort order.
+        if self.enable_is_missing and self._is_missing_dense_offset >= 0:
+            bm_off = self._is_missing_dense_offset
+            for _, _, fid in self._is_missing_user_int_plan:
+                mask = user_int_missing_masks.get(fid) \
+                    if user_int_missing_masks is not None else None
+                if mask is not None:
+                    user_dense[:, bm_off] = mask.astype(np.float32)
+                bm_off += 1
+            for _, _, fid in self._is_missing_item_int_plan:
+                mask = item_int_missing_masks.get(fid) \
+                    if item_int_missing_masks is not None else None
+                if mask is not None:
+                    user_dense[:, bm_off] = mask.astype(np.float32)
+                bm_off += 1
+            # Commit the updated buffer back to the result. The tensor was
+            # already materialized in `result['user_dense_feats']` during the
+            # core user_dense step; we overwrite it here so downstream code
+            # (trainer._make_model_input) sees the bitmap values too.
             result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
 
         # ---- Slice-diagnostic side-channel (training/valid only) ----
@@ -2052,6 +2438,10 @@ def get_pcvr_data(
     disable_seq_fids: Optional[List[int]] = None,
     enable_eda_dump: bool = False,
     eda_reservoir_size: int = 20000,
+    bucket_boundaries: Optional[np.ndarray] = None,
+    enable_is_missing: bool = False,
+    is_missing_user_int_fids: Optional[List[int]] = None,
+    is_missing_item_int_fids: Optional[List[int]] = None,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, Optional[DataLoader], PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -2638,6 +3028,10 @@ def get_pcvr_data(
         disable_seq_fids=disable_seq_fids,
         enable_eda_dump=enable_eda_dump,
         eda_reservoir_size=eda_reservoir_size,
+        bucket_boundaries=bucket_boundaries,
+        enable_is_missing=enable_is_missing,
+        is_missing_user_int_fids=is_missing_user_int_fids,
+        is_missing_item_int_fids=is_missing_item_int_fids,
     )
     use_cuda = torch.cuda.is_available()
     # EDA accumulation only works when the dataset object is shared with the
@@ -2686,6 +3080,10 @@ def get_pcvr_data(
         enable_time_of_day_features=enable_time_of_day_features,
         enable_hour_only_features=enable_hour_only_features,
         disable_seq_fids=disable_seq_fids,
+        bucket_boundaries=bucket_boundaries,
+        enable_is_missing=enable_is_missing,
+        is_missing_user_int_fids=is_missing_user_int_fids,
+        is_missing_item_int_fids=is_missing_item_int_fids,
     )
     valid_loader = DataLoader(
         valid_dataset, batch_size=None,
@@ -2720,6 +3118,10 @@ def get_pcvr_data(
             enable_time_of_day_features=enable_time_of_day_features,
             enable_hour_only_features=enable_hour_only_features,
             disable_seq_fids=disable_seq_fids,
+            bucket_boundaries=bucket_boundaries,
+            enable_is_missing=enable_is_missing,
+            is_missing_user_int_fids=is_missing_user_int_fids,
+            is_missing_item_int_fids=is_missing_item_int_fids,
         )
         holdout_loader = DataLoader(
             holdout_dataset, batch_size=None,

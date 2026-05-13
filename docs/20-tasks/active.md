@@ -6,11 +6,11 @@
 
 ---
 
-**最近一次审视**：2026-05-13 西班牙中午 12:00（UTC+2 · 🔬 **M9 破 SOTA + T25+T29 叠加双 seed 证伪 + EDA 搭车 M16 启动**）· 结论：① **今早 4 LB 回流**：🏆 **M9 (gap=0×T25×s42) LB 0.84671** 刷新 SOTA (+0.00034 vs 旧 0.84637) · 但 Δ < 1× seed 噪声 · 战略价值 > 数字意义；❌ M7 (T25+T29×s3 叠加) **LB 0.839593** Dev 高但 LB 暴跌 Δ−0.00348 vs T25 bypass s3 · Dev→LB gap 扩 15× · "LogLoss 低 ≠ LB 好" 反例；❌ M10 (T25+T29×s42 叠加) LB **0.84145** Δ−0.00198 vs T25 B · **M7/M10 双 seed 一致证伪 T25+T29 叠加方向**（昨天"seed 敏感"铁律修正为"叠加本身不 work"）；🟡 M11 (T29 only s3) LB **0.841455** Δ+0.00085 vs M3 s42 · T29 跨 seed 弱稳定但不如 T25 bypass 单独。② **M14/M15 gap=0×DIN seed sweep 已启动**（s11/s7 · 今晚回流 · 建立 4-seed 能力带）。③ **用户反思"E3-E4 是否欠拟合"**：EXP-019 铁律确认 E3-E4 是甜蜜点 · **新默认 `--keep_topk_ckpt 4`**（E1~E4 全保留 · eval 多候选）。④ **CEST 11:00 用户提议 EDA · 深思后采取"搭车策略"**（绕过 EXP-037 5 次独立 EDA 失败陷阱 · 走 `training_summary.json` 稳定通路）。⑤ **CEST 11:00-11:55 EDA 代码完成 + smoke 通过**：`baseline/dataset.py +220 行`（Q1 user/item_id 频次 / Q2 per-fid null_rate × CVR gap / Q4 seq 真实长度 / Q5 time_diff 分位数）· `trainer.py + train.py` 各 +20 行 CLI · **num_workers=0 自动降级**避免 worker copy 问题 · smoke 在 demo 数据上确认 `summary['eda']` 字段正确输出。⑥ **Smoke 3 大预览发现**（demo 规模 · 指示性）：user_id freq_1=100%（印证 Seed 一次性假说）· seq_a p50=256 截断严重（Trick 2 方向有效）· time_diff p1=7.3h 说明当前 BUCKET_BOUNDARIES 5s~1h 的一半桶被浪费（T30 方向极有潜力）。⑦ **M16 `M16-m9rerun-eda-gap0-seed42-4ep` CEST 11:55 启动**：M9 config rerun + EDA 搭车 · 双获（验证 M9 稳定性 + 拿 1.9M 真实 EDA 数据）· 预计回流 CEST 18:00-20:00（EDA overhead +20% + workers=0）。⑧ **EXP-042 落档**（含 smoke 验证 + EDA 分析计划 + 方向判决表）。⑨ **下午 CEST 12:00-18:00 待处理**：无新 training 起（Q1/Q2 数据未到前盲起成本高）· 文档整理 + commit。⑩ **今晚 CEST 20:00 EDA 数据到手后**：基于 Q5 真实 time_diff 分位数设计 T30 · 基于 Q2 per-fid cvr_gap 决定 T31 是否值得做。⑪ **本地 39 commits 未 push** · 今日 4 个大改动待 commit（EDA 代码 + EXP-041 M6/M7/M8 补 LB + EXP-042 + 本次审视）。
+**最近一次审视**：2026-05-13 西班牙下午 14:40（UTC+2 · 🧱 **T30 + T31 代码并行落地 · smoke 通过 · 等 M16 EDA 回流决定参数**）· 结论：① **CEST 12:20-13:30 T30 + T31 并行开发完成**（用户请求"同时推进"）· 利用 M16 EDA 训练 6-8h 窗口做代码开发 · 无训练 slot 阻塞。② **T30（时间桶可配置）** · `baseline/dataset.py` `DEFAULT_BUCKET_BOUNDARIES` + `parse_bucket_boundaries()` helper · 严格长度校验（63 values）+ 单调 + 正数 · CLI `--time_bucket_boundaries` · infer.py fallback · **默认值未变**（backward-compat 严格）· [`EXP-043`](../40-experiments/EXP-043-t30-time-bucket-config-2026-05-13.md) 落档。③ **T31（is-missing 信号 Scheme D 双路冗余）** · 用户 CEST 12:50 选 Scheme D（Path A vocab+1 top slot + Path B user_dense 尾部 bitmap）· `_resolve_is_missing_plan` + `_link_is_missing_plan_col_idx` + `_convert_batch` 新 path · **model 零改动**（纯 dataset 层 · 不触发 "+X% 参数 必死" 铁律）· CLI 3 个 flags · [`EXP-044`](../40-experiments/EXP-044-t31-is-missing-scheme-d-2026-05-13.md) 落档。④ **本地 Smoke 验证全部通过**：T30（默认值 bit-identical · 非法值 raise · 自定义切换生效）· T31（关闭时 user_dense_dim=755 不变 · 开启时精确 +N · bitmap ∈ {0,1} · vs-1 路由正确 · fid 86/94 missing_rate 75%/62.5% 方向对）。⑤ **前置条件**：两 task 都等 M16 CEST 18:00-20:00 EDA 回流 · T30 用 `q5_time_diff` 生成分位数边界 · T31 用 `q2_user_int_missing_top` 筛 |cvr_gap|>2% 的 fid。⑥ **下一步**：M16 回流后 → 写 `scripts/gen_time_bucket_quantile.py`（~20 行）+ 基于 EDA 选 T31 fid 清单 → 半程验证 job（阈值 vs icq-half-gap05 E3 Dev 0.842443 · ≥0.8437 真信号 / 0.8433-0.8437 rerun / <0.8430 deprecated）。⑦ **本地 41 commits 未 push** · T30+T31 代码待 commit（2 EXP + dataset/train/infer）。⑧ **M14/M15 training 仍在跑** · 今晚回流。
 
 ---
 
-**上一条审视（保留参考）**：2026-05-12 西班牙晚 21:00（UTC+2 · 🎯 M6/M7 跨 seed 分化 + M10/M11 深思后启动）· 结论：① M6 叠加失败 s42 Dev 0.841291 Δ−0.00241（不评）。② M7 叠加"成功"（Dev 0.843524 LogLoss 最低）→ 但 5/13 早 LB 0.839593 **实际证伪**（Dev→LB gap 扩 15×"过拟合"）。③ 深思后启动 M10/M11 disambiguate M6/M7 跨 seed 疑问。④ M9 明早 04:00 回流等破 SOTA。详见 Changelog。
+**上一条审视（保留参考）**：2026-05-13 西班牙中午 12:00（UTC+2 · 🔬 **M9 破 SOTA + T25+T29 叠加双 seed 证伪 + EDA 搭车 M16 启动**）· 结论：① **今早 4 LB 回流**：🏆 **M9 (gap=0×T25×s42) LB 0.84671** 刷新 SOTA (+0.00034 vs 旧 0.84637) · 但 Δ < 1× seed 噪声 · 战略价值 > 数字意义；❌ M7 (T25+T29×s3 叠加) **LB 0.839593** Dev 高但 LB 暴跌 Δ−0.00348 vs T25 bypass s3 · Dev→LB gap 扩 15× · "LogLoss 低 ≠ LB 好" 反例；❌ M10 (T25+T29×s42 叠加) LB **0.84145** Δ−0.00198 vs T25 B · **M7/M10 双 seed 一致证伪 T25+T29 叠加方向**（昨天"seed 敏感"铁律修正为"叠加本身不 work"）；🟡 M11 (T29 only s3) LB **0.841455** Δ+0.00085 vs M3 s42 · T29 跨 seed 弱稳定但不如 T25 bypass 单独。（完整 changelog 见下方）
 
 ---
 
@@ -403,7 +403,7 @@
 
 **当前优先级**：**高**（DECEM 明确 work 且代码成本最低）
 
-**当前状态**：📋 planned（等 M6/M7/M8/M9 回流后明早决策起动时机）
+**当前状态**：🧱 **代码落地完成**（CEST 12:20-12:30 · EXP-043 落档）· `parse_bucket_boundaries` + `PCVRParquetDataset` 构造参数 + CLI `--time_bucket_boundaries` + infer.py fallback · 本地 smoke 验证通过（默认值 bit-identical · 非法值正确 raise · 自定义值切换生效）· **默认值未变**（等 M16 EDA `q5_time_diff` 回流后生成分位数版）· 平台 job 待启动
 
 ---
 
@@ -423,7 +423,7 @@
 
 **当前优先级**：**高**（DECEM 未给幅度但广告业务常识 +0.001~0.003）
 
-**当前状态**：📋 planned · 需要先做小 EDA 看各 fid 的缺失率和转化率相关性（决定方案 A/B/C）
+**当前状态**：🧱 **代码落地完成 · Scheme D 双路冗余**（CEST 12:30-13:30 · EXP-044 落档）· 用户 CEST 12:50 选 **Scheme D**（Path A vocab_size+1 top slot + Path B dense bitmap · 两路冗余）· dataset 层纯改动（model 零代码）· CLI `--enable_is_missing --is_missing_user_int_fids <CSV> --is_missing_item_int_fids <CSV>` · 本地 smoke 验证通过（关闭时 `user_dense_dim=755` 不变 · 开启时精确 +N · bitmap ∈ {0,1} · top slot 路由正确 · missing_rate 与 DECEM 描述方向一致）· **等 M16 EDA q2 回流确定选中 fid 清单**（|cvr_gap| > 2% 纳入 / < 0.5% 排除）
 
 ---
 

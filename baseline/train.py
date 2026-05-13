@@ -19,7 +19,7 @@ from typing import List, Tuple
 import torch
 
 from utils import set_seed, EarlyStopping, create_logger
-from dataset import FeatureSchema, get_pcvr_data, NUM_TIME_BUCKETS
+from dataset import FeatureSchema, get_pcvr_data, NUM_TIME_BUCKETS, parse_bucket_boundaries, parse_int_csv
 from model import PCVRHyFormer
 from trainer import PCVRHyFormerRankingTrainer
 
@@ -278,6 +278,19 @@ def parse_args() -> argparse.Namespace:
                              'dataset.BUCKET_BOUNDARIES; this flag is a pure on/off switch.')
     parser.add_argument('--no_time_buckets', dest='use_time_buckets', action='store_false',
                         help='Disable the time-bucket embedding')
+    parser.add_argument('--time_bucket_boundaries', type=str, default='',
+                        help='T30 · per-run override of the 63 time-delta '
+                             'bucket edges used for sequence recency encoding. '
+                             'Comma-separated positive integers in seconds, '
+                             'strictly increasing, length must be exactly 63 '
+                             '(= the fixed embedding slot count). Empty '
+                             'string (default) keeps the hand-designed ladder '
+                             'from 5s to 1yr (see dataset.DEFAULT_BUCKET_'
+                             'BOUNDARIES). DECEM Trick 1 · recommended to set '
+                             'values at true p1/p5/.../p99 of the observed '
+                             'time_diff distribution after EDA dump; demo-'
+                             'smoke showed p1≈7.3h so many default buckets '
+                             'under 1h are starved in the real data.')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixer mode: full = token mixing + FFN, '
@@ -510,6 +523,26 @@ def parse_args() -> argparse.Namespace:
                              'data (train is dominated by a single weekday ~63%%). '
                              'Use this instead of --enable_time_of_day_features when '
                              'DOW features hurt leaderboard generalization.')
+    parser.add_argument('--enable_is_missing', action='store_true', default=False,
+                        help='T31 · DECEM Trick 3 · surface missing values as '
+                             'an independent signal rather than collapsing '
+                             'null / <=0 into the embedding padding slot (0). '
+                             'Two redundant paths: (1) each selected fid gets '
+                             'one extra vocab slot (vs -> vs+1) where missing '
+                             'rows are routed; (2) a per-sample 0/1 bitmap is '
+                             'appended to user_dense. Zero effect when off. '
+                             'Backward-compat: schema + model picks up the '
+                             'new dims automatically from the dataset.')
+    parser.add_argument('--is_missing_user_int_fids', type=str, default='',
+                        help='T31 · comma-separated user_int fids to treat as '
+                             '"missing-aware". Empty (default) selects ALL '
+                             'scalar user_int fids. DECEM-listed high-null '
+                             'fids: 86,94,99,100,101,102,103,104,108,109.')
+    parser.add_argument('--is_missing_item_int_fids', type=str, default='',
+                        help='T31 · comma-separated item_int fids to treat as '
+                             '"missing-aware". Empty (default) means NONE; '
+                             'item_int is opt-in because DECEM only listed '
+                             'user_int fids as high-null.')
 
     # NS tokenizer variant.
     parser.add_argument('--ns_tokenizer_type', type=str, default='rankmixer',
@@ -646,6 +679,10 @@ def main() -> None:
         ),
         enable_eda_dump=args.enable_eda_dump,
         eda_reservoir_size=args.eda_reservoir_size,
+        bucket_boundaries=parse_bucket_boundaries(args.time_bucket_boundaries),
+        enable_is_missing=args.enable_is_missing,
+        is_missing_user_int_fids=parse_int_csv(args.is_missing_user_int_fids),
+        is_missing_item_int_fids=parse_int_csv(args.is_missing_item_int_fids),
     )
 
     # ---- NS groups ----
