@@ -4,7 +4,9 @@ Runs outside training loop -- pure pyarrow + numpy, no torch. Designed to:
 - Finish in ~5-10 min on platform data (1.9M rows, 1044 RGs)
 - Produce the same 4 EDA questions as the in-training EDA collector, but
   fully vectorized (no Python per-row loops, no dict counters on hot path)
-- Write `eda_summary.json` alongside the parquet dir
+- **Recover full report from the platform Logs UI (tail 1000 rows only)**
+  via base64(gzip(JSON)) blob printed as the ABSOLUTE LAST lines of stdout,
+  flanked by sentinels <<<EDA_BLOB_START>>> / <<<EDA_BLOB_END>>>.
 
 EDA Questions:
   Q1  user_id / item_id frequency distribution
@@ -19,19 +21,30 @@ Performance design:
 - For Q5: arrow ListArray -> flat numpy values + offsets, single concat, one
           sort per reservoir merge (no per-row Python loop)
 
+Platform log recovery protocol (why this works when eda_platform.py v5 failed):
+- Platform Logs UI shows ONLY tail 1000 rows of stdout; early output is lost.
+- eda_platform.py v5 put base64 blob in the middle then kept printing pretty
+  tables after, pushing the blob out of the 1000-row window.
+- This script prints the blob AS THE VERY LAST output (no lines after
+  <<<EDA_BLOB_END>>>). Progress logs (~25 lines for 1044 RGs) + pretty
+  summary (~30 lines) + sentinel/blob (~500 lines for full data) = well
+  below 1000-row window.
+- User copies entire Logs UI output, pipes start/end sentinel extract
+  through `base64 -d | gunzip | jq .` to recover full JSON.
+
 Usage::
 
-  python scripts/eda_quantile.py \\
+  python src/eda_quantile.py \\
     --parquet_dir ./data/demo_rg100 \\
     --schema_path ./data/demo_rg100/schema.json \\
     --out ./eda_summary.json \\
     [--max_row_groups 0]  # 0 = all RGs; set small for local smoke
 
-Platform usage (self-contained on training container):
+Platform usage (training job, run.sh invokes):
 
   python eda_quantile.py \\
-    --parquet_dir /data_ams/industrial_training_data \\
-    --schema_path /data_ams/industrial_training_data/schema.json \\
+    --parquet_dir $TRAIN_DATA_PATH \\
+    --schema_path $TRAIN_DATA_PATH/schema.json \\
     --out $TRAIN_LOG_PATH/eda_summary.json
 
 """
@@ -39,7 +52,10 @@ Platform usage (self-contained on training container):
 from __future__ import annotations
 
 import argparse
+import base64
+import functools
 import glob
+import gzip
 import json
 import logging
 import os
@@ -59,6 +75,13 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 LOG = logging.getLogger('eda')
+print = functools.partial(print, flush=True)  # platform log safety
+
+
+# Sentinels — keep exact literal strings; extractor relies on them.
+BLOB_START = '<<<EDA_BLOB_START>>>'
+BLOB_END = '<<<EDA_BLOB_END>>>'
+EOF_MARKER = '<<<EDA_EOF>>>'
 
 
 # ───── Helpers ─────
@@ -182,6 +205,15 @@ def main() -> None:
                     help='Per-domain reservoir size for Q4/Q5')
     ap.add_argument('--id_counter_cap', type=int, default=0,
                     help='Cap distinct uids/iids tracked; 0 = no cap')
+    ap.add_argument('--stdout_blob', dest='stdout_blob',
+                    action='store_true', default=True,
+                    help='Print base64(gzip(JSON)) blob as the last stdout '
+                         'output for platform Logs recovery (default: on)')
+    ap.add_argument('--no_stdout_blob', dest='stdout_blob',
+                    action='store_false',
+                    help='Suppress blob (local runs that only need --out)')
+    ap.add_argument('--blob_chunk_size', type=int, default=120,
+                    help='Chars per blob line (default 120)')
     ap.add_argument('--seed', type=int, default=42)
     args = ap.parse_args()
 
@@ -423,10 +455,143 @@ def main() -> None:
         },
     }
 
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.out, 'w') as f:
-        json.dump(summary, f, indent=2)
-    LOG.info('Wrote %s', args.out)
+    # -------------------------------------------------------------------
+    # Output protocol — order matters for platform log recovery.
+    #
+    # Platform Logs UI tail-truncates at 1000 rows. All later output pushes
+    # earlier output out of the window. Therefore the base64(gzip(JSON))
+    # blob MUST be the absolute last thing we print.
+    #
+    # Order:
+    #   1. Persist JSON to disk (best-effort; Ckpt/Log paths not downloadable
+    #      per 2026-05-13 user confirmation — but no cost to write them).
+    #   2. Pretty summary to stdout (~30 lines, human-readable tail of log).
+    #   3. Blob metadata line (raw / gz / b64 / lines — size budget guard).
+    #   4. <<<EDA_BLOB_START>>> + base64 chunks + <<<EDA_BLOB_END>>>.
+    #   5. <<<EDA_EOF>>> (single-line final marker — if UI shows this,
+    #      the entire blob survived truncation).
+    # -------------------------------------------------------------------
+
+    # (1) Persist JSON — local `--out` always, platform paths if env set.
+    _persist_json(summary, args.out)
+
+    # (2) Pretty summary (writes to stdout via plain print, 20-40 lines).
+    _print_pretty_summary(summary)
+
+    # (3/4/5) Blob + sentinels + EOF marker — ABSOLUTE LAST output.
+    if args.stdout_blob:
+        _emit_stdout_blob(summary, chunk_size=args.blob_chunk_size)
+
+
+def _persist_json(summary: Dict[str, Any], out_path: str) -> None:
+    """Write `eda_summary.json` to --out, $TRAIN_LOG_PATH, $TRAIN_CKPT_PATH.
+
+    All paths best-effort; failures are logged but don't abort (blob stdout
+    path is the primary recovery channel). The platform UI does not currently
+    allow browsing these directories (confirmed 2026-05-13), but future
+    platform updates may expose them — writing costs ~0.
+    """
+    for target in _resolve_persist_targets(out_path):
+        try:
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            with open(target, 'w') as f:
+                json.dump(summary, f, indent=2)
+            LOG.info('Wrote %s', target)
+        except OSError as e:
+            LOG.warning('Could not write %s: %s', target, e)
+
+
+def _resolve_persist_targets(out_path: str) -> List[str]:
+    targets = [out_path]
+    for env_name, fname in [('TRAIN_LOG_PATH', 'eda_summary.json'),
+                             ('TRAIN_CKPT_PATH', 'eda_summary.json')]:
+        env_val = os.environ.get(env_name)
+        if env_val:
+            cand = os.path.join(env_val, fname)
+            if cand not in targets:
+                targets.append(cand)
+    return targets
+
+
+def _print_pretty_summary(summary: Dict[str, Any]) -> None:
+    """Concise human-readable summary — 20-40 lines, platform Logs safe.
+
+    Goes BEFORE the blob so if blob is truncated the user still gets signal.
+    Uses plain print (not LOG) so format is stable for grep/diff.
+    """
+    src = summary['source']
+    glb = summary['global']
+    print('')
+    print('#' * 72)
+    print('## EDA SUMMARY · scan=%d RG · rows=%d · pos=%d (cvr=%.5f) · %.1fs'
+          % (src['num_row_groups_scanned'], src['total_rows'],
+             glb['total_pos'], glb['global_cvr'], src['elapsed_sec']))
+    print('#' * 72)
+
+    q1u = summary['q1_user_id']; q1i = summary['q1_item_id']
+    if q1u.get('distinct'):
+        print('# Q1 user_id: distinct=%d freq1=%.3f freq2-10=%.3f max=%d'
+              % (q1u['distinct'], q1u['freq_1'], q1u['freq_2_10'],
+                 q1u['max_freq']))
+    if q1i.get('distinct'):
+        print('# Q1 item_id: distinct=%d freq1=%.3f freq2-10=%.3f max=%d'
+              % (q1i['distinct'], q1i['freq_1'], q1i['freq_2_10'],
+                 q1i['max_freq']))
+
+    print('# Q2 user_int top-5 by |cvr_gap|:')
+    for item in summary['q2_user_int_missing_top'][:5]:
+        print('  %s null=%.4f cvr_null=%.5f cvr_notnull=%.5f gap=%+.5f'
+              % (item['col'], item['null_rate'], item['cvr_null'],
+                 item['cvr_notnull'], item['cvr_gap']))
+    print('# Q2 item_int top-5 by |cvr_gap|:')
+    for item in summary['q2_item_int_missing_top'][:5]:
+        print('  %s null=%.4f cvr_null=%.5f cvr_notnull=%.5f gap=%+.5f'
+              % (item['col'], item['null_rate'], item['cvr_null'],
+                 item['cvr_notnull'], item['cvr_gap']))
+
+    print('# Q4 seq length (p50/p95/p99):')
+    for dom, q in summary['q4_seq_length'].items():
+        if q.get('n', 0) == 0:
+            print('  %s: empty' % dom); continue
+        qs = q['quantiles']
+        print('  %s: n=%d p50=%.0f p95=%.0f p99=%.0f p99.9=%.0f max=%d'
+              % (dom, q['n'], qs['p50'], qs['p95'], qs['p99'], qs['p99.9'],
+                 q['max']))
+    print('# Q5 time_diff (seconds; p25/p50/p75/p95):')
+    for dom, q in summary['q5_time_diff'].items():
+        if q.get('n', 0) == 0:
+            print('  %s: empty' % dom); continue
+        qs = q['quantiles']
+        print('  %s: n=%d p25=%.0f p50=%.0f p75=%.0f p95=%.0f p99=%.0f'
+              % (dom, q['n'], qs['p25'], qs['p50'], qs['p75'], qs['p95'],
+                 qs['p99']))
+    print('#' * 72)
+    sys.stdout.flush()
+
+
+def _emit_stdout_blob(summary: Dict[str, Any], chunk_size: int = 120) -> None:
+    """Final stdout output: blob sentinels + chunks + EOF marker.
+
+    NOTHING may print after EOF_MARKER or the blob may get truncated by the
+    platform Logs UI. Returns without any trailing print().
+    """
+    raw = json.dumps(summary, separators=(',', ':'), default=str).encode('utf-8')
+    gz = gzip.compress(raw, compresslevel=9)
+    b64 = base64.b64encode(gz).decode('ascii')
+    n_chunks = (len(b64) + chunk_size - 1) // chunk_size
+    # Approx lines for sizing: sentinels + n_chunks + eof + meta ≈ n_chunks+4.
+    approx_lines = n_chunks + 4
+    print('## BLOB: raw=%dB gz=%dB b64=%dchars chunk=%d lines=%d'
+          % (len(raw), len(gz), len(b64), chunk_size, approx_lines))
+    if approx_lines > 800:
+        print('## WARN: blob lines=%d > 800 (platform tail 1000). '
+              'Decode tail might miss progress logs.' % approx_lines)
+    print(BLOB_START)
+    for i in range(0, len(b64), chunk_size):
+        print(b64[i:i + chunk_size])
+    print(BLOB_END)
+    print(EOF_MARKER)
+    sys.stdout.flush()
 
 
 if __name__ == '__main__':
