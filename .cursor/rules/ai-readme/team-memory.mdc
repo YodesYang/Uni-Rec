@@ -134,7 +134,7 @@ alwaysApply: true
 
 ## 协作与提交约定
 
-- **Commit 触发条件**：Agent 完成一个**稳定且重要**的任务（里程碑达成 / 本地 working tree 自包含可还原 / 文档·代码同步） → Agent **主动 commit**，commit 前必须先给用户看 message 草稿，等用户点头再执行；commit 信息沿用本仓库 conventional 风格（`docs:` / `chore:` / `fix(scope):` 等）
+- **Commit 触发条件（2026-05-13 CEST 15:22 用户修订）**：Agent 在任何合适时机都可以**自主 commit**（无需等用户每次点头）—— 合适时机 = 一个逻辑单元完成（代码+文档同步 / 里程碑达成 / Smoke 通过 / 回流数据落档 / working tree 自包含可还原）。**硬约束保留**：① 每次 commit **之前必须在对话里给 message 草稿**让用户快速扫一眼（避免盲签）· ② **不主动 push 到 main**（除非用户明确说 "push"）· ③ 不跳过 hooks / 不 force push / 不改 git config · ④ 敏感文件（.env / credentials）绝不 commit。commit message 沿用本仓库 conventional 风格（`docs:` / `feat(scope):` / `fix(scope):` / `chore:` 等 · 简短 ≤72 chars subject + 必要时 2~3 行关键点），**禁止**在 commit message 里复述 ADR/EXP 详情。
 - **Commit message 风格（2026-05-04 晚约定）**：**一律简短**——只要 conventional 前缀 + **一行 subject（≤ 72 chars）**，正文最多 2~3 行必要关键点（如性能数字、红线警告）；**不要在 commit message 里复述文档/ADR/EXP 详情**——这些有 docs 永久承载。示例 `feat(trainer): add logloss rebound guard, stop on first rebound`。理由：commit 里啰嗦信息会与文档重复冗余、拖慢 git log 阅读效率。
 - **Push 触发条件**：明确开始新的、独立的工作单元前（如新一轮 platform job 启动 / 切代码分支 / 开始改新的 baseline 文件） → Agent **主动提醒** 用户 push，但**不主动**推送到 `main`（GitHub 远端 `origin` 为 `git@github.com:YodesYang/Tencent_Uni_Rec.git`，主分支政策敏感）；除非用户显式说「push」
 - **策略推荐前必查红线**：给出战略 / 方法学建议（如 ensemble、换架构、多 seed averaging、外部数据引入、预训练模型加载等）前，必须先 grep `docs/00-context/competition.md` §3 红线 + `docs/10-research/community-intel.md` 关键 Q&A，否则可能推荐违规方案（已踩坑：2026-04-30 Stage 3 推荐 multi-seed prediction averaging，被用户提醒 ensemble 禁令，纠正落 ADR-003 §Alternatives B）
