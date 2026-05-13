@@ -18,12 +18,14 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import re
 import sys
 from pathlib import Path
 
 
 BLOB_START = '<<<EDA_BLOB_START>>>'
 BLOB_END = '<<<EDA_BLOB_END>>>'
+BASE64_ALPHABET = re.compile(r'[A-Za-z0-9+/=]+')
 
 
 def extract_blob(text: str) -> str:
@@ -40,7 +42,23 @@ def extract_blob(text: str) -> str:
             'blob_chunk_size or splitting scan into 2+ jobs.'
         )
     blob = after_start.split(BLOB_END, 1)[0]
-    return ''.join(blob.split())  # strip all whitespace/newlines
+    # Platform Logs UI prefixes every line with '<timestamp> '. Each chunk line
+    # therefore looks like '<timestamp-junk> <long-base64-run>'. We take the
+    # *longest* base64 run per line and discard shorter spurious matches
+    # (timestamps like '2026' or fragments from date/time tokens).
+    chunks: list[str] = []
+    for line in blob.splitlines():
+        matches = BASE64_ALPHABET.findall(line)
+        if not matches:
+            continue
+        longest = max(matches, key=len)
+        # Guard against matching a bare timestamp/date fragment (<= 8 chars)
+        # when the real chunk line got UI-truncated. Real chunks in our
+        # emitter are >= blob_chunk_size (default 120 chars).
+        if len(longest) < 16:
+            continue
+        chunks.append(longest)
+    return ''.join(chunks)
 
 
 def decode(b64_text: str) -> dict:
