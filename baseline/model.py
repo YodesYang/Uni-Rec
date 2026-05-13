@@ -1170,6 +1170,7 @@ class MultiSeqHyFormerBlock(nn.Module):
         rank_mixer_ffn_mode: str = 'shared',
         enable_din_integrated: bool = False,
         din_integrated_alpha_init: float = 0.1,
+        enable_nlir_gating: bool = False,
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -1218,6 +1219,27 @@ class MultiSeqHyFormerBlock(nn.Module):
             )
             self.din_alpha = nn.Parameter(
                 torch.full((1,), float(din_integrated_alpha_init)))
+
+        # T33 / ADR-011 · TokenFormer NLIR gating.
+        # When enabled, each cross-attention output is modulated by a
+        # sigmoid-gated multiplicative transformation over the block
+        # input Q (the gate source), implementing TokenFormer §4.4
+        # Eq. 16-18: I = X + sigmoid(X @ W_g) ⊙ A, where X = block-input
+        # query tokens, A = pure cross-attention delta. Mechanism:
+        # mitigate Sequential Collapse Propagation by injecting
+        # non-linear multiplicative interaction into the otherwise
+        # purely-linear cross-attention output. A single Linear(D, D)
+        # is SHARED across all S sequence domains within this block
+        # (keeps parameter increment at +D² ≈ 4k per block, does not
+        # violate team-memory "per-X independent params" red line).
+        # Default off → bit-identical to pre-T33 behaviour.
+        self.enable_nlir_gating = bool(enable_nlir_gating)
+        if self.enable_nlir_gating:
+            self.nlir_gate = nn.Linear(d_model, d_model)
+            # Xavier uniform init + bias=0 centers sigmoid(gate) ≈ 0.5
+            # at initialization so no direction is pre-saturated.
+            nn.init.xavier_uniform_(self.nlir_gate.weight)
+            nn.init.zeros_(self.nlir_gate.bias)
 
         # RankMixer: input token count = Nq * S + Nns
         n_total = num_queries * num_sequences + num_ns
@@ -1285,6 +1307,17 @@ class MultiSeqHyFormerBlock(nn.Module):
                 q_tokens_list[i], next_seqs[i], next_masks[i],
                 rope_cos=rc, rope_sin=rs,
             )
+            # T33 · NLIR gating (ADR-011). CrossAttention returns
+            # X + A (already residual-connected). We extract pure A,
+            # gate it with sigmoid(X @ W_g) using the *original*
+            # block-input X as the gate source (matches TokenFormer
+            # Eq. 16-18), then re-assemble: decoded = X + gate ⊙ A.
+            # When disabled, the block is bit-identical to pre-T33.
+            if self.enable_nlir_gating:
+                x_in = q_tokens_list[i]            # (B, Nq, D) — pre-attn input
+                attn_delta = decoded_q_i - x_in    # (B, Nq, D) — pure A
+                gate = torch.sigmoid(self.nlir_gate(x_in))  # (B, Nq, D)
+                decoded_q_i = x_in + gate * attn_delta
             decoded_qs.append(decoded_q_i)
 
         # 2.5. T28 · DIN integrated interest injection into decoded_q_i.
@@ -2088,6 +2121,17 @@ class PCVRHyFormer(nn.Module):
         # ~208k at num_blocks=2 / num_sequences=4 / d_model=64.
         enable_din_integrated: bool = False,
         din_integrated_alpha_init: float = 0.1,
+        # T33 / ADR-011 · TokenFormer NLIR gating on cross-attention output.
+        # When True, a shared Linear(D, D) per HyFormer block gates the
+        # pure cross-attention delta with sigmoid(X @ W_g), implementing
+        # TokenFormer §4.4 Eq. 16-18. Acts as multiplicative non-linearity
+        # that mitigates Sequential Collapse Propagation. Adds ~D² params
+        # per block (≈ 4k per block at d_model=64, total ~8k for 2 blocks).
+        # Shared across all S sequence domains within a block (does NOT
+        # violate team-memory per-X independent params red line).
+        # Orthogonal to T25 bypass (classifier-time injection), T34
+        # Multi-Embedding (embedding-side), T30/T31 (dataset-side).
+        enable_nlir_gating: bool = False,
         # T25 / H2 · Feature-aware Feature Embedding. When True, each fid's
         # raw embedding passes through a per-fid LayerNorm+Linear transform
         # (in the RankMixer NS tokenizer only, as an MVP) before chunked
@@ -2236,6 +2280,9 @@ class PCVRHyFormer(nn.Module):
         self.enable_din_integrated = bool(enable_din_integrated)
         self.din_integrated_alpha_init = float(din_integrated_alpha_init)
 
+        # T33 · NLIR gating flag propagated to every MultiSeqHyFormerBlock.
+        self.enable_nlir_gating = bool(enable_nlir_gating)
+
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
         if rank_mixer_mode == 'full' and d_model % T != 0 and not use_onetrans:
@@ -2354,6 +2401,7 @@ class PCVRHyFormer(nn.Module):
                     rank_mixer_ffn_mode=rank_mixer_ffn_mode,
                     enable_din_integrated=self.enable_din_integrated,
                     din_integrated_alpha_init=din_integrated_alpha_init,
+                    enable_nlir_gating=self.enable_nlir_gating,
                 )
                 for _ in range(num_hyformer_blocks)
             ])

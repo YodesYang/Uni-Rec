@@ -307,6 +307,7 @@ def main() -> None:
         "enable_din_interest": bool(cfg.get("enable_din_interest", False)),
         "enable_din_integrated": bool(cfg.get("enable_din_integrated", False)),
         "din_integrated_alpha_init": float(cfg.get("din_integrated_alpha_init", 0.1)),
+        "enable_nlir_gating": bool(cfg.get("enable_nlir_gating", False)),
         "enable_fafe": bool(cfg.get("enable_fafe", False)),
     }
 

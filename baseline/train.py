@@ -464,6 +464,19 @@ def parse_args() -> argparse.Namespace:
                              'alpha that scales the DIN interest injection. Default '
                              '0.1 (safe partial injection). Set to 0.0 for identity '
                              'init (requires training to pick up signal).')
+    parser.add_argument('--enable_nlir_gating', action='store_true', default=False,
+                        help='T33 / ADR-011: enable TokenFormer-style NLIR gating '
+                             'on cross-attention output inside every HyFormer '
+                             'block. The pure cross-attention delta A is gated '
+                             'by sigmoid(X @ W_g) where X is the block-input '
+                             'query, producing: decoded = X + sigmoid(X @ W_g) ⊙ A '
+                             '(TokenFormer §4.4 Eq. 16-18). Adds ~D² params '
+                             'per block (~4k at d_model=64, ~8k total for 2 '
+                             'blocks). Shared across all S sequence domains '
+                             'within each block (not per-seq). Orthogonal to '
+                             '--enable_din_interest (T25), --multi_emb_k (T34), '
+                             'and dataset-side T30/T31. Default off (backward '
+                             'compatible, bit-identical when disabled).')
     parser.add_argument('--enable_fafe', action='store_true', default=False,
                         help='T25 / H2: Feature-aware Feature Embedding. When set, '
                              'each fid in the RankMixer NS tokenizer passes through '
@@ -746,6 +759,7 @@ def main() -> None:
         "enable_din_interest": args.enable_din_interest,
         "enable_din_integrated": args.enable_din_integrated,
         "din_integrated_alpha_init": args.din_integrated_alpha_init,
+        "enable_nlir_gating": args.enable_nlir_gating,
         "enable_fafe": args.enable_fafe,
     }
 
