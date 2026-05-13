@@ -1,0 +1,1977 @@
+{
+  "q_a_user_user_top": [
+    {
+      "a": "user_int_feats_51",
+      "b": "user_int_feats_52",
+      "cramer_v": 1.0,
+      "mi": 0.0532408406107031,
+      "va": 156,
+      "vb": 189
+    },
+    {
+      "a": "user_int_feats_94",
+      "b": "user_int_feats_108",
+      "cramer_v": 0.978614950124349,
+      "mi": 1.369888046044855,
+      "va": 7,
+      "vb": 8
+    },
+    {
+      "a": "user_int_feats_58",
+      "b": "user_int_feats_59",
+      "cramer_v": 0.9357026804198882,
+      "mi": 0.7591799878330597,
+      "va": 3,
+      "vb": 15
+    },
+    {
+      "a": "user_int_feats_98",
+      "b": "user_int_feats_106",
+      "cramer_v": 0.7154057417636409,
+      "mi": 0.6499987582998361,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_104",
+      "cramer_v": 0.7008174713303068,
+      "mi": 0.6802616754909535,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_55",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.678194997075846,
+      "mi": 0.45555518260711875,
+      "va": 44,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_92",
+      "b": "user_int_feats_93",
+      "cramer_v": 0.6752980102500153,
+      "mi": 0.4611194675450258,
+      "va": 3,
+      "vb": 38
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_4",
+      "cramer_v": 0.626068468294801,
+      "mi": 4.2272858329246965,
+      "va": 256,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_57",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.6181560391728999,
+      "mi": 0.37626870286921055,
+      "va": 253,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_82",
+      "b": "user_int_feats_93",
+      "cramer_v": 0.5998993075362126,
+      "mi": 1.581353237979135,
+      "va": 24,
+      "vb": 38
+    },
+    {
+      "a": "user_int_feats_56",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.5732969165831964,
+      "mi": 0.32782130494140754,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_98",
+      "b": "user_int_feats_107",
+      "cramer_v": 0.571590617421402,
+      "mi": 0.26243754274435943,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_62",
+      "b": "user_int_feats_64",
+      "cramer_v": 0.5561578589865602,
+      "mi": 0.9660524830722662,
+      "va": 10,
+      "vb": 51
+    },
+    {
+      "a": "user_int_feats_62",
+      "b": "user_int_feats_63",
+      "cramer_v": 0.5520945209329626,
+      "mi": 0.7843983199267635,
+      "va": 10,
+      "vb": 47
+    },
+    {
+      "a": "user_int_feats_62",
+      "b": "user_int_feats_65",
+      "cramer_v": 0.5244095142832308,
+      "mi": 0.8253072333205329,
+      "va": 10,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_82",
+      "b": "user_int_feats_92",
+      "cramer_v": 0.5162489851092057,
+      "mi": 0.25594781440084674,
+      "va": 24,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_55",
+      "b": "user_int_feats_57",
+      "cramer_v": 0.5016748823233688,
+      "mi": 0.9657185768061943,
+      "va": 44,
+      "vb": 253
+    },
+    {
+      "a": "user_int_feats_52",
+      "b": "user_int_feats_53",
+      "cramer_v": 0.49944542004115733,
+      "mi": 2.859529245177991,
+      "va": 189,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_64",
+      "b": "user_int_feats_65",
+      "cramer_v": 0.48938092019239093,
+      "mi": 1.3861747192385643,
+      "va": 51,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.4780260778940543,
+      "mi": 0.2036761756726647,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_62",
+      "b": "user_int_feats_66",
+      "cramer_v": 0.47749686230160343,
+      "mi": 0.6888305308527088,
+      "va": 10,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_65",
+      "b": "user_int_feats_66",
+      "cramer_v": 0.4675368713299667,
+      "mi": 2.6106122857476444,
+      "va": 256,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.45616488400539745,
+      "mi": 0.18603160142401914,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_56",
+      "b": "user_int_feats_57",
+      "cramer_v": 0.45201990539012665,
+      "mi": 3.1730874092761745,
+      "va": 256,
+      "vb": 253
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_103",
+      "cramer_v": 0.4359807228426723,
+      "mi": 0.11168535632089595,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_56",
+      "b": "user_int_feats_59",
+      "cramer_v": 0.42794848887275844,
+      "mi": 0.8685230519072924,
+      "va": 256,
+      "vb": 15
+    },
+    {
+      "a": "user_int_feats_51",
+      "b": "user_int_feats_53",
+      "cramer_v": 0.40360589979988437,
+      "mi": 0.04242859657895922,
+      "va": 156,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_57",
+      "b": "user_int_feats_59",
+      "cramer_v": 0.4019404599900188,
+      "mi": 0.6451991621369999,
+      "va": 253,
+      "vb": 15
+    },
+    {
+      "a": "user_int_feats_64",
+      "b": "user_int_feats_66",
+      "cramer_v": 0.3973247655620969,
+      "mi": 1.1697668519816447,
+      "va": 51,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_55",
+      "b": "user_int_feats_56",
+      "cramer_v": 0.3813351221110243,
+      "mi": 1.2689702792877005,
+      "va": 44,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_54",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.3327339066738529,
+      "mi": 0.10653280386623576,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_86",
+      "b": "user_int_feats_94",
+      "cramer_v": 0.3295577240645064,
+      "mi": 0.3220547574307123,
+      "va": 246,
+      "vb": 7
+    },
+    {
+      "a": "user_int_feats_55",
+      "b": "user_int_feats_59",
+      "cramer_v": 0.30994805271947495,
+      "mi": 0.5852309690192863,
+      "va": 44,
+      "vb": 15
+    },
+    {
+      "a": "user_int_feats_86",
+      "b": "user_int_feats_108",
+      "cramer_v": 0.3029761147293233,
+      "mi": 0.3184186841174386,
+      "va": 246,
+      "vb": 8
+    },
+    {
+      "a": "user_int_feats_48",
+      "b": "user_int_feats_49",
+      "cramer_v": 0.3022015518851701,
+      "mi": 0.009093781133440658,
+      "va": 101,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_48",
+      "b": "user_int_feats_80",
+      "cramer_v": 0.2981081378700201,
+      "mi": 0.5002091491186642,
+      "va": 101,
+      "vb": 13
+    },
+    {
+      "a": "user_int_feats_63",
+      "b": "user_int_feats_65",
+      "cramer_v": 0.2943731642699397,
+      "mi": 0.7741683305141489,
+      "va": 47,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_53",
+      "b": "user_int_feats_54",
+      "cramer_v": 0.2816579165923575,
+      "mi": 2.125060033942874,
+      "va": 256,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_63",
+      "b": "user_int_feats_64",
+      "cramer_v": 0.2741339148225642,
+      "mi": 0.8439305204743894,
+      "va": 47,
+      "vb": 51
+    },
+    {
+      "a": "user_int_feats_63",
+      "b": "user_int_feats_66",
+      "cramer_v": 0.256645789400728,
+      "mi": 0.6592982896407321,
+      "va": 47,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_50",
+      "b": "user_int_feats_53",
+      "cramer_v": 0.25207946145180055,
+      "mi": 0.011460953044085388,
+      "va": 4,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_50",
+      "b": "user_int_feats_52",
+      "cramer_v": 0.2512180331904561,
+      "mi": 0.010584409222865429,
+      "va": 4,
+      "vb": 189
+    },
+    {
+      "a": "user_int_feats_48",
+      "b": "user_int_feats_50",
+      "cramer_v": 0.24893156365163072,
+      "mi": 0.03888343905349706,
+      "va": 101,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_50",
+      "b": "user_int_feats_51",
+      "cramer_v": 0.24077027823151956,
+      "mi": 0.0028918431994153357,
+      "va": 4,
+      "vb": 156
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_49",
+      "cramer_v": 0.21842955727611316,
+      "mi": 0.015019604046416637,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_49",
+      "cramer_v": 0.21621681234154475,
+      "mi": 0.014030605285071558,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_48",
+      "b": "user_int_feats_92",
+      "cramer_v": 0.21573140703489535,
+      "mi": 0.05934621891910194,
+      "va": 101,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_53",
+      "cramer_v": 0.21088120633177945,
+      "mi": 0.0040024350352718145,
+      "va": 3,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_98",
+      "cramer_v": 0.2099392270343544,
+      "mi": 0.059633039907102475,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_52",
+      "cramer_v": 0.209701644044497,
+      "mi": 0.0034478437179864038,
+      "va": 3,
+      "vb": 189
+    },
+    {
+      "a": "user_int_feats_48",
+      "b": "user_int_feats_60",
+      "cramer_v": 0.20883742153188156,
+      "mi": 0.04630101304926729,
+      "va": 101,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_82",
+      "cramer_v": 0.20858169185466802,
+      "mi": 0.04441544329069731,
+      "va": 3,
+      "vb": 24
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_59",
+      "cramer_v": 0.2082221131212251,
+      "mi": 0.24382843193993112,
+      "va": 256,
+      "vb": 15
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_51",
+      "cramer_v": 0.20738908489552735,
+      "mi": 0.0024756844306903715,
+      "va": 3,
+      "vb": 156
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_93",
+      "cramer_v": 0.20334253857799672,
+      "mi": 0.042394942525748325,
+      "va": 3,
+      "vb": 38
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_100",
+      "cramer_v": 0.19971053662052285,
+      "mi": 0.07341869795202167,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_60",
+      "b": "user_int_feats_93",
+      "cramer_v": 0.1982621484286072,
+      "mi": 0.03983032641137858,
+      "va": 3,
+      "vb": 38
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_66",
+      "cramer_v": 0.1975407489176475,
+      "mi": 0.04001165307031262,
+      "va": 3,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_99",
+      "cramer_v": 0.19678327157120348,
+      "mi": 0.0818133625883771,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_56",
+      "cramer_v": 0.19519176317307194,
+      "mi": 0.8131482254976748,
+      "va": 256,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_92",
+      "b": "user_int_feats_97",
+      "cramer_v": 0.19513728164993896,
+      "mi": 0.035293081935840936,
+      "va": 3,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_60",
+      "b": "user_int_feats_80",
+      "cramer_v": 0.19366450979607464,
+      "mi": 0.03682072315775758,
+      "va": 3,
+      "vb": 13
+    },
+    {
+      "a": "user_int_feats_50",
+      "b": "user_int_feats_57",
+      "cramer_v": 0.19345570506767773,
+      "mi": 0.05367480058117774,
+      "va": 4,
+      "vb": 253
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_59",
+      "cramer_v": 0.1929112659411992,
+      "mi": 0.21253206120239657,
+      "va": 256,
+      "vb": 15
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_106",
+      "cramer_v": 0.19286717593726507,
+      "mi": 0.052770456722283275,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_60",
+      "cramer_v": 0.19228371647736212,
+      "mi": 0.039814333610950936,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_57",
+      "b": "user_int_feats_60",
+      "cramer_v": 0.1916467833646472,
+      "mi": 0.03765801260958054,
+      "va": 253,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_101",
+      "b": "user_int_feats_102",
+      "cramer_v": 0.18933725138132385,
+      "mi": 0.03450951552438678,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_100",
+      "b": "user_int_feats_101",
+      "cramer_v": 0.18860620153209698,
+      "mi": 0.033229461399183174,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_60",
+      "b": "user_int_feats_82",
+      "cramer_v": 0.18595449224041768,
+      "mi": 0.0353114151066128,
+      "va": 3,
+      "vb": 24
+    },
+    {
+      "a": "user_int_feats_92",
+      "b": "user_int_feats_103",
+      "cramer_v": 0.18509122494550445,
+      "mi": 0.027745309357371982,
+      "va": 3,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_50",
+      "cramer_v": 0.18095404513642768,
+      "mi": 0.042397076660855765,
+      "va": 256,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_57",
+      "cramer_v": 0.17965554257641805,
+      "mi": 0.7354708312267413,
+      "va": 256,
+      "vb": 253
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_56",
+      "cramer_v": 0.1780853637913789,
+      "mi": 0.7481704987039556,
+      "va": 256,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_65",
+      "cramer_v": 0.17789131514474402,
+      "mi": 0.03188747964141772,
+      "va": 3,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_80",
+      "b": "user_int_feats_92",
+      "cramer_v": 0.1777816391568406,
+      "mi": 0.029031069315538678,
+      "va": 13,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_60",
+      "cramer_v": 0.17715021179119514,
+      "mi": 0.03410612859664647,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_98",
+      "b": "user_int_feats_104",
+      "cramer_v": 0.17647627558269047,
+      "mi": 0.0470775489112902,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_80",
+      "b": "user_int_feats_97",
+      "cramer_v": 0.17594163165424806,
+      "mi": 0.04514561132906542,
+      "va": 13,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_104",
+      "b": "user_int_feats_106",
+      "cramer_v": 0.17539136885238715,
+      "mi": 0.04604036531263419,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_50",
+      "cramer_v": 0.17278570389856626,
+      "mi": 0.03790855985326402,
+      "va": 256,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_80",
+      "b": "user_int_feats_100",
+      "cramer_v": 0.17002008418735412,
+      "mi": 0.03595870677379893,
+      "va": 13,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_50",
+      "b": "user_int_feats_60",
+      "cramer_v": 0.17000388834802763,
+      "mi": 0.029765454631251558,
+      "va": 4,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_93",
+      "b": "user_int_feats_97",
+      "cramer_v": 0.16999245876554298,
+      "mi": 0.043995573999285165,
+      "va": 38,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_106",
+      "b": "user_int_feats_107",
+      "cramer_v": 0.1698035454998157,
+      "mi": 0.04252297448982037,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_15",
+      "b": "user_int_feats_49",
+      "cramer_v": 0.1666635698479051,
+      "mi": 0.028882157397710204,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_80",
+      "b": "user_int_feats_102",
+      "cramer_v": 0.1648205845681927,
+      "mi": 0.029895625293522212,
+      "va": 13,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_4",
+      "b": "user_int_feats_55",
+      "cramer_v": 0.16193962932214545,
+      "mi": 0.40249588131259495,
+      "va": 256,
+      "vb": 44
+    },
+    {
+      "a": "user_int_feats_92",
+      "b": "user_int_feats_104",
+      "cramer_v": 0.16166778501783766,
+      "mi": 0.025027418421672505,
+      "va": 3,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_3",
+      "b": "user_int_feats_57",
+      "cramer_v": 0.1612030524141092,
+      "mi": 0.6669735264148652,
+      "va": 256,
+      "vb": 253
+    },
+    {
+      "a": "user_int_feats_15",
+      "b": "user_int_feats_58",
+      "cramer_v": 0.1609020943982489,
+      "mi": 0.023964675543785285,
+      "va": 256,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_50",
+      "cramer_v": 0.16089127588193614,
+      "mi": 0.003797144204008302,
+      "va": 3,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_80",
+      "b": "user_int_feats_104",
+      "cramer_v": 0.15901167551758458,
+      "mi": 0.03624657197035836,
+      "va": 13,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_95",
+      "b": "user_int_feats_105",
+      "cramer_v": 0.15825322705847503,
+      "mi": 0.03786952691873499,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_50",
+      "b": "user_int_feats_56",
+      "cramer_v": 0.15679439507919915,
+      "mi": 0.033177982480608915,
+      "va": 4,
+      "vb": 256
+    },
+    {
+      "a": "user_int_feats_57",
+      "b": "user_int_feats_92",
+      "cramer_v": 0.15662635371051334,
+      "mi": 0.024873912770342992,
+      "va": 253,
+      "vb": 3
+    },
+    {
+      "a": "user_int_feats_82",
+      "b": "user_int_feats_97",
+      "cramer_v": 0.15619772437169108,
+      "mi": 0.03791343911159047,
+      "va": 24,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_97",
+      "b": "user_int_feats_107",
+      "cramer_v": 0.15610422927664055,
+      "mi": 0.033740907460861946,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_95",
+      "b": "user_int_feats_96",
+      "cramer_v": 0.15433431335683742,
+      "mi": 0.03866106352589308,
+      "va": 4,
+      "vb": 4
+    },
+    {
+      "a": "user_int_feats_49",
+      "b": "user_int_feats_80",
+      "cramer_v": 0.1537192028500263,
+      "mi": 0.020339611190914854,
+      "va": 3,
+      "vb": 13
+    }
+  ],
+  "q_b_user_item_top": [
+    {
+      "cramer_v": 0.2776604812757889,
+      "i": "item_int_feats_10",
+      "mi": 0.13818939161278046,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.27253922346974957,
+      "i": "item_int_feats_5",
+      "mi": 0.12901381627473618,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.27146225291945236,
+      "i": "item_int_feats_6",
+      "mi": 0.08024701448383166,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.2592585452306361,
+      "i": "item_int_feats_10",
+      "mi": 0.07232542064686734,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.25862945210447597,
+      "i": "item_int_feats_5",
+      "mi": 0.07073401651953981,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.2444020453884869,
+      "i": "item_int_feats_7",
+      "mi": 0.06469668488594829,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.2442083452739583,
+      "i": "item_int_feats_12",
+      "mi": 0.06472467121511245,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.22548456716668672,
+      "i": "item_int_feats_6",
+      "mi": 0.09925178582379375,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.2169235857051294,
+      "i": "item_int_feats_81",
+      "mi": 0.046278377795341066,
+      "u": "user_int_feats_15",
+      "vi": 3,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.21478956425458431,
+      "i": "item_int_feats_13",
+      "mi": 0.04341656004285304,
+      "u": "user_int_feats_58",
+      "vi": 9,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.20255410538207994,
+      "i": "item_int_feats_9",
+      "mi": 0.0426653108077002,
+      "u": "user_int_feats_49",
+      "vi": 42,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.20032426193284544,
+      "i": "item_int_feats_9",
+      "mi": 0.08469143455677566,
+      "u": "user_int_feats_1",
+      "vi": 42,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.19882824996441764,
+      "i": "item_int_feats_8",
+      "mi": 0.04407032357251152,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.19080267562387007,
+      "i": "item_int_feats_7",
+      "mi": 0.07873878544347779,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.18866803553411765,
+      "i": "item_int_feats_12",
+      "mi": 0.07642182374490725,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.16566653668413947,
+      "i": "item_int_feats_16",
+      "mi": 0.053098543094757325,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.16379213087636724,
+      "i": "item_int_feats_16",
+      "mi": 0.02780753464525707,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.15849929046974157,
+      "i": "item_int_feats_13",
+      "mi": 0.05284235480357764,
+      "u": "user_int_feats_1",
+      "vi": 9,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.1522316222058524,
+      "i": "item_int_feats_11",
+      "mi": 0.04359689933452882,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.14339485671882876,
+      "i": "item_int_feats_81",
+      "mi": 0.021697718072657447,
+      "u": "user_int_feats_49",
+      "vi": 3,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.13955176634804534,
+      "i": "item_int_feats_11",
+      "mi": 0.0204429816221951,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.1381831756518489,
+      "i": "item_int_feats_10",
+      "mi": 0.018422294684556896,
+      "u": "user_int_feats_92",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.1371102755319569,
+      "i": "item_int_feats_10",
+      "mi": 0.018326425921452304,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.13331959238880772,
+      "i": "item_int_feats_6",
+      "mi": 0.01769116967363192,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.13155932676543686,
+      "i": "item_int_feats_10",
+      "mi": 0.017469076558361912,
+      "u": "user_int_feats_58",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.13132342916631046,
+      "i": "item_int_feats_13",
+      "mi": 0.017273073502944013,
+      "u": "user_int_feats_49",
+      "vi": 9,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.12874356539614507,
+      "i": "item_int_feats_84",
+      "mi": 0.018945631234313788,
+      "u": "user_int_feats_49",
+      "vi": 228,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.1286968954066319,
+      "i": "item_int_feats_5",
+      "mi": 0.06545753142813363,
+      "u": "user_int_feats_62",
+      "vi": 256,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.12868935811013166,
+      "i": "item_int_feats_6",
+      "mi": 0.016067780146401752,
+      "u": "user_int_feats_92",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.12820875790854808,
+      "i": "item_int_feats_5",
+      "mi": 0.01584898994557528,
+      "u": "user_int_feats_92",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.12702344199389295,
+      "i": "item_int_feats_10",
+      "mi": 0.0664512739684463,
+      "u": "user_int_feats_62",
+      "vi": 256,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.1268128375688223,
+      "i": "item_int_feats_5",
+      "mi": 0.015669993550353856,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.12485587920734918,
+      "i": "item_int_feats_13",
+      "mi": 0.05586837090504138,
+      "u": "user_int_feats_65",
+      "vi": 9,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.12460152719302747,
+      "i": "item_int_feats_81",
+      "mi": 0.019812558076895418,
+      "u": "user_int_feats_1",
+      "vi": 3,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.12372462804834881,
+      "i": "item_int_feats_8",
+      "mi": 0.03625673904521362,
+      "u": "user_int_feats_1",
+      "vi": 256,
+      "vu": 6
+    },
+    {
+      "cramer_v": 0.12187337772785534,
+      "i": "item_int_feats_13",
+      "mi": 0.056567883575008915,
+      "u": "user_int_feats_15",
+      "vi": 9,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.12187313435713798,
+      "i": "item_int_feats_85",
+      "mi": 0.01719820794662899,
+      "u": "user_int_feats_49",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.1213042769316979,
+      "i": "item_int_feats_10",
+      "mi": 0.019563470193483493,
+      "u": "user_int_feats_50",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.12017791559670411,
+      "i": "item_int_feats_5",
+      "mi": 0.014221786717980921,
+      "u": "user_int_feats_58",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.1168667666117629,
+      "i": "item_int_feats_13",
+      "mi": 0.050452166063530854,
+      "u": "user_int_feats_66",
+      "vi": 9,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.11644613983157047,
+      "i": "item_int_feats_6",
+      "mi": 0.05394804731536458,
+      "u": "user_int_feats_62",
+      "vi": 256,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.11640033314525709,
+      "i": "item_int_feats_13",
+      "mi": 0.05097589360692468,
+      "u": "user_int_feats_64",
+      "vi": 9,
+      "vu": 51
+    },
+    {
+      "cramer_v": 0.11513784113978996,
+      "i": "item_int_feats_10",
+      "mi": 0.018871349501469677,
+      "u": "user_int_feats_97",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.11379228722052588,
+      "i": "item_int_feats_81",
+      "mi": 0.012620604193836496,
+      "u": "user_int_feats_65",
+      "vi": 3,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.11368642145578294,
+      "i": "item_int_feats_13",
+      "mi": 0.05046393319746972,
+      "u": "user_int_feats_55",
+      "vi": 9,
+      "vu": 44
+    },
+    {
+      "cramer_v": 0.11318279378458589,
+      "i": "item_int_feats_9",
+      "mi": 0.056713073702061544,
+      "u": "user_int_feats_62",
+      "vi": 42,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.11300215016200171,
+      "i": "item_int_feats_81",
+      "mi": 0.012426185846638753,
+      "u": "user_int_feats_66",
+      "vi": 3,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.11295435518831398,
+      "i": "item_int_feats_7",
+      "mi": 0.012915020765564774,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.11149443390648713,
+      "i": "item_int_feats_6",
+      "mi": 0.012543559536604517,
+      "u": "user_int_feats_58",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.11096570380232369,
+      "i": "item_int_feats_9",
+      "mi": 0.011971024158576506,
+      "u": "user_int_feats_92",
+      "vi": 42,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10997255373866012,
+      "i": "item_int_feats_12",
+      "mi": 0.01217813852223833,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10918103319182142,
+      "i": "item_int_feats_13",
+      "mi": 0.04650527685047515,
+      "u": "user_int_feats_57",
+      "vi": 9,
+      "vu": 253
+    },
+    {
+      "cramer_v": 0.10767854838446977,
+      "i": "item_int_feats_5",
+      "mi": 0.016585601815110998,
+      "u": "user_int_feats_97",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.10758604142833783,
+      "i": "item_int_feats_13",
+      "mi": 0.03751851114361951,
+      "u": "user_int_feats_48",
+      "vi": 9,
+      "vu": 101
+    },
+    {
+      "cramer_v": 0.10702547349759813,
+      "i": "item_int_feats_81",
+      "mi": 0.011106396117877303,
+      "u": "user_int_feats_64",
+      "vi": 3,
+      "vu": 51
+    },
+    {
+      "cramer_v": 0.10697976279898282,
+      "i": "item_int_feats_6",
+      "mi": 0.01629687148156596,
+      "u": "user_int_feats_97",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.10640515615507795,
+      "i": "item_int_feats_13",
+      "mi": 0.03953041495976719,
+      "u": "user_int_feats_62",
+      "vi": 9,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.106404537742727,
+      "i": "item_int_feats_7",
+      "mi": 0.010752772867062856,
+      "u": "user_int_feats_58",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10605669127960625,
+      "i": "item_int_feats_6",
+      "mi": 0.016685474764139334,
+      "u": "user_int_feats_50",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.10571559390256571,
+      "i": "item_int_feats_7",
+      "mi": 0.01106858331348001,
+      "u": "user_int_feats_92",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10569417710745029,
+      "i": "item_int_feats_81",
+      "mi": 0.011433795516708435,
+      "u": "user_int_feats_57",
+      "vi": 3,
+      "vu": 253
+    },
+    {
+      "cramer_v": 0.10461467801987309,
+      "i": "item_int_feats_11",
+      "mi": 0.04463535888390899,
+      "u": "user_int_feats_62",
+      "vi": 256,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.10439370564371514,
+      "i": "item_int_feats_10",
+      "mi": 0.015531964095659267,
+      "u": "user_int_feats_104",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.10329299800956251,
+      "i": "item_int_feats_9",
+      "mi": 0.010399298959350635,
+      "u": "user_int_feats_60",
+      "vi": 42,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10311040497314447,
+      "i": "item_int_feats_10",
+      "mi": 0.013275234523338307,
+      "u": "user_int_feats_100",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.10251083634747259,
+      "i": "item_int_feats_10",
+      "mi": 0.016088885016645446,
+      "u": "user_int_feats_95",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.1018696155657227,
+      "i": "item_int_feats_12",
+      "mi": 0.010284322203979877,
+      "u": "user_int_feats_92",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10171784819138259,
+      "i": "item_int_feats_6",
+      "mi": 0.012628125120678117,
+      "u": "user_int_feats_100",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.10157170297309154,
+      "i": "item_int_feats_9",
+      "mi": 0.010076122543230965,
+      "u": "user_int_feats_58",
+      "vi": 42,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.10074387698332399,
+      "i": "item_int_feats_13",
+      "mi": 0.035191083031013655,
+      "u": "user_int_feats_59",
+      "vi": 9,
+      "vu": 15
+    },
+    {
+      "cramer_v": 0.10006839430082312,
+      "i": "item_int_feats_6",
+      "mi": 0.015293551509829353,
+      "u": "user_int_feats_95",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09999270377292085,
+      "i": "item_int_feats_5",
+      "mi": 0.01429867530036789,
+      "u": "user_int_feats_50",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09961897774050076,
+      "i": "item_int_feats_6",
+      "mi": 0.05459343636936172,
+      "u": "user_int_feats_80",
+      "vi": 256,
+      "vu": 13
+    },
+    {
+      "cramer_v": 0.09948486938668112,
+      "i": "item_int_feats_12",
+      "mi": 0.009642733050366767,
+      "u": "user_int_feats_58",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.09923067551278919,
+      "i": "item_int_feats_16",
+      "mi": 0.009338666040799092,
+      "u": "user_int_feats_58",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.09913148481079187,
+      "i": "item_int_feats_13",
+      "mi": 0.038643109309287896,
+      "u": "user_int_feats_56",
+      "vi": 9,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.09897978274061672,
+      "i": "item_int_feats_81",
+      "mi": 0.009511062882464196,
+      "u": "user_int_feats_93",
+      "vi": 3,
+      "vu": 38
+    },
+    {
+      "cramer_v": 0.09889897646623874,
+      "i": "item_int_feats_10",
+      "mi": 0.054523666731149965,
+      "u": "user_int_feats_80",
+      "vi": 256,
+      "vu": 13
+    },
+    {
+      "cramer_v": 0.09828920836468903,
+      "i": "item_int_feats_5",
+      "mi": 0.013712325995164688,
+      "u": "user_int_feats_104",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09732259856679473,
+      "i": "item_int_feats_7",
+      "mi": 0.014124298092521663,
+      "u": "user_int_feats_50",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09666021250378334,
+      "i": "item_int_feats_16",
+      "mi": 0.00931992736408331,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.09630184974724688,
+      "i": "item_int_feats_7",
+      "mi": 0.03864531500536391,
+      "u": "user_int_feats_62",
+      "vi": 256,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.09624472097296857,
+      "i": "item_int_feats_6",
+      "mi": 0.013147833848941637,
+      "u": "user_int_feats_104",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09589712663713415,
+      "i": "item_int_feats_81",
+      "mi": 0.008934899888996655,
+      "u": "user_int_feats_82",
+      "vi": 3,
+      "vu": 24
+    },
+    {
+      "cramer_v": 0.09589562746702807,
+      "i": "item_int_feats_5",
+      "mi": 0.011700282584440684,
+      "u": "user_int_feats_100",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09589140742440196,
+      "i": "item_int_feats_81",
+      "mi": 0.009387320632780981,
+      "u": "user_int_feats_4",
+      "vi": 3,
+      "vu": 256
+    },
+    {
+      "cramer_v": 0.09575219623079406,
+      "i": "item_int_feats_5",
+      "mi": 0.05030933031822028,
+      "u": "user_int_feats_80",
+      "vi": 256,
+      "vu": 13
+    },
+    {
+      "cramer_v": 0.095281522911937,
+      "i": "item_int_feats_5",
+      "mi": 0.013833274262361535,
+      "u": "user_int_feats_95",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09520035029269219,
+      "i": "item_int_feats_12",
+      "mi": 0.03584747836106006,
+      "u": "user_int_feats_62",
+      "vi": 256,
+      "vu": 10
+    },
+    {
+      "cramer_v": 0.09374200055733656,
+      "i": "item_int_feats_10",
+      "mi": 0.012218413327420153,
+      "u": "user_int_feats_98",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09318978677728329,
+      "i": "item_int_feats_13",
+      "mi": 0.03309997949075014,
+      "u": "user_int_feats_63",
+      "vi": 9,
+      "vu": 47
+    },
+    {
+      "cramer_v": 0.09282571627291007,
+      "i": "item_int_feats_12",
+      "mi": 0.012866024806920447,
+      "u": "user_int_feats_50",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09274158902047518,
+      "i": "item_int_feats_10",
+      "mi": 0.01202873579663832,
+      "u": "user_int_feats_106",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09218092412417278,
+      "i": "item_int_feats_81",
+      "mi": 0.00837277756545661,
+      "u": "user_int_feats_80",
+      "vi": 3,
+      "vu": 13
+    },
+    {
+      "cramer_v": 0.09049532128377508,
+      "i": "item_int_feats_12",
+      "mi": 0.012612492279622444,
+      "u": "user_int_feats_95",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09024291633603856,
+      "i": "item_int_feats_9",
+      "mi": 0.011838321654566945,
+      "u": "user_int_feats_97",
+      "vi": 42,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.09006512120357787,
+      "i": "item_int_feats_7",
+      "mi": 0.012372696907723139,
+      "u": "user_int_feats_95",
+      "vi": 256,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.08956234516607965,
+      "i": "item_int_feats_8",
+      "mi": 0.007877337614701968,
+      "u": "user_int_feats_60",
+      "vi": 256,
+      "vu": 3
+    },
+    {
+      "cramer_v": 0.0894508162846809,
+      "i": "item_int_feats_81",
+      "mi": 0.008283203378931125,
+      "u": "user_int_feats_50",
+      "vi": 3,
+      "vu": 4
+    },
+    {
+      "cramer_v": 0.08898976989396963,
+      "i": "item_int_feats_7",
+      "mi": 0.011682748345037509,
+      "u": "user_int_feats_97",
+      "vi": 256,
+      "vu": 4
+    }
+  ],
+  "q_c_fid_label_mi": [
+    {
+      "col": "item_int_feats_5",
+      "mi": 0.028903617118119902,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_10",
+      "mi": 0.02519059849447821,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_6",
+      "mi": 0.02044249370296268,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_7",
+      "mi": 0.015165573785712042,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_16",
+      "mi": 0.01392969206406294,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_12",
+      "mi": 0.012729937726478478,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_11",
+      "mi": 0.00963963452979822,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_9",
+      "mi": 0.008856639929346639,
+      "side": "item",
+      "v": 42
+    },
+    {
+      "col": "item_int_feats_13",
+      "mi": 0.007992380615121544,
+      "side": "item",
+      "v": 9
+    },
+    {
+      "col": "item_int_feats_8",
+      "mi": 0.006511239003218712,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_15",
+      "mi": 0.003603046002583885,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_84",
+      "mi": 0.0018426809333469286,
+      "side": "item",
+      "v": 228
+    },
+    {
+      "col": "item_int_feats_85",
+      "mi": 0.0017963838423852919,
+      "side": "item",
+      "v": 256
+    },
+    {
+      "col": "item_int_feats_83",
+      "mi": 0.0013652133096213421,
+      "side": "item",
+      "v": 32
+    },
+    {
+      "col": "item_int_feats_81",
+      "mi": 0.0009934923664812793,
+      "side": "item",
+      "v": 3
+    },
+    {
+      "col": "user_int_feats_106",
+      "mi": 0.0009829620636375804,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_66",
+      "mi": 0.0009366653450293189,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_98",
+      "mi": 0.0009179947748650673,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_65",
+      "mi": 0.0008609979850586105,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_63",
+      "mi": 0.0008017042969716931,
+      "side": "user",
+      "v": 47
+    },
+    {
+      "col": "user_int_feats_50",
+      "mi": 0.0007799604815984683,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_64",
+      "mi": 0.00068365201952434,
+      "side": "user",
+      "v": 51
+    },
+    {
+      "col": "user_int_feats_62",
+      "mi": 0.0005080229637234413,
+      "side": "user",
+      "v": 10
+    },
+    {
+      "col": "user_int_feats_48",
+      "mi": 0.00046117196887197963,
+      "side": "user",
+      "v": 101
+    },
+    {
+      "col": "user_int_feats_1",
+      "mi": 0.0004017399872313679,
+      "side": "user",
+      "v": 6
+    },
+    {
+      "col": "user_int_feats_57",
+      "mi": 0.0003818810915893836,
+      "side": "user",
+      "v": 253
+    },
+    {
+      "col": "user_int_feats_80",
+      "mi": 0.0003655302819937562,
+      "side": "user",
+      "v": 13
+    },
+    {
+      "col": "user_int_feats_97",
+      "mi": 0.0003597200999454304,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_4",
+      "mi": 0.00034810723210167106,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_3",
+      "mi": 0.0003460370889927977,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_56",
+      "mi": 0.0003012034280466952,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_104",
+      "mi": 0.0002983445433711721,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_93",
+      "mi": 0.0002667894799385525,
+      "side": "user",
+      "v": 38
+    },
+    {
+      "col": "user_int_feats_53",
+      "mi": 0.0002659812373368805,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_52",
+      "mi": 0.00020110606608825216,
+      "side": "user",
+      "v": 189
+    },
+    {
+      "col": "user_int_feats_82",
+      "mi": 0.00016589181884891263,
+      "side": "user",
+      "v": 24
+    },
+    {
+      "col": "user_int_feats_107",
+      "mi": 0.00015039305291831746,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_109",
+      "mi": 0.00013748385009006148,
+      "side": "user",
+      "v": 8
+    },
+    {
+      "col": "user_int_feats_86",
+      "mi": 0.00013384841231763202,
+      "side": "user",
+      "v": 246
+    },
+    {
+      "col": "user_int_feats_55",
+      "mi": 0.00012274221715183353,
+      "side": "user",
+      "v": 44
+    },
+    {
+      "col": "user_int_feats_92",
+      "mi": 0.0001171553519731109,
+      "side": "user",
+      "v": 3
+    },
+    {
+      "col": "user_int_feats_99",
+      "mi": 0.00011640898033483127,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_54",
+      "mi": 0.00011008314283672308,
+      "side": "user",
+      "v": 256
+    },
+    {
+      "col": "user_int_feats_59",
+      "mi": 8.12667786321367e-05,
+      "side": "user",
+      "v": 15
+    },
+    {
+      "col": "user_int_feats_103",
+      "mi": 6.967906157693652e-05,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_95",
+      "mi": 5.9609105381205814e-05,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_108",
+      "mi": 5.029057476440787e-05,
+      "side": "user",
+      "v": 8
+    },
+    {
+      "col": "user_int_feats_94",
+      "mi": 4.8054645860173676e-05,
+      "side": "user",
+      "v": 7
+    },
+    {
+      "col": "user_int_feats_60",
+      "mi": 4.798522334895127e-05,
+      "side": "user",
+      "v": 3
+    },
+    {
+      "col": "user_int_feats_51",
+      "mi": 3.4382915928957086e-05,
+      "side": "user",
+      "v": 156
+    },
+    {
+      "col": "user_int_feats_102",
+      "mi": 2.751331551544002e-05,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_96",
+      "mi": 1.9799827576322627e-05,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_49",
+      "mi": 1.768419826172624e-05,
+      "side": "user",
+      "v": 3
+    },
+    {
+      "col": "user_int_feats_58",
+      "mi": 1.5781120420361376e-05,
+      "side": "user",
+      "v": 3
+    },
+    {
+      "col": "user_int_feats_105",
+      "mi": 1.4853879059758152e-05,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_100",
+      "mi": 1.1015061351219007e-05,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_101",
+      "mi": 8.92767176492842e-06,
+      "side": "user",
+      "v": 4
+    },
+    {
+      "col": "user_int_feats_89",
+      "mi": 0.0,
+      "side": "user",
+      "v": 1
+    },
+    {
+      "col": "user_int_feats_90",
+      "mi": 0.0,
+      "side": "user",
+      "v": 1
+    },
+    {
+      "col": "user_int_feats_91",
+      "mi": 0.0,
+      "side": "user",
+      "v": 1
+    }
+  ],
+  "scan": {
+    "hash_buckets": 256,
+    "item_fids": 14,
+    "parquet_dir": "/data_ams/industrial_training_data",
+    "rows": 2099956,
+    "top_k": 100,
+    "user_fids": 46
+  },
+  "version": 1
+}
