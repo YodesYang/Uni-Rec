@@ -6,11 +6,11 @@
 
 ---
 
-**最近一次审视**：2026-05-13 西班牙下午 14:40（UTC+2 · 🧱 **T30 + T31 代码并行落地 · smoke 通过 · 等 M16 EDA 回流决定参数**）· 结论：① **CEST 12:20-13:30 T30 + T31 并行开发完成**（用户请求"同时推进"）· 利用 M16 EDA 训练 6-8h 窗口做代码开发 · 无训练 slot 阻塞。② **T30（时间桶可配置）** · `baseline/dataset.py` `DEFAULT_BUCKET_BOUNDARIES` + `parse_bucket_boundaries()` helper · 严格长度校验（63 values）+ 单调 + 正数 · CLI `--time_bucket_boundaries` · infer.py fallback · **默认值未变**（backward-compat 严格）· [`EXP-043`](../40-experiments/EXP-043-t30-time-bucket-config-2026-05-13.md) 落档。③ **T31（is-missing 信号 Scheme D 双路冗余）** · 用户 CEST 12:50 选 Scheme D（Path A vocab+1 top slot + Path B user_dense 尾部 bitmap）· `_resolve_is_missing_plan` + `_link_is_missing_plan_col_idx` + `_convert_batch` 新 path · **model 零改动**（纯 dataset 层 · 不触发 "+X% 参数 必死" 铁律）· CLI 3 个 flags · [`EXP-044`](../40-experiments/EXP-044-t31-is-missing-scheme-d-2026-05-13.md) 落档。④ **本地 Smoke 验证全部通过**：T30（默认值 bit-identical · 非法值 raise · 自定义切换生效）· T31（关闭时 user_dense_dim=755 不变 · 开启时精确 +N · bitmap ∈ {0,1} · vs-1 路由正确 · fid 86/94 missing_rate 75%/62.5% 方向对）。⑤ **前置条件**：两 task 都等 M16 CEST 18:00-20:00 EDA 回流 · T30 用 `q5_time_diff` 生成分位数边界 · T31 用 `q2_user_int_missing_top` 筛 |cvr_gap|>2% 的 fid。⑥ **下一步**：M16 回流后 → 写 `scripts/gen_time_bucket_quantile.py`（~20 行）+ 基于 EDA 选 T31 fid 清单 → 半程验证 job（阈值 vs icq-half-gap05 E3 Dev 0.842443 · ≥0.8437 真信号 / 0.8433-0.8437 rerun / <0.8430 deprecated）。⑦ **本地 41 commits 未 push** · T30+T31 代码待 commit（2 EXP + dataset/train/infer）。⑧ **M14/M15 training 仍在跑** · 今晚回流。
+**最近一次审视**：2026-05-13 西班牙下午 15:20（UTC+2 · 🧱 **RankUp + TokenFormer 论文研读 · T33/T34/T29-C 三新方向落地 · T33 NLIR 代码完成 + Smoke 通过**）· 结论：① **用户要求深度研读 arXiv:2604.17878 (RankUp) + arXiv:2604.13737 (TokenFormer) 并从 Kaggle 金牌视角判断**，两篇都是同 Tencent Ads 团队（Junwei Pan / Jie Jiang / Haijie Gu）· 同业务 · 论文级证据。② **新增 3 个任务**：**T33 NLIR**（TokenFormer §4.4 · ablation +4.87‰ AUC · 共享 gating 不违反独立化铁律）· **T34 Multi-Emb K=2**（RankUp §3.3 · ablation +0.13~0.21% 线上 AUC · embedding-level 非 per-X）· **T29-C Randomized Permutation Split**（RankUp §3.2 · 零参数 · 最低成本补充）。③ **不做**：TokenFormer Unified Stream / BFTS（违反 "pure model 改造都掉分" 铁律 + DECEM "不要大改" 红线） · RankUp Cross Pretrained（外部数据红线） · RankUp Task-Specific Token（单任务不适用） · RankUp Global Token（本项目 NS tokens 已等价）。④ **文档落档**：[ADR-011 NLIR gating](../30-decisions/ADR-011-nlir-gating-cross-attn.md) + [ADR-012 Multi-Emb K=2](../30-decisions/ADR-012-multi-embedding-k2.md) + [EXP-045 T33 plan](../40-experiments/EXP-045-t33-nlir-halftrain-2026-05-13.md) + [EXP-046 T34 plan](../40-experiments/EXP-046-t34-multiemb-k2-halftrain-2026-05-13.md) + [EXP-047 T29-C plan](../40-experiments/EXP-047-t29c-random-permutation-2026-05-13.md)。⑤ **T33 NLIR 代码完成 + Smoke 通过**（CEST 15:00-15:15 · baseline/model.py `MultiSeqHyFormerBlock` +30 行 gating · baseline/train.py `--enable_nlir_gating` CLI · baseline/infer.py cfg fallback · 参数增量 **+8,320 精确匹配 2×(D²+D) 理论值** · train_config 正确落盘 · infer.py 无 state_dict mismatch · backward-compat 完美）。⑥ **Top 10 路线图**（LB 目标 ~0.852，差 +0.005~0.006）：Phase 1 T30/T31/T32（既定）→ Phase 2 **T33 NLIR（最高 ROI · 预期 +0.002~0.004 LB）** + T34 Multi-Emb + T29-C Random → Phase 3 叠加 + seed sweep → Phase 4 冲分。⑦ **下一步**：等 M16 EDA 回流 + 今晚平台 slot 回流后，提交 T33 NLIR half-train × seed=42 作为最高优先 bet（基于 M9 SOTA config 加 `--enable_nlir_gating`）。⑧ **Ceiling 定性**：乐观场景 LB 0.853~0.856（Top 10 可行），中性 0.850~0.852（Top 15~20），悲观 0.848~0.850（Top 20~30）。⑨ T30+T31 代码已落地（上轮审视状态不变）等 M16 EDA 决定参数。⑩ **本地 ≥44 commits 未 push**（本次 3 EXP + 2 ADR + T33 代码 + active.md 待 commit）。
 
 ---
 
-**上一条审视（保留参考）**：2026-05-13 西班牙中午 12:00（UTC+2 · 🔬 **M9 破 SOTA + T25+T29 叠加双 seed 证伪 + EDA 搭车 M16 启动**）· 结论：① **今早 4 LB 回流**：🏆 **M9 (gap=0×T25×s42) LB 0.84671** 刷新 SOTA (+0.00034 vs 旧 0.84637) · 但 Δ < 1× seed 噪声 · 战略价值 > 数字意义；❌ M7 (T25+T29×s3 叠加) **LB 0.839593** Dev 高但 LB 暴跌 Δ−0.00348 vs T25 bypass s3 · Dev→LB gap 扩 15× · "LogLoss 低 ≠ LB 好" 反例；❌ M10 (T25+T29×s42 叠加) LB **0.84145** Δ−0.00198 vs T25 B · **M7/M10 双 seed 一致证伪 T25+T29 叠加方向**（昨天"seed 敏感"铁律修正为"叠加本身不 work"）；🟡 M11 (T29 only s3) LB **0.841455** Δ+0.00085 vs M3 s42 · T29 跨 seed 弱稳定但不如 T25 bypass 单独。（完整 changelog 见下方）
+**上一条审视（保留参考）**：2026-05-13 西班牙下午 14:40（UTC+2 · 🧱 **T30 + T31 代码并行落地 · smoke 通过 · 等 M16 EDA 回流决定参数**）· 结论：① **CEST 12:20-13:30 T30 + T31 并行开发完成**（用户请求"同时推进"）· 利用 M16 EDA 训练 6-8h 窗口做代码开发 · 无训练 slot 阻塞。② **T30（时间桶可配置）** · `baseline/dataset.py` `DEFAULT_BUCKET_BOUNDARIES` + `parse_bucket_boundaries()` helper · 严格长度校验（63 values）+ 单调 + 正数 · CLI `--time_bucket_boundaries` · infer.py fallback · **默认值未变**（backward-compat 严格）· [`EXP-043`](../40-experiments/EXP-043-t30-time-bucket-config-2026-05-13.md) 落档。③ **T31（is-missing 信号 Scheme D 双路冗余）** · `_resolve_is_missing_plan` + `_link_is_missing_plan_col_idx` + `_convert_batch` 新 path · **model 零改动**（纯 dataset 层）· CLI 3 个 flags · [`EXP-044`](../40-experiments/EXP-044-t31-is-missing-scheme-d-2026-05-13.md) 落档。④ 本地 Smoke 全部通过 · 等 M16 EDA 回流决定参数。（完整 changelog 见下方）
 
 ---
 
@@ -457,6 +457,110 @@
 
 ---
 
+### T33 `[~]` TokenFormer NLIR Gating after HyFormer Cross-Attention（RankUp/TokenFormer paper 方向 · 最高新 ROI · 代码已就位）
+
+**触发**（2026-05-13 CEST 15:00 · 用户要求"从专业广告算法研究员角度深入研读 arXiv:2604.17878 和 arXiv:2604.13737 并判断 Top 10 价值"）：**TokenFormer 论文（Tencent Ads 团队，arXiv:2604.13737，2026-04-15）§4.4 NLIR + §5.7 ablation** 提供了对本项目最对口的架构级升级：
+
+- **独立收益 +4.87‰ AUC**（KuaiRand-27k 公开数据集 · vs Vanilla Transformer · ablation §5.7 "NLIR alone"）
+- **机制**：在 cross-attention output 上加一层 `decoded = X + sigmoid(X @ W_g) ⊙ A`（Eq. 16-18），multiplicative modulation 打破纯线性 attention 的 Sequential Collapse Propagation
+- **与 SwiGLU 互补**：SwiGLU 在 FFN channel 级，NLIR 在 block 级 attention output；TokenFormer 自己 §4.5 也同时用了两者
+- **同团队证据**：作者与 HyFormer 原作者完全重叠（Junwei Pan / Jie Jiang / Haijie Gu）
+
+**ROI 为何最高**：
+- ✅ **参数增量极小** `+~8k`（2 blocks × (D² + D) = 2 × 4160）· 共享 W_g 跨 S=4 seq domain · **不触发 team-memory 独立化三连败铁律**（T19 / T28 / FaFE 是 per-X 独立参数，NLIR 是共享参数）
+- ✅ **机制正交**：与 T25 DIN bypass（classifier 前）、T30 时间桶（dataset）、T31 is-missing（dataset）、T32 Q_init（query generator）全独立，S4 可多路叠加
+- ✅ **论文 ablation +4.87‰ AUC** 是 DECEM Tricks +0.001 LB 的 5×
+
+**已完成**（2026-05-13 CEST 14:55-15:15）：
+- ✅ [ADR-011](../30-decisions/ADR-011-nlir-gating-cross-attn.md) · [EXP-045](../40-experiments/EXP-045-t33-nlir-halftrain-2026-05-13.md) 落档
+- ✅ 代码落地：`baseline/model.py::MultiSeqHyFormerBlock` + `PCVRHyFormer.__init__` 添加 `enable_nlir_gating` + `nlir_gate` Linear · `train.py` CLI · `infer.py` cfg fallback
+- ✅ **本地 Smoke 全过**：py_compile + Lint 0 errors · OFF 161,439,489 params · ON 161,447,809 params · **Δ=+8,320 精确匹配理论值** · train_config 正确落盘 · infer.py 载入无 state_dict mismatch · backward-compat 完美
+
+**判决阈值**（E3 Dev vs `icq-half-gap05` baseline 0.842443，在 gap=0.05 可信 dev 下）：
+- ≥ 0.845 → 🎯🎯 强真信号（对标 TokenFormer +4.87‰ 的 50% 迁移率）→ 立即 LB + 叠加
+- ≥ 0.8437 → 🎯 真信号（Δ+0.0013 = 3× rerun 噪声）→ eval
+- [0.8421, 0.8437) → ⚪ 持平 → Deprecated
+- < 0.8421 → ❌ 负向 → 排查 gate 饱和 / 初始化问题
+
+**下一步**：
+1. 等今晚平台 slot 回流 · 启 `t33-nlir-halftrain-gap05-seed42`（M9 config + `--enable_nlir_gating`，上传改动 3 Python 文件 + run.sh 粘贴）
+2. seed=3 版本并行（松 guard · `--logloss_rebound_delta 0.003 --logloss_rebound_patience 2`）
+3. 首次 evaluation 必须勾选"上传自定义 infer.py"（`enable_nlir_gating` 是新 kwarg · team-memory 铁律）
+
+**当前优先级**：**最高**（Top 10 路线图 Phase 2 核心弹药 · 论文级证据 · 代码就位 · 只待平台 slot）
+
+**当前状态**：🧱 **代码已落地 + Smoke 通过 · 等平台 slot**
+
+---
+
+### T34 `[~]` RankUp Multi-Embedding K=2 for NS Tokenizer（RankUp §3.3 · embedding-level 非 per-X · 代码未落地）
+
+**触发**（2026-05-13 CEST 15:00 · 同上论文研读）：**RankUp 论文（Tencent Ads，arXiv:2604.17878 v3，2026-05-12）§3.3 + Table 1 online ablation**：Multi-Emb + Global Token 组合 **+0.13%~+0.21% 线上 AUC**，是 5 组件里最大单项。
+
+**机制**：每个 non-skipped fid 用 **K=2 个独立 `nn.Embedding` table**，concat + `Linear(2d, d)` projection 回原维度。每个 table 见**所有 batch 的梯度**（**非 per-X 独立参数** · 不违反 team-memory 铁律）。
+
+**与 EXP-029 EDA 结论直接对口**：
+- **结论 2**：信息丰富样本 AUC 低 0.04~0.05 → "id 特征线下虚高线上掉" 机制
+- **结论 3**：大 vocab 全在 seq 域（seq_c/47=2.8亿 等）
+- Multi-Emb 从两个正交子空间学同一 id · **缓解 head/tail 单子空间撕裂**（Pan et al. 2024 SIGKDD 工业级 proven）
+
+**关键铁律核对**（必读）：
+| 维度 | per-X 独立参数（T19/T28/FaFE 已证伪） | Multi-Embedding（本 T34） |
+|---|---|---|
+| 独立参数位置 | 下游模块（FFN / DIN / LN） | Embedding table（输入侧）|
+| 每参数梯度 | 每 X 只见 1/X 样本 · starve | 每 table 见所有 batch · OK |
+| 本项目证据 | T19/T28/FaFE 三连败 | 未尝试 · RankUp + Pan 2024 工业 proven |
+
+**已完成**：
+- ✅ [ADR-012](../30-decisions/ADR-012-multi-embedding-k2.md) · [EXP-046](../40-experiments/EXP-046-t34-multiemb-k2-halftrain-2026-05-13.md) 落档
+- ⏳ 代码未落地（优先级次于 T33 · T33 Smoke 后启动）
+
+**风险**：
+- **VRAM 压力**：+~300M params（embedding 翻倍）+ optimizer state = **+3~5 GB**，**可能需要 batch=128→96**
+- 训练时间 +20%（~10-11h for 4 epoch）
+
+**判决阈值**（E3 Dev vs baseline 0.842443）：
+- ≥ 0.846（+0.0036）→ 🎯🎯 强真信号（对标 +0.18% AUC 迁移）
+- ≥ 0.8437 → 🎯 真信号 → eval
+- 需要同配 **batch=96 K=1 对照**隔离 batch 降档的 penalty
+
+**下一步**：T33 首次回流后 · 若 LB 真信号 → 启动 T34 代码落地（~60 行 · model.py tokenizer 改动为主）
+
+**当前优先级**：**高**（次于 T33 · 等 T33 平台 signal 决定启动优先级）
+
+**当前状态**：📋 planned · ADR + EXP 已落档 · 代码待落地
+
+---
+
+### T29-C `[~]` RankUp Randomized Permutation Split（RankUp §3.2 · 零参数 · 最低成本补充）
+
+**触发**（2026-05-13 CEST 15:00 · 同上论文研读）：**RankUp §3.2 + §4.3 MI analysis** 明确论证"语义分组引入 collinearity 伤表示多样性 → randomized split 更优"。Online ablation Table 1: Randomized Split alone **+0.06~0.08% AUC**。
+
+**与本项目 T29-A/B 的关系**：作为 T29 方向的 Variant C（不是替代 A/B · 机制不同）：
+- T29-A 手工语义分组（M3 LB 0.840603 gap +0.00103 ⭐最小 · 但未破 M9）
+- T29-B vocab tier 分组（M4 Dev 0.841171 · 未 eval）
+- **T29-C Randomized Permutation** · 每 group 1 fid · **用固定 seed shuffle fid 顺序** · 对比 M9 "singleton fallback = 匿名 fid 编号序"
+
+**机制假设**：M9 LB 0.84671 部分来自 "匿名 fid 编号恰好无 collinearity"的运气。T29-C 用 2-3 个 permutation seed 枚举，大概率能找到 LB ≥ M9 的顺序。
+
+**代码改动**：~15 行（`scripts/gen_ns_groups_random.py` 新脚本 + 3 个 JSON 文件） · **零 Python 改动**（复用 ADR-009 的 `--ns_groups_json` 通路）· **零新参数**
+
+**已完成**：
+- ✅ [EXP-047](../40-experiments/EXP-047-t29c-random-permutation-2026-05-13.md) 落档
+- ⏳ 生成脚本 + 3 JSON 未写
+
+**判决阈值**（双 permutation seed 比较）：
+- 跨 permutation 都 ≥ 0.8437 → 🎯 真信号
+- 一高一低 Δ>0.002 → 🟡 permutation-sensitive · 再跑 seed=7
+
+**下一步**：T33 Smoke 后 + 平台 slot 空闲时插 · 可以**和 T33 seed=3 / T34 同批提交**（3 方向独立、4 slot 全覆盖）
+
+**当前优先级**：**中**（低成本补充 · ROI 在 T33/T34 之间）
+
+**当前状态**：📋 planned · EXP 已落档 · 脚本待写
+
+---
+
 ### T5 `[~]` 复现 OneTrans Mixed-Param 版本（暂缓 · 等 T4 数字）
 
 **决策（2026-04-26）**：暂缓启动。理由：
@@ -563,6 +667,8 @@
 ---
 
 ## Changelog
+
+- **2026-05-13 西班牙下午 15:20（UTC+2 · 🧱 **RankUp + TokenFormer 论文深度研读 · Top 10 路线图 · T33 NLIR 代码完成 + Smoke 通过**）**：用户要求从专业广告算法研究员角度深入研读 arXiv:2604.17878 (RankUp) + arXiv:2604.13737 (TokenFormer) 并判断 Top 10 价值。① **两篇都是同 Tencent Ads 团队** · 同业务 · 论文级证据 · 与本项目 HyFormer baseline 作者重叠（Junwei Pan / Jie Jiang / Haijie Gu）。② **新增 3 个 task**：**T33 NLIR gating**（最高 ROI · TokenFormer ablation +4.87‰ AUC · 共享 W_g 不违反独立化铁律）· **T34 Multi-Emb K=2**（RankUp ablation +0.18% AUC · embedding-level 非 per-X）· **T29-C Randomized Permutation Split**（RankUp §3.2 · 零参数 · 最低成本）。③ **明确不做**：Unified Stream / BFTS（违反 "pure model 掉分" 铁律 + DECEM "不要大改"）· Cross Pretrained（外部数据红线）· Task-Specific Token（单任务）· Global Token（NS tokens 已等价）。④ **文档落档 5 份**：ADR-011 / ADR-012 / EXP-045 / EXP-046 / EXP-047。⑤ **T33 NLIR 代码 + Smoke 完成**（CEST 14:55-15:15）：`MultiSeqHyFormerBlock` 加 `enable_nlir_gating` 分支（~30 行）· `PCVRHyFormer.__init__` 透传 · `train.py` CLI · `infer.py` fallback · **Smoke OFF 161,439,489 vs ON 161,447,809 · Δ=+8,320 精确匹配理论值 2×(D²+D)** · train_config 正确落盘 `"enable_nlir_gating": true` · infer.py 无 state_dict mismatch · backward-compat 完美 · Lint 0 errors。⑥ **Top 10 路线图**（LB 目标 ~0.852 · 差 +0.005~0.006）：Phase 1 T30/T31/T32（既定）→ Phase 2 **T33 NLIR（最高 ROI · 预期 +0.002~0.004 LB）** + T34 Multi-Emb + T29-C Random → Phase 3 叠加 + seed sweep → Phase 4 冲分。⑦ **Ceiling 定性**：乐观 LB 0.853~0.856（Top 10 可行），中性 0.850~0.852（Top 15~20），悲观 0.848~0.850（Top 20~30）。⑧ **下一步**：等今晚平台 slot 回流 · 启 `t33-nlir-halftrain-gap05-seed42`（M9 config + `--enable_nlir_gating`） · 上传 3 改动 Python 文件 + run.sh 粘贴。⑨ **本地 44+ commits 未 push**（含本次 3 EXP + 2 ADR + T33 代码 + active.md）。
 
 - **2026-05-13 西班牙中午 12:00（UTC+2 · 🔬 M9 破 SOTA + 叠加证伪 + EDA 搭车 M16 启动）**：① **今早 4 LB**：M9 **0.84671** (刷 SOTA +0.00034 vs 0.84637, 但 <1σ seed 噪声) / M10 0.84145 (T25+T29 s42 叠加失败 Δ−0.002) / M11 0.841455 (T29 only s3 弱正向) / M7 0.839593 (T25+T29 s3 **Dev→LB gap 扩 15× 证伪**)。② **T25+T29 叠加方向双 seed 一致证伪关闭**（M7 Δ−0.00348 / M10 Δ−0.00198 · 昨天"叠加 seed 敏感"铁律修正为"叠加本身不 work"）。③ "LogLoss 低 ≠ LB 好" 反例：M7 LogLoss 项目最低但 LB 倒数 → 未来判决只信 LB，Dev/LogLoss 只排除负向。④ **M14/M15 seed sweep 已启动**（s11/s7 · 建立 gap=0 × DIN 4-seed 能力带 · 今晚回流）。⑤ **用户反思"E3-E4 是否欠拟合"**：EXP-019 铁律确认 E3-E4 甜蜜点 · **`--keep_topk_ckpt 4` 设为新 default**（baseline/run.sh + active.md + team-memory）。⑥ **用户提议 EDA**：深思后采取"搭车策略"（EXP-037 5 次独立 EDA 失败教训 · 不再盲试）· 通路走 `training_summary.json['eda']` 稳定字段。⑦ **CEST 11:00-11:55 EDA 代码 + smoke 完成**：`baseline/dataset.py +220 行`（4 类 EDA 累加器 · reservoir sampling Q4/Q5）· `trainer.py/train.py` 各 +20 行 · **num_workers=0 自动降级**避免 worker copy 问题 · demo smoke 验证 summary['eda'] 字段正确输出。⑧ **Smoke 3 大指示性发现**：user_id freq_1=100%（印证 Seed 一次性）/ seq_a p50=256 截断（Trick 2 方向有效）/ time_diff p1=7.3h 说明当前 BUCKET_BOUNDARIES 5s~1h 桶被浪费（T30 方向极有潜力）。⑨ **M16 `M16-m9rerun-eda-gap0-seed42-4ep` CEST 11:55 启动**：M9 config rerun + EDA 搭车 · 双获（验证 M9 稳定性 + 拿 1.9M 真 EDA 数据）· 预计 CEST 18-20:00 回流。⑩ **EXP-042 落档**（含 smoke 验证 + 分析计划 + 方向判决表）。⑪ **今晚 EDA 数据 + M14/M15 + M16 回流后**：基于 Q5 真实 time_diff 设计 T30 · 基于 Q2 per-fid cvr_gap 决定 T31 是否值得。
 
