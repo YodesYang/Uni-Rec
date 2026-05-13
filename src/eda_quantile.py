@@ -84,6 +84,19 @@ BLOB_END = '<<<EDA_BLOB_END>>>'
 EOF_MARKER = '<<<EDA_EOF>>>'
 
 
+def _rss_mb() -> float:
+    """Best-effort resident set size in MB; 0.0 when unreadable (non-Linux)."""
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    kb = int(line.split()[1])
+                    return kb / 1024.0
+    except OSError:
+        pass
+    return 0.0
+
+
 # ───── Helpers ─────
 
 def _reservoir_merge(
@@ -92,14 +105,28 @@ def _reservoir_merge(
     max_size: int,
     rng: np.random.Generator,
 ) -> None:
-    """Mutate buf in place: append new data, subsample if > max_size.
+    """Mutate buf in place: append new data, subsample in-flight when buf grows.
 
-    We keep this O(N) in aggregate by accumulating all new arrays in `buf`
-    and only subsampling at finalize. That yields **approximate** reservoir
-    semantics (not strict Algorithm R) but is adequate for quantile est
-    and 10-100x cheaper than per-item reservoir decisions.
+    Memory bound: ≤ 2 * max_size int64 per buf (amortized O(N) total).
+
+    Subsample strategy: when the total size in buf exceeds `2 * max_size`,
+    concat everything, uniformly downsample to `max_size`, and replace buf
+    with a single chunk. This is NOT strict Algorithm R, but for quantile
+    estimation the uniform downsample is acceptable and cheap.
+
+    This matters because platform RGs can contribute ~50K-200K seq entries
+    per domain per RG; without in-flight cropping, a full scan would buffer
+    ~300M int64 entries (= 2.4GB) per domain → OOM at ~RG 700/1044.
     """
+    if new.size == 0:
+        return
     buf.append(new)
+    cur = sum(a.size for a in buf)
+    if cur > 2 * max_size:
+        arr = np.concatenate(buf)
+        idx = rng.choice(arr.size, size=max_size, replace=False)
+        buf.clear()
+        buf.append(arr[idx])
 
 
 def _reservoir_finalize(
@@ -363,8 +390,9 @@ def main() -> None:
             if rg_seen % 50 == 0:
                 elapsed = time.time() - t_start
                 rate = rg_seen / max(elapsed, 1e-6)
-                LOG.info('RG %d · rows=%d · pos=%d · %.1f RG/s',
-                         rg_seen, total_rows, total_pos, rate)
+                rss_mb = _rss_mb()
+                LOG.info('RG %d · rows=%d · pos=%d · %.1f RG/s · rss=%.0fMB',
+                         rg_seen, total_rows, total_pos, rate, rss_mb)
 
         if args.max_row_groups and rg_seen >= args.max_row_groups:
             break
