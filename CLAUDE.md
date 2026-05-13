@@ -28,28 +28,28 @@ Dependencies: Python 3.10, PyTorch ≥ 2.7, numpy ≥ 2.2, pyarrow ≥ 23, sciki
 ### Local smoke / fast-proxy run
 
 ```bash
-python baseline/train.py \
-  --data_dir ./data/demo_1000 \
-  --ckpt_dir ./runs/smoke_ckpt \
-  --log_dir ./runs/smoke_log \
-  --num_epochs 1 --batch_size 256 \
-  --valid_split_strategy time \
-  --seq_encoder_type swiglu \
-  --limit_train_rgs 8 --limit_valid_rgs 2 --max_train_steps 500 \
-  --device cpu
+python src/train.py \
+ --data_dir ./data/demo_1000 \
+ --ckpt_dir ./runs/smoke_ckpt \
+ --log_dir ./runs/smoke_log \
+ --num_epochs 1 --batch_size 256 \
+ --valid_split_strategy time \
+ --seq_encoder_type swiglu \
+ --limit_train_rgs 8 --limit_valid_rgs 2 --max_train_steps 500 \
+ --device cpu
 ```
 
 ### Full training
 
 ```bash
-python baseline/train.py \
-  --data_dir /path/to/parquet \
-  --ckpt_dir ./runs/full_ckpt \
-  --num_epochs 10 --batch_size 256 \
-  --valid_split_strategy time \
-  --seq_encoder_type swiglu \
-  --enable_count_features --enable_seq_stats_features \
-  --d_model 64 --num_queries 1
+python src/train.py \
+ --data_dir /path/to/parquet \
+ --ckpt_dir ./runs/full_ckpt \
+ --num_epochs 10 --batch_size 256 \
+ --valid_split_strategy time \
+ --seq_encoder_type swiglu \
+ --enable_count_features --enable_seq_stats_features \
+ --d_model 64 --num_queries 1
 ```
 
 ### Inference / evaluation
@@ -57,7 +57,7 @@ python baseline/train.py \
 ```bash
 MODEL_OUTPUT_PATH=./runs/full_ckpt/global_stepXXX.best_model \
 EVAL_RESULT_PATH=./eval_results \
-python baseline/infer.py
+python src/infer.py
 ```
 
 `infer.py` reads `train_config.json` + `schema.json` from the checkpoint directory to reconstruct the exact model. The platform's default `infer.py` does the same — custom upload is only required if `infer.py` itself is modified.
@@ -65,7 +65,7 @@ python baseline/infer.py
 ### Syntax / compile check (no test suite)
 
 ```bash
-python -m py_compile baseline/train.py baseline/dataset.py baseline/model.py baseline/trainer.py baseline/infer.py
+python -m py_compile src/train.py src/dataset.py src/model.py src/trainer.py src/infer.py
 ```
 
 There is no test suite and no CI. Verification is manual: local smoke run → platform submission.
@@ -74,7 +74,7 @@ There is no test suite and no CI. Verification is manual: local smoke run → pl
 
 ## Architecture
 
-### `baseline/model.py` — PCVRHyFormer
+### `src/model.py` — PCVRHyFormer
 
 The model unifies multi-domain behavior sequences and non-sequence features:
 
@@ -88,7 +88,7 @@ Key constraint: when `rank_mixer_mode='full'`, `d_model % (num_queries * num_seq
 
 Empirically: **SwiGLU is the default** — 3.5× faster inference than transformer, best AUC in current experiments.
 
-### `baseline/dataset.py` — data pipeline
+### `src/dataset.py` — data pipeline
 
 - Streams Parquet row groups with 16 workers, pre-allocated numpy buffers (no per-row allocation).
 - `FeatureSchema` maps column names → (offset, length) for efficient tensor slicing.
@@ -100,14 +100,14 @@ Empirically: **SwiGLU is the default** — 3.5× faster inference than transform
 - `--valid_split_strategy time` sorts row groups by `max(timestamp)` and holds out the tail (ADR-001). Use this instead of `filename` to avoid label-leakage from overlapping time windows.
 - `_diag_*` fields flow through to trainer for slice diagnostics (ADR-002).
 
-### `baseline/trainer.py` — training loop
+### `src/trainer.py` — training loop
 
 - **Dual optimizer**: Adagrad for sparse embedding tables, AdamW for all dense parameters.
 - Saves `model.pt` + `train_config.json` + `schema.json` + `ns_groups.json` into every `*.best_model/` checkpoint automatically.
 - `training_summary.json` in the checkpoint root — grep-friendly, records best val AUC, step, epoch.
 - Slice diagnostics: per-quantile AUC breakdown on `user_int_nonzero`, `item_int_nonzero`, `seq_total_len`, `label_type`.
 
-### `baseline/train.py` — CLI entry point
+### `src/train.py` — CLI entry point
 
 Key flags beyond the obvious:
 
@@ -154,7 +154,7 @@ When touching `docs/20-tasks/active.md`, follow the 7-step audit in `.cursor/rul
 
 ## Platform Gotchas
 
-- **"Copy" trap**: Platform Training → Copy clones a frozen snapshot. After any code change, create a **New Training Job** and re-upload `baseline/`. Using Copy after code changes causes `unrecognized arguments` failures (confirmed 2026-05-01).
+- **"Copy" trap**: Platform Training → Copy clones a frozen snapshot. After any code change, create a **New Training Job** and re-upload `src/`. Using Copy after code changes causes `unrecognized arguments` failures (confirmed 2026-05-01).
 - **Publish checklist** before publishing a checkpoint for evaluation:
   1. It is a `*.best_model/` subdirectory (not a mid-step checkpoint).
   2. It is the global latest best after training completes (not epoch-1).

@@ -33,7 +33,7 @@
 
 > ⚠️ **`run.sh` 是 mandatory entry point**，平台容器启动后会自动 `bash run.sh`。
 
-官方训练模板包含 6 个文件（与本仓库 `baseline/` 一字不差）：
+官方训练模板包含 6 个文件（与本仓库 `src/` 一字不差）：
 
 ```
 dataset.py    28.1K
@@ -218,7 +218,7 @@ Pending  →  Waiting for Inference Resources
 | `TRAIN_CKPT_PATH` | ckpt 输出根目录（`model.pt` 必须落到该目录子树下） |
 | `TRAIN_TF_EVENTS_PATH` | TensorBoard event 文件目录 |
 
-> ⚠️ baseline 的 `train.py` 还用了一个 `TRAIN_LOG_PATH`，此变量**未在官方 PDF 列出**。
+> ⚠️ 本仓库 `src/train.py` 还用了一个 `TRAIN_LOG_PATH`，此变量**未在官方 PDF 列出**。
 > 平台上跑时建议在脚本里兜底：`os.environ.get("TRAIN_LOG_PATH", "/tmp/log")`，避免 KeyError。
 
 shell / python 读法：

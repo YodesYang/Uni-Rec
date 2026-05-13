@@ -1,7 +1,7 @@
 # Baseline 代码地图（Codebase Map）
 
 > **稳定文档**。来源：原 `knowledge_base.txt §4`。
-> 任何 `baseline/` 下的代码改动，**必须**在对应模块下方追加一行 inline 注释（保留行号或 commit）。
+> 任何 `src/` 下的代码改动，**必须**在对应模块下方追加一行 inline 注释（保留行号或 commit）。
 > 大改动（新增类 / 改函数签名）→ 同时落盘 ADR（参考 `docs/30-decisions/`）。
 
 ---
@@ -9,7 +9,7 @@
 ## 项目结构
 
 ```
-baseline/
+src/
 ├── dataset.py           # PCVRParquetDataset：流式 IterableDataset
 ├── model.py             # PCVRHyFormer 主模型（HyFormer 风格）
 ├── trainer.py           # PCVRHyFormerRankingTrainer

@@ -29,10 +29,10 @@ Rationale (T29 / ADR-009):
 Usage:
     python3 scripts/gen_ns_groups_vocab_tier.py \\
         --schema data/demo/schema.json \\
-        --out baseline/ns_groups_vocab_tier.json \\
+        --out src/ns_groups_vocab_tier.json \\
         --mode vocab_tier
 
-Output JSON is consumed by baseline/train.py via --ns_groups_json.
+Output JSON is consumed by src/train.py via --ns_groups_json.
 """
 from __future__ import annotations
 

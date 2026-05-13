@@ -1,4 +1,4 @@
-"""Generate a single markdown file containing key `baseline/model.py` sections.
+"""Generate a single markdown file containing key `src/model.py` sections.
 
 Output: `docs/99-raw/flight-reading/08-model-py-key-sections.md`
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-MODEL_PY = PROJECT_ROOT / "baseline" / "model.py"
+MODEL_PY = PROJECT_ROOT / "src" / "model.py"
 OUTPUT_MD = (
     PROJECT_ROOT / "docs" / "99-raw" / "flight-reading" / "08-model-py-key-sections.md"
 )
@@ -274,7 +274,7 @@ def build_md() -> None:
     OUTPUT_MD.parent.mkdir(parents=True, exist_ok=True)
 
     parts: list[str] = []
-    parts.append("# `baseline/model.py` — 飞行精读关键段\n")
+    parts.append("# `src/model.py` — 飞行精读关键段\n")
     parts.append(
         "> **配套文档**："
         "[flight-reading-list](../../10-research/flight-reading-list-2026-05-06.md) · "
