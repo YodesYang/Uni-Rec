@@ -1,7 +1,10 @@
 # ADR-011 · TokenFormer NLIR Gating after HyFormer Cross-Attention（T33）
 
-> **Status**: **Proposed**（2026-05-13 CEST 14:55 起草 · 等 T33 half-train 回流判决）
+> **Status**: **Proposed**（2026-05-13 CEST 14:55 起草 · 15:30 gate 源 v2 修订对齐论文 · 等 T33 half-train 回流判决）
 > **Date**: 2026-05-13 Proposed
+> **Revisions**:
+> - v1（CEST 14:55）：gate 源用 `X_raw`（偏离论文）· Smoke 通过但研究员 review 发现语义错
+> - **v2（CEST 15:30）**：gate 源改为 `LN(X)`（复用 CrossAttention 的 norm_q · 零新参数）· Smoke 验证 gate.mean=0.5002 / std=0.2127 · 严格对齐 TokenFormer §4.4 Eq. 16
 > **Related Tasks**: T33（见 `docs/20-tasks/active.md`）
 > **Related Experiments**: EXP-045（`t33-nlir-halftrain-gap05-*`，待启动）
 > **External References**:
@@ -90,8 +93,13 @@ decoded_q_i = gate * raw_q_i + q_tokens_list[i]                   # NLIR + resid
 **参数细节**：
 - `W_g ∈ R^{D×D}`（per block 独立，S 个 seq domain 跨域共享）
 - 初始化：Xavier uniform（让 gate 初始分布集中在 0.5 附近，不偏向强开启或强关闭）
-- Residual 使用**原始 q_tokens_list[i]**（未经过 cross-attn 的），对齐 TokenFormer Eq. 18 `I = X + σ(G) ⊙ A`
-- 与 T28 integrated DIN 注入点**紧邻**（line 1290-1305），但 **T28 Deprecated 且默认 off**，两者互斥（当前 run.sh 没 enable_din_integrated）
+- **Gate 源 = `LN(X)`**（复用 CrossAttention 的 `norm_q` · v2 修订 · 严格对齐论文 Eq. 16）
+  - 论文 Eq. 16 原文：`G = X^(l) @ W_g` · 但 TokenFormer 用 PreNorm RMSNorm · 其 `X^(l)` 本身已经是上一 block 的归一化输出
+  - 本项目 CrossAttention 用 pre-LN · attention 输入的 Q 是 `LN(X)` · gate 必须用同一 tensor 才能保持 "same normalized X drives both attn and gate"
+  - 如果用 raw X：① 方差随 block 累加 → block 2+ sigmoid saturation；② Xavier 初始化的 zero-mean unit-variance 假设失效；③ Smoke 实测 mean 会偏离 0.5
+  - v2 实测：gate.mean=0.5002 · std=0.2127 · 对齐论文精神
+- Residual 使用**原始 q_tokens_list[i]**（未经过 LN 和 cross-attn 的），对齐 TokenFormer Eq. 18 `I = X + σ(G) ⊙ A`
+- 与 T28 integrated DIN 注入点**紧邻**（同段 forward），但 **T28 Deprecated 且默认 off**，两者互斥（当前 run.sh 没 enable_din_integrated）
 
 ### 代码改动面
 

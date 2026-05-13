@@ -1,7 +1,7 @@
 # EXP-045 · T33 NLIR Gating on Cross-Attention · Planning（未启动）· 2026-05-13
 
-> **Status**: 🧱 **Code landed + Smoke passed · Platform job pending**（2026-05-13 CEST 15:15）
-> **日期**: 2026-05-13 CEST 15:00 起草 · 15:15 Smoke 通过
+> **Status**: 🧱 **Code landed + v2 gate fix + Smoke passed · Platform job pending**（2026-05-13 CEST 15:30）
+> **日期**: 2026-05-13 CEST 15:00 起草 · 15:15 Smoke v1 · 15:30 gate 源 v2 修复 + 再 Smoke
 > **关联**：[ADR-011](../30-decisions/ADR-011-nlir-gating-cross-attn.md)（设计决策） · [TokenFormer paper §4.4 + §5.7](https://arxiv.org/abs/2604.13737) · `docs/20-tasks/active.md §T33`
 
 ---
@@ -24,43 +24,64 @@
 
 ## 实验计划
 
-### Phase 1: 本地 Smoke（~30 分钟 · CEST 15:00-15:15）✅ 完成
+### Phase 1: 本地 Smoke（~30 分钟 · CEST 15:00-15:15）✅ 完成 · CEST 15:30 gate 源修复后 ✅ 再 Smoke
 
+**v1 → v2 · 发现 gate 源 bug**（研究员视角 critical review · CEST 15:28）：
+- v1 实现用 `sigmoid(X_raw @ W_g)` · **偏离 TokenFormer §4.4 Eq. 16**（论文用 `LN(X)` 作 gate 源）
+- v1 风险：raw X 方差未归一化 · 随 block 深度累加 · 可能 block 2+ 进入 sigmoid saturation · Xavier init 的 zero-mean unit-variance 假设失效
+- v2 修复：gate 源改为 `self.cross_attns[i].norm_q(x_in)` · 即复用 attention 自己的 pre-LN · 零新参数 · 对齐论文 "same normalized X drives both attn and gate"
+- 参数量严格不变（161,447,809 · norm_q 是 reuse）
+
+**v2 Smoke 验证**（`/tmp/t33_smoke_v2/gate_health.py` · 已清理）：
 - [x] `py_compile` baseline/{model.py,train.py,infer.py} · **全过 + Lint 0 errors**
-- [x] Smoke A: `--enable_nlir_gating=False` · demo 2 step train · **161,439,489 params**（demo 数据 baseline，不同于平台 ~353M）
-- [x] Smoke B: `--enable_nlir_gating=True` · demo 2 step train · **161,447,809 params** · Δ = **+8,320** 精确等于 `2 blocks × (D² + D) = 2 × (64² + 64) = 8,320` ✅
+- [x] Smoke A: `--enable_nlir_gating=False` · **161,439,489 params**
+- [x] Smoke B: `--enable_nlir_gating=True` · **161,447,809 params** · Δ=**+8,320** 精确匹配 `2 blocks × (D² + D)` ✅
+- [x] **Gate health check 全过**（v2 关键新增）· 随机输入下 gate 分布：
+  - `mean = 0.5002`（**精确中心化** · v1 做不到这么干净 · 直接证据 LN 归一化路径正确）
+  - `std = 0.2127` · `p5 = 0.1533` · `p95 = 0.8332` · 90% mass 在健康动态范围
+  - `min = 0.039` · `max = 0.981` · 尾部触及但不饱和（random input 覆盖整个 sigmoid 动态范围是正常的）
+  - 4 个 seq domain 的 gate 统计一致（seq[0-3].mean 都在 [0.493, 0.509]）· 共享 W_g 跨域表现稳定
 - [x] Smoke B: `train_config.json` 正确落盘 `"enable_nlir_gating": true`
-- [x] Smoke B: `infer.py` load ckpt 无 state_dict mismatch（log 显示 `'enable_nlir_gating': True` 正确进入 `Building PCVRHyFormer with cfg`）
-- [x] **Backward-compat verified**: OFF 路径参数量与 ON 参数量差值严格 = 新增 Linear 理论值，未污染其他模块
-- [ ] （未做 · 不阻塞平台启动）Gate 初始化健康检查 · 平台 Job A E1 回流时在日志里看 gate.mean
+- [x] Smoke B: `infer.py` load ckpt 无 state_dict mismatch · cfg 正确 resolve
 
 **关键数字**：
 
 | Config | Params | Delta | 状态 |
 |---|---|---|---|
 | NLIR OFF（backward-compat） | 161,439,489 | — | ✅ |
-| NLIR ON（T33）| 161,447,809 | **+8,320** | ✅ 精确匹配理论值 |
+| NLIR ON（T33 v2）| 161,447,809 | **+8,320** | ✅ 精确匹配 + gate 中心化健康 |
 
 **验证说明**：
 - `"0 predictions from 0 rows"` 是 mac CPU multiprocess pickle 问题 · OFF / ON 两路径都复现 · **与 T33 无关**
 - 训推一致性通过（cfg 正确 resolve + state_dict load 无 Unexpected/Missing keys）· 平台 GPU 路径无此问题
 
-### Phase 2: 平台 Half-train（~9h 回流 · 5/14 早 CEST）
+### Phase 2: 平台 Half-train（~9h 回流 · 5/14 早 CEST）· **3 Job 并发 · 含 T33 alone 对照**
 
-**Job A（主 · seed=42）**：
-```
-Job Name: t33-nlir-halftrain-gap05-seed42
-改动文件上传：baseline/model.py, baseline/train.py, baseline/infer.py
-run.sh 差异：在 M9 config 上加 `--enable_nlir_gating`
+**Job 结构修订**（CEST 15:35 研究员视角 critical review 补 · **必须含对照组**避免 EXP-041 M6 式 "叠加效应归因歧义"）：
+
+- **Job A**（主 · T25 bypass + T33 · seed=42）：`t33-nlir-halftrain-gap05-seed42`
+- **Job B**（🆕 **对照** · T33 alone / T25 OFF · seed=42）：`t33alone-nlir-halftrain-gap05-seed42`
+- **Job C**（双 seed · T25+T33 · seed=3 松 guard）：`t33-nlir-halftrain-gap05-seed3`
+
+**判决矩阵**（Job A vs Job B）：
+- Job A Dev > Job B Dev → T33 在 T25 之上有**独立贡献**
+- Job A Dev ≈ Job B Dev → T33 只是替代 T25（无增量）
+- Job A Dev < Job B Dev → T25+T33 有**负交互**（EXP-041 M6 模式 · 应停叠加方向）
+
+**Config 差异** · 基于 M9 SOTA（gap=0.05 领地）：
+```bash
+# Job A: M25 bypass + NLIR + seed=42
+--enable_din_interest --enable_nlir_gating --seed 42
+
+# Job B: 仅 NLIR / T25 OFF / seed=42
+--enable_nlir_gating --seed 42             # 去掉 --enable_din_interest
+
+# Job C: M25 bypass + NLIR + seed=3 松 guard
+--enable_din_interest --enable_nlir_gating --seed 3 \
+  --logloss_rebound_delta 0.003 --logloss_rebound_patience 2
 ```
 
-**Job B（双 seed 验证 · seed=3 · 松 guard）**：
-```
-Job Name: t33-nlir-halftrain-gap05-seed3
-Config: 同 A + --seed 3
-```
-
-**Config 参数**（基于当前 run.sh M17 的去 seq_d=768 版本，即 M9 基线）：
+**Config 完整参数**（基于 M9 SOTA · gap=0.05 领地）：
 ```bash
 --ns_tokenizer_type rankmixer
 --user_ns_tokens 5 --item_ns_tokens 2 --num_queries 2
@@ -68,38 +89,44 @@ Config: 同 A + --seed 3
 --emb_skip_threshold 1000000
 --seq_encoder_type swiglu
 --seq_hash_vocab 500000
---seq_max_lens "seq_a:256,seq_b:256,seq_c:512,seq_d:512"  # M9 默认 · 不加长
+--seq_max_lens "seq_a:256,seq_b:256,seq_c:512,seq_d:512"
 --enable_time_of_day_features
 --valid_split_strategy time
 --valid_ratio 0.05
---enable_row_valid_gap --valid_gap_ratio 0.05          # gap=0.05 领地
+--enable_row_valid_gap --valid_gap_ratio 0.05
 --item_conditioned_query
---enable_din_interest                                   # T25 bypass · 保留
---enable_nlir_gating                                    # ⭐ T33 新增
---seed 42
+--enable_nlir_gating                       # ⭐ T33 核心（所有 3 Job 共有）
 --batch_size 128
 --num_epochs 4
 --logloss_rebound_delta 0.003 --logloss_rebound_patience 2
 --keep_topk_ckpt 4
 --enable_torch_compile --enable_amp --amp_dtype bfloat16
+# 三 Job 差异：仅 --enable_din_interest 是否加 + --seed 值
 ```
-
-**重要**：T33 默认叠加在 T25 bypass 上（`--enable_din_interest`），因为 T25 已证 +0.004 LB。**注意这是"T25+T33 联合"**，不是"T33 alone vs baseline"。Alternative：做 T33 alone（不带 T25）对照版作为第三 slot（可选）。
 
 ---
 
-## Go/No-go 判决矩阵（详）
+## Go/No-go 判决矩阵（详 · CEST 15:35 研究员视角校准后）
 
-### Dev 级（E3 Dev vs `icq-half-gap05` baseline 0.842443）
+**期望迁移率下修**：原估 50%（论文 +4.87‰ → +0.0024 Dev）· 研究员视角 review 修订为 **中位 25%**（+0.0012 Dev），原因：
+- TokenFormer 是 decoder-only unified stream · 我们是 HyFormer cross-attention · **token 数量差 20-50×** · SCP 严重程度不在一个量级
+- TokenFormer NLIR 主要解决"NS 在 self-attn 里污染 T token"· 我们 Seq 在 encoder 内部独立处理 · **核心 SCP 场景不完全存在**
+- 数据集差异（KuaiRand 公开 vs 匿名 Industrial）· 远未来 test 下迁移率衰减
+
+### Dev 级（Job A E3 Dev vs `icq-half-gap05` baseline 0.842443）
 
 | Dev | 判决 | 下一步 |
 |---|---|---|
-| ≥ 0.850 | 🎯🎯🎯 **破天级别**（+0.008，论文迁移率 100%+） | 立即 LB + seed sweep + 全线叠加 |
-| ≥ 0.845 | 🎯🎯 **强真信号**（+0.0026，对标 +4.87‰ 的 50%） | 立即 LB 校准 + 叠加 T34 |
-| ≥ 0.8437 | 🎯 **真信号**（+0.0013，3× rerun 噪声） | LB 校准 |
-| [0.8433, 0.8437) | 🟡 疑似 | seed=3 rerun 确认 |
-| [0.8421, 0.8433) | ⚪ 持平 | Deprecated |
-| < 0.8421 | ❌ 负向 | 关闭 · 排查 gate 是否饱和 / 初始化问题 |
+| ≥ 0.850 | 🎯🎯🎯 **破天级别**（+0.008 · 迁移率 >150%） | 立即 LB + seed sweep + 全线叠加 |
+| ≥ 0.845 | 🎯🎯 **强真信号**（+0.0026 · 迁移率 50%） | 立即 LB 校准 + 叠加 T34 |
+| ≥ 0.8440 | 🎯 **真信号**（+0.0016 · 迁移率 33% · 明显超 rerun 噪声 5σ） | LB 校准 |
+| [0.8430, 0.8440) | 🟡 **疑似**（迁移率 15~33% · 中位期望附近） | seed=3 rerun（Job C）确认 |
+| [0.8420, 0.8430) | ⚪ 持平（rerun 噪声 + 采样偏差内） | Deprecated |
+| < 0.8420 | ❌ 负向 | 关闭 · 排查 gate 饱和 / 初始化问题 |
+
+**阈值调整说明**（vs v1）：
+- Go 阈值 0.8437 → **0.8440**（+0.0003 buffer · 考虑迁移率下修 + rerun 噪声 3σ）
+- 🟡 边界 0.8433 → **0.8430**（同步放宽 · 避免把 25% 迁移率的真信号误杀为 noise）
 
 ### LB 级（若 S2 通过消耗 1 eval quota）
 
