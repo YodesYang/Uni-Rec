@@ -156,6 +156,20 @@ def parse_args() -> argparse.Namespace:
                              'item_id fid in seq_c. Requires uploading a '
                              'custom infer.py that reads this flag from '
                              'train_config.json.')
+    parser.add_argument('--enable_eda_dump', action='store_true', default=False,
+                        help='EDA · collect Q1 (user/item_id frequency), '
+                             'Q2 (per-fid null rate + null-vs-notnull CVR '
+                             'gap), Q4 (seq true length), Q5 (time_diff '
+                             'quantiles) statistics during training. '
+                             'Written to training_summary.json["eda"] at '
+                             'end of run. Only active on training path '
+                             '(is_training=True); zero effect on inference. '
+                             'See EXP-042 for rationale. Overhead: ~2-5% '
+                             'per batch due to reservoir sampling.')
+    parser.add_argument('--eda_reservoir_size', type=int, default=20000,
+                        help='Reservoir sample size per seq domain for '
+                             'time_diff / seq_length quantile estimation '
+                             '(20k gives p1~p99.9 accuracy ~0.1%).')
     parser.add_argument('--eval_every_n_steps', type=int, default=0,
                         help='Run validation every N steps '
                              '(0 = only at the end of each epoch)')
@@ -630,6 +644,8 @@ def main() -> None:
             [int(s.strip()) for s in args.disable_seq_fids.split(',') if s.strip()]
             or None
         ),
+        enable_eda_dump=args.enable_eda_dump,
+        eda_reservoir_size=args.eda_reservoir_size,
     )
 
     # ---- NS groups ----

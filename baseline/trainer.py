@@ -468,6 +468,23 @@ class PCVRHyFormerRankingTrainer:
                 if k in self.train_config
             }
 
+        # EDA data (if dataset collected it during training)
+        try:
+            train_ds = getattr(self.train_loader, 'dataset', None)
+            if train_ds is not None and hasattr(train_ds, 'finalize_eda'):
+                eda_data = train_ds.finalize_eda()
+                if eda_data is not None:
+                    summary['eda'] = eda_data
+                    logging.info(
+                        f"[summary] EDA collected: "
+                        f"{eda_data['global']['total_samples_observed']} "
+                        f"samples observed, "
+                        f"user_id_distinct={eda_data['q1_user_id'].get('distinct', 0)}, "
+                        f"item_id_distinct={eda_data['q1_item_id'].get('distinct', 0)}"
+                    )
+        except Exception as e:
+            logging.warning(f"[summary] EDA finalize failed: {e}")
+
         logging.info("[summary] ===== Training Summary =====")
         logging.info(f"[summary] stop_reason={stop_reason}")
         logging.info(

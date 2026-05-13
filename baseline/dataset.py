@@ -293,6 +293,8 @@ class PCVRParquetDataset(IterableDataset):
         id_mask_prob: float = 0.0,
         id_mask_seq_domains: Optional[List[str]] = None,
         disable_seq_fids: Optional[List[int]] = None,
+        enable_eda_dump: bool = False,
+        eda_reservoir_size: int = 20000,
     ) -> None:
         """
         Args:
@@ -411,6 +413,11 @@ class PCVRParquetDataset(IterableDataset):
         self.timestamp_max = timestamp_max
         self.enable_count_features = enable_count_features
         self.enable_seq_stats_features = enable_seq_stats_features
+        self.enable_eda_dump = bool(enable_eda_dump)
+        self.eda_reservoir_size = int(eda_reservoir_size)
+        # EDA state (lazy init on first batch to avoid unused allocation).
+        # Layout documented at _update_eda_stats() / finalize_eda().
+        self._eda_state: Optional[Dict[str, Any]] = None
         self.enable_history_cvr_features = enable_history_cvr_features
         self.history_cvr_cache_path = history_cvr_cache_path
         self.history_cvr_time_mode = history_cvr_time_mode
@@ -802,6 +809,288 @@ class PCVRParquetDataset(IterableDataset):
             logging.info(f"OOB stats written to {path}")
         else:
             logging.info(msg)
+
+    def _init_eda_state(self) -> None:
+        """Lazy init EDA accumulator on first batch."""
+        self._eda_state = {
+            # Q1: user_id / item_id distribution
+            'total_samples': 0,
+            'total_pos': 0,  # label==1 count
+            'user_id_counter': defaultdict(int),  # user_id -> count
+            'item_id_counter': defaultdict(int),
+            # Q2: per-fid null_rate + null_CVR_gap (for user_int + item_int)
+            # Accumulators per fid: {fid: [n_null, n_total, pos_null, pos_notnull]}
+            'user_int_missing': defaultdict(lambda: [0, 0, 0, 0]),
+            'item_int_missing': defaultdict(lambda: [0, 0, 0, 0]),
+            # Q5: time_diff reservoir sample (10k samples per seq domain)
+            # reservoir[domain] = {'samples': list, 'seen': int}
+            'time_diff_reservoir': {
+                d: {'samples': [], 'seen': 0}
+                for d in self.seq_domains
+            },
+            # Q4 (bonus): seq true_length reservoir (non-padding token count)
+            'seq_length_reservoir': {
+                d: {'samples': [], 'seen': 0}
+                for d in self.seq_domains
+            },
+        }
+
+    def _reservoir_extend(
+        self,
+        entry: Dict[str, Any],
+        new_values: "npt.NDArray[np.int64]",
+        max_size: int,
+    ) -> None:
+        """Reservoir sampling · extend entry with new numpy values.
+
+        Entry layout: {'samples': list, 'seen': int}
+        Uses classic Algorithm R: for each new value, if reservoir not full add;
+        else replace a random existing slot with prob k/seen. Implemented in
+        numpy vectorized form for speed.
+        """
+        samples = entry['samples']
+        seen = entry['seen']
+        need = max_size - len(samples)
+        if need > 0:
+            # Phase 1: fill reservoir directly
+            take = min(need, len(new_values))
+            samples.extend(new_values[:take].tolist())
+            seen += take
+            remaining = new_values[take:]
+        else:
+            remaining = new_values
+        # Phase 2: random-replace for the rest
+        if len(remaining) > 0:
+            # For each of `remaining`, pick position in [0, seen+i) and replace
+            # if pos < max_size. Vectorize via numpy for speed.
+            positions = np.random.randint(
+                low=0, high=seen + np.arange(1, len(remaining) + 1),
+                size=len(remaining),
+            )
+            replace_mask = positions < max_size
+            replace_positions = positions[replace_mask]
+            replace_values = remaining[replace_mask]
+            for pos, val in zip(replace_positions, replace_values):
+                samples[int(pos)] = int(val)
+            seen += len(remaining)
+        entry['seen'] = seen
+
+    def _update_eda_stats(
+        self,
+        batch: "pa.RecordBatch",
+        B: int,
+        labels: "npt.NDArray[np.int64]",
+        user_int: "npt.NDArray[np.int64]",
+        item_int: "npt.NDArray[np.int64]",
+        timestamps: "npt.NDArray[np.int64]",
+    ) -> None:
+        """Update EDA accumulators with one batch worth of data.
+
+        Triggered from ``_convert_batch`` when ``enable_eda_dump=True`` and
+        ``is_training=True`` (we skip during inference to avoid contamination).
+
+        Collects:
+        - Q1: user_id/item_id frequency count (for repetition analysis)
+        - Q2: per-fid null_rate and null-vs-notnull CVR gap
+        - Q4: reservoir-sampled sequence true lengths per domain
+        - Q5: reservoir-sampled time_diff values per sequence domain
+        """
+        if self._eda_state is None:
+            self._init_eda_state()
+        st = self._eda_state
+
+        # Q1: user_id / item_id frequency (bounded size; cap at 200k each to
+        # avoid unbounded memory growth on the full 1.9M train set).
+        if len(st['user_id_counter']) < 200000 or len(st['item_id_counter']) < 200000:
+            uids = batch.column(self._col_idx['user_id']).to_pylist()
+            iids = batch.column(self._col_idx['item_id']).to_pylist()
+            for uid, iid in zip(uids, iids):
+                if uid is not None and len(st['user_id_counter']) < 200000:
+                    st['user_id_counter'][int(uid)] += 1
+                if iid is not None and len(st['item_id_counter']) < 200000:
+                    st['item_id_counter'][int(iid)] += 1
+
+        # Q1 (always): total sample / pos count
+        st['total_samples'] += B
+        st['total_pos'] += int(labels.sum())
+
+        # Q2: per-fid null_rate + CVR gap (user_int)
+        # A slot is "null" iff the materialized value is 0 (since fill_null(0)
+        # + arr[arr<=0]=0 collapsed both null and <=0 into 0 upstream).
+        # For dim>1 (multi-hot), we consider the fid "null" iff the entire
+        # row's slot is all zeros.
+        for ci, dim, offset, _vs in self._user_int_plan:
+            fid_vals = user_int[:, offset:offset + dim]
+            is_null = (fid_vals == 0).all(axis=1)  # (B,) bool
+            n_null = int(is_null.sum())
+            n_total = B
+            pos_null = int(labels[is_null].sum())
+            pos_notnull = int(labels[~is_null].sum())
+            acc = st['user_int_missing'][ci]
+            acc[0] += n_null
+            acc[1] += n_total
+            acc[2] += pos_null
+            acc[3] += pos_notnull
+        for ci, dim, offset, _vs in self._item_int_plan:
+            fid_vals = item_int[:, offset:offset + dim]
+            is_null = (fid_vals == 0).all(axis=1)
+            n_null = int(is_null.sum())
+            n_total = B
+            pos_null = int(labels[is_null].sum())
+            pos_notnull = int(labels[~is_null].sum())
+            acc = st['item_int_missing'][ci]
+            acc[0] += n_null
+            acc[1] += n_total
+            acc[2] += pos_null
+            acc[3] += pos_notnull
+
+        # Q4 + Q5: per-domain seq true length + time_diff reservoir
+        for domain in self.seq_domains:
+            _, ts_ci = self._seq_plan[domain]
+            if ts_ci is None:
+                continue
+            ts_col = batch.column(ts_ci)
+            ts_offs = ts_col.offsets.to_numpy()
+            ts_vals = ts_col.values.to_numpy().astype(np.int64)
+            max_len = self._seq_maxlen[domain]
+            # Build per-sample true lengths and collect time_diffs.
+            lengths = np.zeros(B, dtype=np.int64)
+            time_diffs_list: List[np.ndarray] = []
+            for i in range(B):
+                s = int(ts_offs[i])
+                e = int(ts_offs[i + 1])
+                if e <= s:
+                    continue
+                vals = ts_vals[s:s + min(e - s, max_len)]
+                # true length = number of non-padding (>0) tokens
+                valid = vals > 0
+                lengths[i] = int(valid.sum())
+                if valid.any():
+                    valid_ts = vals[valid]
+                    time_diffs_list.append(timestamps[i] - valid_ts)
+
+            # Update length reservoir
+            self._reservoir_extend(
+                st['seq_length_reservoir'][domain],
+                lengths,
+                self.eda_reservoir_size,
+            )
+            # Update time_diff reservoir (flatten all samples' time diffs)
+            if time_diffs_list:
+                flat_td = np.concatenate(time_diffs_list)
+                # Keep only non-negative (skip anomalies where seq_ts > ref_ts)
+                flat_td = flat_td[flat_td >= 0]
+                if len(flat_td) > 0:
+                    self._reservoir_extend(
+                        st['time_diff_reservoir'][domain],
+                        flat_td,
+                        self.eda_reservoir_size,
+                    )
+
+    def finalize_eda(self) -> Optional[Dict[str, Any]]:
+        """Called at end of training · returns EDA summary dict.
+
+        Returns None if EDA was never active (no batches processed with
+        ``enable_eda_dump=True`` + ``is_training=True``).
+
+        Output is JSON-serializable (plain dict of scalars + small arrays)
+        so it can be embedded directly in training_summary.json.
+        """
+        if self._eda_state is None:
+            return None
+        st = self._eda_state
+        total = max(st['total_samples'], 1)
+        global_cvr = st['total_pos'] / total
+
+        # Q1: user_id / item_id repetition analysis
+        def _freq_bucket_stats(counter: Dict[int, int]) -> Dict[str, Any]:
+            freqs = np.array(list(counter.values()), dtype=np.int64)
+            if len(freqs) == 0:
+                return {'distinct': 0, 'freq_1': 0.0, 'freq_2_10': 0.0,
+                        'freq_gt10': 0.0, 'max_freq': 0, 'mean_freq': 0.0}
+            return {
+                'distinct': int(len(freqs)),
+                'freq_1': float((freqs == 1).sum() / len(freqs)),
+                'freq_2_10': float(((freqs >= 2) & (freqs <= 10)).sum() / len(freqs)),
+                'freq_gt10': float((freqs > 10).sum() / len(freqs)),
+                'max_freq': int(freqs.max()),
+                'mean_freq': float(freqs.mean()),
+                'total_observations': int(freqs.sum()),
+                'cap_reached': bool(len(freqs) >= 200000),
+            }
+
+        # Q2: per-fid missing analysis (user_int + item_int)
+        def _missing_summary(
+            missing_accum: Dict[int, List[int]],
+            plan: List[Tuple[int, int, int, int]],
+        ) -> List[Dict[str, Any]]:
+            out = []
+            # Invert ci → fid via schema: plan entries are (ci, dim, offset, vs);
+            # but ci only maps back to col name, not fid. So here we return
+            # results keyed by ci and include column name for interpretability.
+            # schema_names lookup:
+            col_name_by_idx = {v: k for k, v in self._col_idx.items()}
+            for ci, _dim, _offset, _vs in plan:
+                if ci not in missing_accum:
+                    continue
+                n_null, n_total, pos_null, pos_notnull = missing_accum[ci]
+                n_notnull = n_total - n_null
+                cvr_null = (pos_null / n_null) if n_null > 0 else 0.0
+                cvr_notnull = (pos_notnull / n_notnull) if n_notnull > 0 else 0.0
+                out.append({
+                    'col': col_name_by_idx.get(ci, f'ci_{ci}'),
+                    'null_rate': float(n_null / n_total),
+                    'cvr_null': float(cvr_null),
+                    'cvr_notnull': float(cvr_notnull),
+                    'cvr_gap': float(cvr_null - cvr_notnull),
+                    'n_null': int(n_null),
+                    'n_notnull': int(n_notnull),
+                })
+            # Sort by |cvr_gap| desc so top entries are highest-signal missings
+            out.sort(key=lambda x: -abs(x['cvr_gap']))
+            return out
+
+        # Q4 + Q5: reservoir → quantiles
+        def _quantiles(entry: Dict[str, Any]) -> Dict[str, Any]:
+            samples = entry['samples']
+            if not samples:
+                return {'seen': entry['seen'], 'reservoir_size': 0}
+            arr = np.array(samples, dtype=np.int64)
+            qs = [1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9]
+            return {
+                'seen': entry['seen'],
+                'reservoir_size': len(arr),
+                'mean': float(arr.mean()),
+                'min': int(arr.min()),
+                'max': int(arr.max()),
+                'quantiles': {
+                    f'p{q}': float(np.percentile(arr, q)) for q in qs
+                },
+            }
+
+        return {
+            'version': 1,
+            'collected_at': 'end_of_training',
+            'global': {
+                'total_samples_observed': st['total_samples'],
+                'total_pos': st['total_pos'],
+                'global_cvr': global_cvr,
+            },
+            'q1_user_id': _freq_bucket_stats(st['user_id_counter']),
+            'q1_item_id': _freq_bucket_stats(st['item_id_counter']),
+            'q2_user_int_missing_top': _missing_summary(
+                st['user_int_missing'], self._user_int_plan)[:20],
+            'q2_item_int_missing_top': _missing_summary(
+                st['item_int_missing'], self._item_int_plan)[:14],
+            'q4_seq_length': {
+                d: _quantiles(st['seq_length_reservoir'][d])
+                for d in self.seq_domains
+            },
+            'q5_time_diff': {
+                d: _quantiles(st['time_diff_reservoir'][d])
+                for d in self.seq_domains
+            },
+        }
 
     def _pad_varlen_int_column(
         self,
@@ -1253,6 +1542,19 @@ class PCVRParquetDataset(IterableDataset):
             # 'label' field was already collapsed to binary (label_type==2).
             result['_diag_label_type_raw'] = torch.from_numpy(
                 raw_label_types.astype(np.int8))
+
+            # EDA stats collection (runs only when enabled · training path only)
+            # Uses the already-materialized user_int / item_int / timestamps /
+            # labels buffers to avoid duplicate Arrow → numpy conversion.
+            if self.enable_eda_dump:
+                self._update_eda_stats(
+                    batch=batch,
+                    B=B,
+                    labels=labels,
+                    user_int=user_int,
+                    item_int=item_int,
+                    timestamps=timestamps,
+                )
 
         return self._filter_result_rows(result, keep_mask)
 
@@ -1748,6 +2050,8 @@ def get_pcvr_data(
     id_mask_prob: float = 0.0,
     id_mask_seq_domains: Optional[List[str]] = None,
     disable_seq_fids: Optional[List[int]] = None,
+    enable_eda_dump: bool = False,
+    eda_reservoir_size: int = 20000,
     **kwargs: Any,
 ) -> Tuple[DataLoader, DataLoader, Optional[DataLoader], PCVRParquetDataset]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
@@ -2332,8 +2636,23 @@ def get_pcvr_data(
         id_mask_prob=id_mask_prob,
         id_mask_seq_domains=id_mask_seq_domains,
         disable_seq_fids=disable_seq_fids,
+        enable_eda_dump=enable_eda_dump,
+        eda_reservoir_size=eda_reservoir_size,
     )
     use_cuda = torch.cuda.is_available()
+    # EDA accumulation only works when the dataset object is shared with the
+    # trainer process (main process can call dataset.finalize_eda()).
+    # With num_workers>0 the dataloader workers hold dataset *copies* so the
+    # main process would see an empty _eda_state. Force num_workers=0 for EDA
+    # runs to keep it simple and robust (throughput cost is acceptable for a
+    # one-off diagnostic run).
+    if enable_eda_dump and num_workers > 0:
+        logging.warning(
+            f"[EDA] enable_eda_dump=True forces num_workers 0 "
+            f"(was {num_workers}); dataset._eda_state is only updated in the "
+            "main process. Expect ~20% throughput hit vs multi-worker run."
+        )
+        num_workers = 0
     _train_kw = {}
     if num_workers > 0:
         _train_kw['persistent_workers'] = True
