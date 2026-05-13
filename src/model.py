@@ -655,6 +655,222 @@ class DINInterestExtractor(nn.Module):
         return merged
 
 
+class DCNCrossBypass(nn.Module):
+    """T34 / EXP-049 · DCN-V2 cross-feature bypass.
+
+    Builds an explicit cross-feature signal from selected user/item scalar
+    fids, then concatenates the resulting (B, D) vector to the backbone
+    output BEFORE the classifier — the same bypass pattern used by
+    ``_apply_dense_bypass`` (T25 dense) and ``_apply_din_interest_bypass``
+    (T25 DIN). Orthogonal to all attention-based paths.
+
+    Mechanism (DCN-V2, Wang et al. 2021):
+        x0   = Linear_in(concat([emb(fid_i) for fid_i in selected]))   (B, D)
+        x_l  = x_{l-1} + x0 * (W_l x_{l-1} + b_l)                       (B, D)
+        out  = LayerNorm(x_L)                                           (B, D)
+
+    The "outer-product gating" (``x0 * (W x + b)``) lets one fid's
+    embedding modulate every other fid's contribution at every layer —
+    DCN-V2's signature explicit cross. ``num_cross_layers`` controls
+    interaction order (2 layers ≈ 4-th order interactions).
+
+    Embedding tables are SHARED with the NS tokenizer (passed in by
+    PCVRHyFormer.__init__) so the parameter overhead is purely:
+      * input projection: (K_u + K_i) * emb_dim * d_model
+      * cross layers:     num_cross_layers * (d_model^2 + d_model)
+      * output LN:        2 * d_model
+    Total ~42k dense params at K_u=2, K_i=5, d_model=64, layers=2.
+
+    Iron-law compliance:
+      * "Independent Parameters Iron Law": the cross layers are NOT
+        shared with any other module; embeddings ARE shared with NS
+        tokenizer (intentional — same fid representation, different
+        interaction view), which is how DCN papers always do it.
+      * "Stacking Seed Sensitivity": single new flag
+        ``enable_dcn_cross`` default off → bit-identical when off.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        emb_dim: int,
+        user_int_feature_specs: List[Tuple[int, int, int]],
+        item_int_feature_specs: List[Tuple[int, int, int]],
+        user_fids: List[int],
+        item_fids: List[int],
+        num_cross_layers: int = 2,
+    ) -> None:
+        """Initializes DCNCrossBypass.
+
+        Args:
+            d_model: Output dim (matches backbone output for concat).
+            emb_dim: Per-fid embedding dim (matches NS tokenizer ``emb_dim``).
+            user_int_feature_specs: Schema of user_int features in the
+                order they appear in ``ModelInput.user_int_feats`` —
+                ``[(vocab_size, offset, length), ...]``. Used to resolve
+                the (offset, length) of each requested user fid.
+            item_int_feature_specs: Same for item_int.
+            user_fids: List of user fid INDICES into ``user_int_feature_specs``
+                (NOT the raw fid number from schema.json — the caller
+                must map fid number → list index before constructing).
+            item_fids: Same for item.
+            num_cross_layers: Number of stacked DCN-V2 layers. Default 2.
+
+        Selected fids MUST satisfy ``length == 1`` (scalar). Multi-hot
+        fids would create ambiguity (which slot to pick?) and are
+        rejected with ValueError to fail loudly.
+        """
+        super().__init__()
+
+        if num_cross_layers < 1:
+            raise ValueError(
+                f"DCNCrossBypass: num_cross_layers must be >= 1, "
+                f"got {num_cross_layers}")
+
+        self.d_model = d_model
+        self.emb_dim = emb_dim
+        self.num_cross_layers = num_cross_layers
+
+        self._validate_scalar(user_fids, user_int_feature_specs, side='user')
+        self._validate_scalar(item_fids, item_int_feature_specs, side='item')
+
+        self.user_fids = list(user_fids)
+        self.item_fids = list(item_fids)
+
+        # (offset, length) tuples — kept for forward-time slicing. We
+        # also use them at __init__ to assert scalar.
+        self.user_offsets: List[int] = [
+            user_int_feature_specs[fi][1] for fi in self.user_fids
+        ]
+        self.item_offsets: List[int] = [
+            item_int_feature_specs[fi][1] for fi in self.item_fids
+        ]
+
+        num_selected = len(self.user_fids) + len(self.item_fids)
+        if num_selected < 2:
+            raise ValueError(
+                f"DCNCrossBypass: need >= 2 selected fids for cross "
+                f"feature to make sense, got user={len(self.user_fids)}, "
+                f"item={len(self.item_fids)}")
+
+        # Input projection: (K_u + K_i) * emb_dim → d_model + LayerNorm
+        # Mirrors the dense-bypass projection style for consistency.
+        self.input_proj = nn.Sequential(
+            nn.Linear(num_selected * emb_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.SiLU(),
+        )
+
+        # DCN-V2 cross layers — each is a single Linear(D, D) plus bias.
+        # Forward pass implements x_{l+1} = x_0 * (W_l x_l + b_l) + x_l.
+        # Bias zero-init keeps layer-0 forward = x_0 * (W_l x_l) + x_l ≈
+        # x_l initially (small interaction perturbation), so the model
+        # gracefully degrades to "x_0 bypass + LayerNorm" at init,
+        # matching DCN-V2 paper's recommended starting regime.
+        self.cross_W = nn.ModuleList([
+            nn.Linear(d_model, d_model) for _ in range(num_cross_layers)
+        ])
+        for layer in self.cross_W:
+            nn.init.xavier_normal_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+        # Output LayerNorm — keeps the cross output magnitude in line
+        # with the backbone output (which is also LayerNorm'd) so the
+        # downstream classifier sees comparable scales for both.
+        self.out_ln = nn.LayerNorm(d_model)
+
+    @staticmethod
+    def _validate_scalar(
+        fid_indices: List[int],
+        feature_specs: List[Tuple[int, int, int]],
+        side: str,
+    ) -> None:
+        """Ensures every selected fid is scalar (length == 1).
+
+        Multi-hot fids would require a pooling decision (mean? first
+        nonzero?); rejecting them at __init__ is safer than silently
+        picking an option. If a user *wants* a multi-hot fid in the
+        cross they should mean-pool it upstream and add it as a
+        synthetic dense feature.
+        """
+        for idx in fid_indices:
+            if not 0 <= idx < len(feature_specs):
+                raise ValueError(
+                    f"DCNCrossBypass: {side}_fids contains out-of-range "
+                    f"index {idx} (valid range "
+                    f"[0, {len(feature_specs)}))")
+            vs, _offset, length = feature_specs[idx]
+            if length != 1:
+                raise ValueError(
+                    f"DCNCrossBypass: {side}_fids[{idx}] has length="
+                    f"{length}, but only scalar fids (length==1) are "
+                    f"supported. Reject loudly to avoid silent "
+                    f"mis-pooling.")
+            if vs <= 0:
+                raise ValueError(
+                    f"DCNCrossBypass: {side}_fids[{idx}] has vocab_size="
+                    f"{vs}, no embedding to draw from.")
+
+    def forward(
+        self,
+        user_int_feats: torch.Tensor,
+        item_int_feats: torch.Tensor,
+        user_embs: nn.ModuleList,
+        item_embs: nn.ModuleList,
+        user_emb_index: List[int],
+        item_emb_index: List[int],
+    ) -> torch.Tensor:
+        """Builds the cross output (B, D) from selected fids.
+
+        Args:
+            user_int_feats: (B, total_user_int_dim) raw integer features.
+            item_int_feats: Same for item.
+            user_embs: ``nn.ModuleList`` of NS-tokenizer user embeddings.
+                ``user_embs[user_emb_index[fid_idx]]`` is the table for
+                ``fid_idx``-th user fid (skipped → -1).
+            item_embs: Same for item.
+            user_emb_index: Maps fid_idx → real index in ``user_embs``,
+                with -1 meaning "no embedding (filtered)". A selected
+                fid landing on -1 raises (would have been caught by
+                ``_validate_scalar`` if vocab_size>0; but if a user
+                selected a fid that the tokenizer filtered via
+                ``emb_skip_threshold`` we surface that here).
+            item_emb_index: Same for item.
+
+        Returns:
+            (B, d_model) tensor ready to concat to backbone output.
+        """
+        embs_to_cat: List[torch.Tensor] = []
+
+        for fi, offset in zip(self.user_fids, self.user_offsets):
+            real = user_emb_index[fi]
+            if real == -1:
+                raise RuntimeError(
+                    f"DCNCrossBypass: user fid index {fi} has no "
+                    f"embedding (filtered by emb_skip_threshold?). "
+                    f"Reduce --dcn_cross_user_fids or raise "
+                    f"--emb_skip_threshold.")
+            vals = user_int_feats[:, offset].long()  # (B,)
+            embs_to_cat.append(user_embs[real](vals))  # (B, emb_dim)
+
+        for fi, offset in zip(self.item_fids, self.item_offsets):
+            real = item_emb_index[fi]
+            if real == -1:
+                raise RuntimeError(
+                    f"DCNCrossBypass: item fid index {fi} has no "
+                    f"embedding (filtered by emb_skip_threshold?).")
+            vals = item_int_feats[:, offset].long()
+            embs_to_cat.append(item_embs[real](vals))
+
+        x_concat = torch.cat(embs_to_cat, dim=-1)  # (B, K*emb_dim)
+        x0 = self.input_proj(x_concat)              # (B, d_model)
+
+        x = x0
+        for layer in self.cross_W:
+            x = x0 * layer(x) + x  # DCN-V2 cross step
+        return self.out_ln(x)
+
+
 class MultiSeqQueryGenerator(nn.Module):
     """Multi-sequence query generation module.
 
@@ -2160,6 +2376,23 @@ class PCVRHyFormer(nn.Module):
         # projection". Adds ~130k-250k dense params. Zero effect when
         # ns_tokenizer_type != 'rankmixer' (group tokenizer path).
         enable_fafe: bool = False,
+        # T34 / EXP-049 · DCN-V2 cross-feature bypass. Builds an explicit
+        # outer-product cross signal from selected user_int × item_int
+        # scalar fids (top correlations from EDA-correlation 2026-05-13)
+        # and concatenates a (B, D) vector to the classifier input — same
+        # bypass pattern as T25 dense / DIN. Orthogonal to all
+        # attention paths; default off (zero param overhead). Adds
+        # ~42k dense params at default config. Embeddings shared with
+        # NS tokenizer (DCN-paper convention; same fid representation,
+        # different interaction view).
+        # 'user_fids' / 'item_fids' are SCHEMA fid numbers (the X in
+        # 'user_int_feats_X'), NOT list indices. PCVRHyFormer maps
+        # them to indices internally via user_int_feature_specs offset
+        # ordering.
+        enable_dcn_cross: bool = False,
+        dcn_cross_user_fids: Optional[List[int]] = None,
+        dcn_cross_item_fids: Optional[List[int]] = None,
+        dcn_cross_layers: int = 2,
     ) -> None:
         super().__init__()
 
@@ -2302,6 +2535,43 @@ class PCVRHyFormer(nn.Module):
 
         # T33 · NLIR gating flag propagated to every MultiSeqHyFormerBlock.
         self.enable_nlir_gating = bool(enable_nlir_gating)
+
+        # T34 / EXP-049 · DCN-V2 cross-feature bypass. The actual module
+        # is constructed AFTER the NS tokenizers (which own the embedding
+        # tables we share) — see further down in __init__. We only stash
+        # the flags here so the classifier-dim computation below can
+        # account for the (B, D) bypass vector.
+        self.enable_dcn_cross = bool(enable_dcn_cross)
+        self._dcn_cross_user_fids_arg = dcn_cross_user_fids
+        self._dcn_cross_item_fids_arg = dcn_cross_item_fids
+        self._dcn_cross_layers_arg = int(dcn_cross_layers)
+
+        # T34 · DCN cross feature bypass module. Constructed here (after
+        # NS tokenizers — they own the embedding tables we share) and
+        # BEFORE classifier dim computation (so its slot can be counted).
+        #
+        # ``dcn_cross_user_fids`` / ``dcn_cross_item_fids`` are LIST
+        # INDICES into ``user_int_feature_specs`` / ``item_int_feature_specs``
+        # (NOT raw schema fid numbers — train.py / infer.py is
+        # responsible for mapping ``--dcn_cross_user_fids 1 49`` (raw
+        # fid numbers) → list indices via
+        # ``user_int_schema.entries`` lookup before building model_args.
+        # This keeps the model API typed and decoupled from schema
+        # ordering, and lets train.py / infer.py validate fid
+        # availability with a clear error message.
+        self.dcn_cross: Optional[DCNCrossBypass] = None
+        if self.enable_dcn_cross:
+            user_fid_indices = list(self._dcn_cross_user_fids_arg or [])
+            item_fid_indices = list(self._dcn_cross_item_fids_arg or [])
+            self.dcn_cross = DCNCrossBypass(
+                d_model=d_model,
+                emb_dim=emb_dim,
+                user_int_feature_specs=user_int_feature_specs,
+                item_int_feature_specs=item_int_feature_specs,
+                user_fids=user_fid_indices,
+                item_fids=item_fid_indices,
+                num_cross_layers=self._dcn_cross_layers_arg,
+            )
 
         # ================== Check d_model % T == 0 constraint (full mode only) ==================
         T = num_queries * self.num_sequences + self.num_ns
@@ -2478,10 +2748,12 @@ class PCVRHyFormer(nn.Module):
 
         # Classifier input dimension: d_model normally; d_model*2 when dense
         # bypass is active because the bypass vector is concatenated to output;
-        # plus d_model when DIN interest is active (same pattern).
+        # plus d_model when DIN interest is active (same pattern); plus
+        # d_model when T34 DCN cross bypass is active (same pattern).
         clsfier_in_dim = d_model * (
             1 + (1 if self.has_dense_bypass else 0)
               + (1 if self.enable_din_interest else 0)
+              + (1 if self.enable_dcn_cross else 0)
         )
 
         # Classifier
@@ -2836,6 +3108,34 @@ class PCVRHyFormer(nn.Module):
             target_repr, seq_tokens_list, seq_masks_list)  # (B, D)
         return torch.cat([output, din_interest], dim=-1)
 
+    def _apply_dcn_cross_bypass(
+        self,
+        output: torch.Tensor,
+        inputs: ModelInput,
+    ) -> torch.Tensor:
+        """T34 / EXP-049 · Concatenate DCN cross output to backbone.
+
+        Only called when ``enable_dcn_cross`` is True. The cross module
+        REUSES the NS tokenizer embedding tables (DCN-paper convention:
+        same fid representation, different interaction view) so it
+        does not introduce new sparse params.
+
+        Layout-wise the cross vector is appended at the END of the
+        backbone output (so its column position is stable across
+        flag combinations: dense_bypass / din_interest / dcn_cross).
+        Order in the final classifier input: backbone | dense_bypass |
+        din_interest | dcn_cross.
+        """
+        cross = self.dcn_cross(
+            user_int_feats=inputs.user_int_feats,
+            item_int_feats=inputs.item_int_feats,
+            user_embs=self.user_ns_tokenizer.embs,
+            item_embs=self.item_ns_tokenizer.embs,
+            user_emb_index=self.user_ns_tokenizer._emb_index,
+            item_emb_index=self.item_ns_tokenizer._emb_index,
+        )  # (B, D)
+        return torch.cat([output, cross], dim=-1)
+
     def _compute_target_repr(self, ns_tokens: torch.Tensor) -> torch.Tensor:
         """Slice the item_ns block from ns_tokens and mean-pool to (B, D).
 
@@ -2930,6 +3230,9 @@ class PCVRHyFormer(nn.Module):
             output = self._apply_din_interest_bypass(
                 output, seq_tokens_list, seq_masks_list, ns_tokens)
 
+        if self.enable_dcn_cross:
+            output = self._apply_dcn_cross_bypass(output, inputs)
+
         logits = self.clsfier(output)
         return logits
 
@@ -2963,6 +3266,9 @@ class PCVRHyFormer(nn.Module):
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(
                 output, seq_tokens_list, seq_masks_list, ns_tokens)
+
+        if self.enable_dcn_cross:
+            output = self._apply_dcn_cross_bypass(output, inputs)
 
         logits = self.clsfier(output)
         return logits, output

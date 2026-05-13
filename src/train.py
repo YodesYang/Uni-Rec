@@ -486,6 +486,40 @@ def parse_args() -> argparse.Namespace:
                              'for 46 user fids @ emb_dim=64. Zero effect on group '
                              'tokenizer path (ns_tokenizer_type=group).')
 
+    parser.add_argument('--enable_dcn_cross', action='store_true', default=False,
+                        help='T34 / EXP-049: enable DCN-V2 cross-feature bypass. '
+                             'Builds an explicit outer-product cross signal from '
+                             'selected user_int x item_int scalar fids (top '
+                             'correlations from EDA-correlation 2026-05-13) and '
+                             'concatenates a (B, D) vector to the classifier input '
+                             '(same bypass pattern as T25 dense / DIN). Orthogonal '
+                             'to all attention paths. Adds ~42k dense params at '
+                             'default config. Embeddings shared with NS tokenizer.')
+    parser.add_argument('--dcn_cross_user_fids', type=str,
+                        default='1,49',
+                        help='T34: comma-separated raw schema fid numbers '
+                             '(the X in user_int_feats_X) for the user side of '
+                             'the DCN cross input. Default "1,49" follows '
+                             'EDA-correlation top user x item pairs '
+                             '(user_1 / user_49). Each fid MUST be scalar '
+                             '(dim=1) — multi-hot fids raise ValueError to '
+                             'avoid silent mis-pooling.')
+    parser.add_argument('--dcn_cross_item_fids', type=str,
+                        default='5,6,7,10,12',
+                        help='T34: comma-separated raw schema fid numbers '
+                             '(the X in item_int_feats_X) for the item side of '
+                             'the DCN cross input. Default "5,6,7,10,12" '
+                             'follows EDA-correlation top fid->label MI ranking '
+                             '(item_5 / item_10 / item_6 / item_7 / item_12). '
+                             'Each fid MUST be scalar (dim=1).')
+    parser.add_argument('--dcn_cross_layers', type=int, default=2,
+                        help='T34: number of stacked DCN-V2 cross layers. '
+                             'Default 2 (≈ 4-th order interactions). Each '
+                             'layer adds Linear(d_model, d_model) — at '
+                             'd_model=64 that is ~4k dense params per layer. '
+                             'Range [1, 4] is sensible; larger may overfit '
+                             'on this dataset size (1.9M rows).')
+
     parser.add_argument('--enable_torch_compile', action='store_true', default=False,
                         help='T27: wrap the model with torch.compile on the train '
                              'path only (evaluate/predict use the un-compiled raw '
@@ -720,6 +754,52 @@ def main() -> None:
     item_int_feature_specs = build_feature_specs(
         pcvr_dataset.item_int_schema, pcvr_dataset.item_int_vocab_sizes)
 
+    # ---- T34: Map raw schema fid numbers (the X in user_int_feats_X) to
+    # list indices into user_int_feature_specs / item_int_feature_specs.
+    # This decoupling lets the model API stay typed (indices) while
+    # users specify the more intuitive raw fid numbers on CLI / run.sh.
+    # ----
+    if args.enable_dcn_cross:
+        user_fid_to_idx = {
+            fid: i for i, (fid, _, _)
+            in enumerate(pcvr_dataset.user_int_schema.entries)
+        }
+        item_fid_to_idx = {
+            fid: i for i, (fid, _, _)
+            in enumerate(pcvr_dataset.item_int_schema.entries)
+        }
+        try:
+            user_dcn_raw = parse_int_csv(args.dcn_cross_user_fids)
+            item_dcn_raw = parse_int_csv(args.dcn_cross_item_fids)
+        except ValueError as e:
+            raise ValueError(
+                f"--dcn_cross_user_fids / --dcn_cross_item_fids parse "
+                f"error: {e}") from e
+
+        unknown_u = [f for f in user_dcn_raw if f not in user_fid_to_idx]
+        unknown_i = [f for f in item_dcn_raw if f not in item_fid_to_idx]
+        if unknown_u:
+            raise ValueError(
+                f"--dcn_cross_user_fids contains unknown fids "
+                f"{unknown_u} (available: "
+                f"{sorted(user_fid_to_idx.keys())})")
+        if unknown_i:
+            raise ValueError(
+                f"--dcn_cross_item_fids contains unknown fids "
+                f"{unknown_i} (available: "
+                f"{sorted(item_fid_to_idx.keys())})")
+
+        dcn_user_fid_indices = [user_fid_to_idx[f] for f in user_dcn_raw]
+        dcn_item_fid_indices = [item_fid_to_idx[f] for f in item_dcn_raw]
+        logging.info(
+            f"T34 DCN cross enabled: user fids={user_dcn_raw} "
+            f"(indices {dcn_user_fid_indices}), item fids="
+            f"{item_dcn_raw} (indices {dcn_item_fid_indices}), "
+            f"layers={args.dcn_cross_layers}")
+    else:
+        dcn_user_fid_indices = None
+        dcn_item_fid_indices = None
+
     model_args = {
         "user_int_feature_specs": user_int_feature_specs,
         "item_int_feature_specs": item_int_feature_specs,
@@ -761,6 +841,10 @@ def main() -> None:
         "din_integrated_alpha_init": args.din_integrated_alpha_init,
         "enable_nlir_gating": args.enable_nlir_gating,
         "enable_fafe": args.enable_fafe,
+        "enable_dcn_cross": args.enable_dcn_cross,
+        "dcn_cross_user_fids": dcn_user_fid_indices,
+        "dcn_cross_item_fids": dcn_item_fid_indices,
+        "dcn_cross_layers": args.dcn_cross_layers,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

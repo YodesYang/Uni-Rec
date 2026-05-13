@@ -326,6 +326,15 @@ def main() -> None:
         "din_integrated_alpha_init": float(cfg.get("din_integrated_alpha_init", 0.1)),
         "enable_nlir_gating": bool(cfg.get("enable_nlir_gating", False)),
         "enable_fafe": bool(cfg.get("enable_fafe", False)),
+        "enable_dcn_cross": bool(cfg.get("enable_dcn_cross", False)),
+        # T34: cfg stores LIST INDICES (already mapped from raw schema fids
+        # by train.py before saving train_config.json). infer.py forwards
+        # them as-is — no re-mapping needed because the model's
+        # user_int_feature_specs ordering is identical between train and
+        # infer (both derive from schema.json::user_int).
+        "dcn_cross_user_fids": cfg.get("dcn_cross_user_fids"),
+        "dcn_cross_item_fids": cfg.get("dcn_cross_item_fids"),
+        "dcn_cross_layers": int(cfg.get("dcn_cross_layers", 2)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
