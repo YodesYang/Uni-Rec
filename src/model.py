@@ -898,6 +898,13 @@ class MultiSeqQueryGenerator(nn.Module):
         hidden_mult: int = 4,
         item_conditioned: bool = False,
         num_item_ns: int = 0,
+        # T32 / DECEM Trick 6 · Q_init=MLP(item_emb)+NS_residual.
+        # When True, base queries originate from item_repr (projected via MLP)
+        # plus an NS context residual, instead of pure global_info FFN.
+        # Compatible with item_conditioned (ICQ): if both True, the item branch
+        # still runs as a parallel mix on top of the new base path.
+        # Default False = bit-identical to baseline (zero behavior change).
+        q_init_item: bool = False,
     ) -> None:
         super().__init__()
         self.num_queries = num_queries
@@ -905,11 +912,37 @@ class MultiSeqQueryGenerator(nn.Module):
         self.d_model = d_model
         self.item_conditioned = item_conditioned
         self.num_item_ns = num_item_ns
+        self.q_init_item = q_init_item
 
         global_info_dim = (num_ns + 1) * d_model
 
         # LayerNorm on global_info to prevent gradient explosion from large-dim concat
         self.global_info_norm = nn.LayerNorm(global_info_dim)
+
+        # T32 / Trick 6 · Build item-emb-driven base query path
+        if q_init_item and num_item_ns > 0:
+            # Project item_repr to a "rich" query input via MLP (d_model → d_model)
+            self.q_init_item_proj = nn.Sequential(
+                nn.Linear(d_model, d_model * hidden_mult),
+                nn.SiLU(),
+                nn.Linear(d_model * hidden_mult, d_model),
+                nn.LayerNorm(d_model),
+            )
+            # Linear residual projection: NS global_info → d_model (preserves NS context)
+            self.q_init_ns_residual = nn.Linear(global_info_dim, d_model)
+            # Per-sequence per-query FFN consuming (item_repr_proj + ns_residual)
+            self.q_init_ffns_per_seq = nn.ModuleList([
+                nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(d_model, d_model * hidden_mult),
+                        nn.SiLU(),
+                        nn.Linear(d_model * hidden_mult, d_model),
+                        nn.LayerNorm(d_model),
+                    )
+                    for _ in range(num_queries)
+                ])
+                for _ in range(num_sequences)
+            ])
 
         # Each sequence has N independent FFNs
         self.query_ffns_per_seq = nn.ModuleList([
@@ -987,8 +1020,16 @@ class MultiSeqQueryGenerator(nn.Module):
             global_info = torch.cat([ns_flat, seq_pooled], dim=-1)  # (B, (M+1)*D)
             global_info = self.global_info_norm(global_info)
 
-            # Base queries from global info
-            base_queries = [ffn(global_info) for ffn in self.query_ffns_per_seq[i]]
+            # Base queries: T32 (Q_init=MLP(item_emb)+NS_residual) or default global_info FFN
+            if self.q_init_item and item_repr is not None:
+                # Trick 6 · queries originate from item_emb + NS residual
+                item_proj = self.q_init_item_proj(item_repr)        # (B, D)
+                ns_res = self.q_init_ns_residual(global_info)       # (B, D)
+                q_input = item_proj + ns_res                        # (B, D), residual sum
+                base_queries = [ffn(q_input) for ffn in self.q_init_ffns_per_seq[i]]
+            else:
+                # Baseline · base queries from global info
+                base_queries = [ffn(global_info) for ffn in self.query_ffns_per_seq[i]]
 
             if item_repr is not None:
                 # Item-aware branch: gate blends base query with item-conditioned query
@@ -2326,6 +2367,12 @@ class PCVRHyFormer(nn.Module):
         seq_hash_vocab: int = 0,
         # Item-conditioned query generation (DIN-style target-item awareness)
         item_conditioned_query: bool = False,
+        # T32 / DECEM Trick 6 · Q_init=MLP(item_emb)+NS_residual.
+        # Replaces base query path in MultiSeqQueryGenerator from global_info FFN
+        # to item_repr FFN with NS context residual projection. Compatible with
+        # item_conditioned_query (ICQ mix gate stays in outer layer).
+        # Default False = no behaviour change (bit-identical baseline).
+        q_init_item: bool = False,
         # ADR-004 · Target-item hard interaction injected into seq tokens
         # (seq-token level target-item conditioning, orthogonal to ICQ which
         # is query-side). Default 'off' keeps behaviour identical to baseline.
@@ -2674,6 +2721,7 @@ class PCVRHyFormer(nn.Module):
                 hidden_mult=hidden_mult,
                 item_conditioned=item_conditioned_query,
                 num_item_ns=num_item_ns,
+                q_init_item=q_init_item,
             )
             self.blocks = nn.ModuleList([
                 MultiSeqHyFormerBlock(

@@ -417,6 +417,14 @@ def parse_args() -> argparse.Namespace:
                              'global-info query with a target-item-aware query branch, '
                              'letting the model focus user history on the target ad.')
 
+    parser.add_argument('--enable_q_init_item', action='store_true', default=False,
+                        help='T32 / DECEM Trick 6 · Q_init=MLP(item_emb)+NS_residual. '
+                             'Replaces query base path from global_info FFN to '
+                             'item_repr FFN with NS context residual projection. '
+                             'Compatible with --item_conditioned_query (ICQ mix gate '
+                             'stays in outer layer). First launch recommended single-variable. '
+                             'Predicted +0.001~+0.003 LB (community-intel.md DECEM 2026-05-08).')
+
     parser.add_argument('--target_item_seq_injection', type=str, default='off',
                         choices=['off', 'additive'],
                         help='ADR-004: inject target-item representation into every '
@@ -833,6 +841,7 @@ def main() -> None:
         "onetrans_top_k": args.onetrans_top_k,
         "seq_hash_vocab": args.seq_hash_vocab,
         "item_conditioned_query": args.item_conditioned_query,
+        "q_init_item": args.enable_q_init_item,
         "target_item_seq_injection": args.target_item_seq_injection,
         "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
