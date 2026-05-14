@@ -6,6 +6,73 @@
 
 ---
 
+## 🎯 当前活跃方向 · Agent 决策必读 · 2026-05-14 起每次 audit 更新
+
+> **Agent 铁律**: 给提案 / 陈述 / 判决前必先读本段·**只有列在"Active"区的 EXP/ADR/Task 才进 decision loop · 其他全部 ARCHIVED 默认跳过**。
+> 5/14 单日 5 次幻觉根因之一 = "把已 deprecated 方向当未消化候选"·本段就是 anti-hallucination 索引。
+
+### Work in flight (4 training jobs · CEST 13:35)
+
+| Job | Path | 进度 | 完成预计 (CEST) | EDA 对口 |
+|---|---|---|---|---|
+| **M21** (T34 DCN) | gap=0.05 | E2 完成 (Dev 0.836537 持平 baseline) | 23:44 | ✅ EDA #3 |
+| **M22** (T29 vocabtier) | gap=0 | 跑中 | ~17:35 | 🟡 弱对口 (5/11 旧方向 retrace) |
+| **M23** (T34 DCN) | gap=0 | 跑中 | ~17:36 | ✅ EDA #3 |
+| **M27-v2** (T31 item + user_15) | gap=0 | 跑中 | ~18:15 | ✅ EDA #1 + EXP-049 修正 |
+
+### Active EXP (decision-relevant · 仅这些进 decision loop)
+
+| EXP | 方向 | 状态 |
+|---|---|---|
+| [EXP-048](../40-experiments/EXP-048-eda-fullscan-2026-05-13.md) | EDA fullscan 1044 RG | ✅ 数据落档·铁律来源 |
+| [EXP-049](../40-experiments/EXP-049-eda-correlation-2026-05-13.md) | EDA correlation | ✅ 数据落档·T31 user_15 / T34 DCN cross 来源 |
+| [EXP-050](../40-experiments/EXP-050-t34-dcn-cross-design-2026-05-14.md) | T34 DCN cross | 🟢 实装 · M21/M23 跑中 |
+| [EXP-051](../40-experiments/EXP-051-lb-triple-negative-and-territory-shift-2026-05-14.md) | gap=0.05 ceiling 战略转折 | 🔬 战略锚 · 5/14 起所有决策依据 |
+| [EXP-035](../40-experiments/EXP-035-kaggle-gold-retrospective-2026-05-10.md) | Kaggle 金牌战略 audit | 🔬 战略锚 · 48h audit 铁律源头 |
+| [EXP-019](../40-experiments/EXP-019-icq-halftrain-2026-05-04.md) | ICQ half-train | ✅ E3-E4 甜蜜点铁律源头 |
+| [EXP-030](../40-experiments/EXP-030-four-eval-batch-2026-05-07.md) | gap=0 vs gap=0.05 LB 数据点 | ✅ Dev→LB gap 铁律源头 |
+
+### Active ADR (decision-relevant)
+
+| ADR | 决策 | 状态 |
+|---|---|---|
+| [ADR-005](../30-decisions/ADR-005-valid-split-strategy.md) | valid_split_strategy=time + valid_gap | Accepted (gap=0/0.05 path 双轨制基础) |
+| [ADR-008](../30-decisions/ADR-008-compile-amp.md) | torch.compile + AMP bf16 | Accepted with caveats (T27) |
+| [ADR-011](../30-decisions/ADR-011-nlir-gating-cross-attn.md) | T33 NLIR gating | ⚠️ M18 LB 0.841364 弱负·deprecated 候选 |
+| [ADR-013 草案](/tmp/trick6_patch.txt) | T32 Q_init=MLP(item_emb) | Proposed · 待 17:35 决策 |
+
+### Active Task (集中 4 个 · 其他全部归档)
+
+| Task | 标题 | 状态 |
+|---|---|---|
+| T31 | is-missing 信号 (item + user_15) | 🟡 M19 gap=0.05 弱负 · M27-v2 gap=0 跑中 |
+| T34 | DCN cross feature | 🟡 M21/M23 跑中·5/14 17:35 决策 |
+| T32 | Q_init=MLP(item_emb) (DECEM Trick 6) | 📋 patch 草案 ready·待 17:35 决策 |
+| T35 | NS-groups 8-cluster | ⏸️ 暂搁置 (需改 STRUCTURAL 风险大) |
+
+### ❌ ARCHIVED · Agent grep 时自动跳过 (除非用户明确要求查阅)
+
+**Deprecated 方向 (永久关闭 · LB / Dev 实测证伪)**:
+- T15 P1 Multi-task CTR+CVR (无曝光样本) · ADR-006 / EXP-022 (CombinedAUCLoss)
+- T19 / ADR-007 RankMixer per-token FFN (✗ 已撤回 5/9 · 需 rerun 验证 · 暂搁置)
+- T28 / ADR-010 / EXP-039 DIN integrated in block (双 seed LB 证伪 5/12)
+- FaFE per-fid (M8 5/12 Dev 断崖 −0.0078)
+- EXP-040 gap=0 × T25 × seed=3 (M5 LB 0.8418 负向)
+- EXP-018 T13 hash 2M / T13 hash 500k (已固化 default)
+- EXP-009 P0-A/B/C full-train (未超 baseline)
+- EXP-013 OneTrans (掉分关闭)
+- EXP-014 ICQ proxy negative (已 supersede by EXP-019)
+- EXP-021 T17 holdout proxy 失败
+- EXP-025 P1 idmask LB 负向
+- EXP-026 P3 row-gap 已 supersede by EXP-030
+- EXP-027 parallel ablation
+- EXP-029 EDA report (已 supersede by EXP-048/049)
+- T11/T12/T13/T14 全部 [x] 已闭环
+
+**Status 历史完整列表**: 见 `docs/40-experiments/` (51 文件)·**默认全部 archived 除非列入上面 Active EXP**·git log 可恢复任何历史。
+
+---
+
 **最近一次审视**：2026-05-14 西班牙中午 11:48（UTC+2 · 🔬 **M18/M19/M20 LB 三连阴 · gap=0.05 path ceiling 0.844 实证 · 战略转折切换 gap=0 path 领地**）· 结论：① **3 LB 数据点回流**: M20 (seq_d=1024) **0.843287** vs T25-bypass 持平 / M19 (T31 item is-miss) **0.842033** −0.0014 / M18 (T33 NLIR) **0.841364** −0.0021。**0/3 突破 gap=0.05 path 历史 LB 上沿 0.84343** · 也无一接近 gap=0 SOTA M9 0.84671。② **gap=0.05 path ceiling 实证**: 14 个独立 (config × seed) gap=0.05 path LB 数据点 0/14 突破 0.844 · LB max 0.84343 / mean 0.8414 / std 0.00163 · **真实模型能力上限受 90% train data 量限制 · 与 method 无关**。③ **EXP-051 落档** · 含完整 14 数据点表格 + 战略反思 + M9-Stack 系列设计。④ **3 条新铁律写入 team-memory**: (a) gap=0.05 path saturated · 不再投资源做方法学验证 (b) SOTA 冲分必须切换"领地" 走 gap=0 path · M9-Stack 系列 = M9 + 单 stack 候选 (M22 = +T29 vocabtier / M23 = +T34 DCN / M24 = +DIN target-item-only / M25 = +T35 ns_groups) (c) **每 4 LB / 48h 强制 audit** · EXP-035 5/10 立的铁律 4 天未执行直到用户反问 · 第二次违反将累计触发硬约束。⑤ **EXP-035 警告 4 天后再次实证**: 5/10 已说"在更低山头爬更高 ≠ 过山顶" · 5/10~5/14 仍投 ~12 GPU-hour 到 gap=0.05 path · 净 LB SOTA 增益 = 0。⑥ **当前状态**: M21 (T34 DCN gap=0.05) ~CEST 23:44 完成 · 今晚剩 1 evaluation quota 待用 · 明早 CEST 06:00 quota refresh 4 个全部指定 gap=0 path stack。⑦ **4 个待用户判决问题**: Q1 同意切换 gap=0 path? · Q2 今晚 1 quota eval M21 还是留明早? · Q3 M22/M23/M24/M25 起动顺序 (推荐 M22 + M23 + M24)? · Q4 5/24 是否做 100% data S4 final?
 
 ---
