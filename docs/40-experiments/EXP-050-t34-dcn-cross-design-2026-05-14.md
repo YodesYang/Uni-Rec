@@ -202,7 +202,7 @@ python3 -u "${RUNTIME_SCRIPT_DIR}/train.py" \
     --enable_row_valid_gap --valid_gap_ratio 0.05 \
     --seq_encoder_type swiglu \
     --ns_tokenizer_type rankmixer \
-    --user_ns_tokens 5 --item_ns_tokens 2 --num_queries 1 \
+    --user_ns_tokens 5 --item_ns_tokens 2 --num_queries 2 \
     --d_model 64 --emb_dim 64 --hidden_mult 4 \
     --num_hyformer_blocks 2 --num_heads 4 \
     --enable_torch_compile --enable_amp --amp_dtype bfloat16 \
@@ -244,8 +244,62 @@ python3 -u "${RUNTIME_SCRIPT_DIR}/train.py" \
 
 ## 8. 后续追踪
 
-- [ ] M21 (T34 启动) · 等 M19 回流确认主路径状态后启动
-- [ ] M21 dev 回流 → 判 LB evaluation 是否值得
-- [ ] M21 LB 回流 → 验证 +0.001 ~ +0.003 区间假设
+- [x] **2026-05-14 CEST 00:34** M21 first attempt 启动 5 秒 fail (见 §9 事故复盘)
+- [x] **2026-05-14 CEST 00:45** M21 v2 修正 `--num_queries 2` 后重启
+- [ ] M21 v2 dev 回流 → 判 LB evaluation 是否值得
+- [ ] M21 v2 LB 回流 → 验证 +0.001 ~ +0.003 区间假设
 - [ ] 如 work · 堆叠 T34 + T31-P2 / T34 + T35 · 进入 SOTA 冲分阶段
 - [ ] 如不 work · pivot 到 T35 ns_groups 重组
+
+---
+
+## 9. 事故复盘 · M21 first attempt 5 秒 fail
+
+### 9.1 现象
+
+平台 log:
+```
+RankMixerNSTokenizer: 46 fids, ..., num_ns_tokens=5, pad=1
+RankMixerNSTokenizer: 14 fids, ..., num_ns_tokens=2, pad=0
+T34 DCN cross enabled: ...  ✓
+ValueError: d_model=64 must be divisible by T=num_queries*num_sequences+num_ns=1*4+8=12.
+```
+
+### 9.2 根因
+
+§5.3 run.sh template 凭记忆写 `--num_queries 1`·**未 grep 历史 successful run.sh**·导致 `T = 1*4 + (5+1+2+0) = 12` 不能整除 `d_model=64`。
+
+历史 grep 结果 (EXP-019/EXP-033/EXP-040/...): **全部 successful job 都用 `--num_queries 2`**·`T = 2*4 + 8 = 16` · `64 % 16 == 0` ✅
+
+### 9.3 同周累积
+
+CEST 当周已发生**第 4 次**同类"凭记忆"事故:
+
+| # | 时间 | 事故 |
+|---|---|---|
+| 1 | 2026-05-09 09:43 | T19 Deprecated 错判 (凭记忆引 baseline LogLoss) |
+| 2 | 2026-05-09 22:10 | quota 规则错记 ("CEST 14:00 是今日截止") |
+| 3 | 2026-05-10 CEST 08:40 | num_epochs 默认错记 (3 vs 4) |
+| 4 | 2026-05-14 00:34 | **本次** num_queries 凭记忆 (1 vs 2) |
+
+→ 系统性问题·已沉淀新铁律到 team-memory ("平台 run.sh 提交前必须 grep 历史成功 job 全部超参")
+
+### 9.4 损失
+
+- 平台 quota: 0 (启动即 fail 不消耗)
+- 时间: ~10 分钟 (排查 + 修复 + 重启)
+- 信任: 显著 (用户已用清洗操作 v2 重启)
+
+### 9.5 修复
+
+- run.sh `--num_queries 1` → `--num_queries 2`
+- 上传文件不变 (model/train/infer.py 实装本身正确)
+- Job name: `M21-t34dcn-icq-halftrain-gap05-seed42-4ep-v2`
+- T-divisibility 重新验证: `T = 2*4 + (5+1+2+0) = 16 · d_model 64 % 16 == 0` ✅
+
+### 9.6 防范
+
+新增 team-memory 铁律 (2026-05-14 CEST 00:35):
+> agent 提交平台 run.sh 给用户前必须先 grep `src/run.sh` + 最近 3 个 successful EXP 的全部结构性超参 (d_model / num_queries / ns tokens / blocks / heads / batch / epochs / valid_ratio)
+
+EXP-050 §5.3 run.sh template 应**直接 copy `src/run.sh`** 再改 1~2 处实验差异·不应凭设计意图重写。
