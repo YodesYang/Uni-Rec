@@ -222,19 +222,19 @@ def main() -> None:
     batch_size = int(cfg.get("batch_size", 256))
     num_workers = int(os.environ.get("EVAL_NUM_WORKERS", cfg.get("num_workers", 8)))
 
-    # ── Test-set EDA dump (default ON · 2026-05-14 user decision) ──────
-    # Always collect test-set EDA stats (no labels) and emit base64+gzip
-    # blob to stdout at end. Used to study train↔test covariate shift.
-    # Cost: forces num_workers=0 for clean accumulation, ~+5-10% wall-time.
-    # Override: set EDA_BLOB=0 in env to disable (e.g. for time-critical
-    # evaluation where every minute matters; ddl day fallback).
-    # Quota: 0 extra (piggybacks on regular evaluation submission).
-    enable_test_eda = os.environ.get("EDA_BLOB", "1") != "0"
+    # ── Optional test-set EDA dump (default OFF · 2026-05-14 18:48 reverted) ─
+    # 5/14 18:47 incident: EDA_BLOB=1 default forced num_workers=0,
+    # estimated +650% wall-time on full 523k test set, exceeding 30min
+    # platform hard limit. Reverted to opt-in via env var EDA_BLOB=1.
+    # Future EDA collection: explicitly set env var or use prepare.sh
+    # (or: add it to a smaller-scale validation, not full inference).
+    enable_test_eda = os.environ.get("EDA_BLOB", "0") == "1"
     if enable_test_eda and num_workers > 0:
         logging.warning(
-            "EDA_BLOB=1 (default) forces num_workers=0 for inference; "
+            "EDA_BLOB=1 forces num_workers=0 for inference; "
             "dataset._eda_state is only updated in the main process. "
-            "Wall-time impact estimated +5~10%."
+            "Wall-time impact estimated +650% on full test set; "
+            "may exceed 30min platform hard limit."
         )
         num_workers = 0
 
