@@ -222,17 +222,17 @@ def main() -> None:
     batch_size = int(cfg.get("batch_size", 256))
     num_workers = int(os.environ.get("EVAL_NUM_WORKERS", cfg.get("num_workers", 8)))
 
-    # ── Optional test-set EDA dump ────────────────────────────────────
-    # When EDA_BLOB=1 is set, the inference path asks dataset to collect
-    # per-batch test EDA stats (no labels involved) and emit a base64+gzip
-    # JSON blob to stdout at the very end. Used to study train↔test
-    # covariate shift without consuming an extra evaluation quota.
-    # The platform default infer.py does NOT pass this kwarg, so when our
-    # custom infer.py is uploaded the flag is fully opt-in via env var.
-    enable_test_eda = os.environ.get("EDA_BLOB", "0") == "1"
+    # ── Test-set EDA dump (default ON · 2026-05-14 user decision) ──────
+    # Always collect test-set EDA stats (no labels) and emit base64+gzip
+    # blob to stdout at end. Used to study train↔test covariate shift.
+    # Cost: forces num_workers=0 for clean accumulation, ~+5-10% wall-time.
+    # Override: set EDA_BLOB=0 in env to disable (e.g. for time-critical
+    # evaluation where every minute matters; ddl day fallback).
+    # Quota: 0 extra (piggybacks on regular evaluation submission).
+    enable_test_eda = os.environ.get("EDA_BLOB", "1") != "0"
     if enable_test_eda and num_workers > 0:
         logging.warning(
-            "EDA_BLOB=1 forces num_workers=0 for inference; "
+            "EDA_BLOB=1 (default) forces num_workers=0 for inference; "
             "dataset._eda_state is only updated in the main process. "
             "Wall-time impact estimated +5~10%."
         )
