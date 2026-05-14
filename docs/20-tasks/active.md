@@ -11,16 +11,24 @@
 > **Agent 铁律**: 给提案 / 陈述 / 判决前必先读本段·**只有列在"Active"区的 EXP/ADR/Task 才进 decision loop · 其他全部 ARCHIVED 默认跳过**。
 > 5/14 单日 5 次幻觉根因之一 = "把已 deprecated 方向当未消化候选"·本段就是 anti-hallucination 索引。
 
-### Work in flight (4 training jobs · CEST 13:56 · 时间已按"log = 北京 UTC+8" 校准)
+### Work in flight (4 training jobs · CEST 20:32 · M22 LB 实测后启 stack 系列)
 
-| Job | Path | 进度 | 完成预计 (CEST = 北京 −6h) | EDA 对口 |
+| Job | Path | 进度 | 完成预计 (CEST = 北京 −6h) | 预期信号 |
 |---|---|---|---|---|
-| **M21** (T34 DCN) | gap=0.05 | E2 完成 (Dev 0.836537) · 已跑 5h12m · 预计 E3 末 | **~16:26** (北京 22:26 · E1=2h11m + E2=1h50m + E3+E4 估 3h40m) | ✅ EDA #3 |
-| **M22** (T29 vocabtier) | gap=0 | 跑中 (启动 ~CEST 12:35 = 北京 18:35) | **~17:35** (北京 23:35) | 🟡 弱对口 (5/11 旧方向) |
-| **M23** (T34 DCN) | gap=0 | 跑中 (启动 ~CEST 12:36) | **~17:36** | ✅ EDA #3 |
-| **M27-v2** (T31 + user_15) | gap=0 | 跑中 (启动 ~CEST 13:15) | **~18:15** | ✅ EDA #1 + EXP-049 修正 |
+| **M28** (vocabtier + Trick 1) | gap=0 | 跑中 (~20:25 起) | **~01:30 (5/15)** | stack 第一步 · LB 估 0.848~0.849 |
+| **M29** (vocabtier × seed=3) | gap=0 | 待起 | ~01:30 | 校准 vocabtier 真信号 |
+| **M30** (Trick 6 Q_init) | gap=0 | 待 50 行 code apply (~21:00 起) | ~02:00 | DECEM 唯一未试方向 |
+| Slot 4 | — | 留作 backup · 看 M28 早期 dev 决 | — | — |
 
-**🔥 关键事实修正 (2026-05-14 CEST 13:56)**: 训练/评估 log 时间戳 = **北京时间 UTC+8** (机器在中国机房 · 用户 CEST 13:48 确认)。Agent 读 timestamp 必须减 6h 换 CEST。M21 真实完成时间 = **CEST ~16:26 (今下午)** · 不是之前误判的 23:44。**4 jobs 集中 CEST 16:26~18:15 一两小时内回流**·不是分散的。
+### 🔥 5/14 关键 LB 数据点 (EXP-052 落档)
+
+| Job | Config | E4 Dev | LB | Δ vs M9 |
+|---|---|---|---|---|
+| **M9** (baseline) | gap=0 + T25 + timefeat + hash500k | 0.868244 | **0.84671** ⭐ | (锚点) |
+| **M22 vocabtier** ⭐ | M9 + T29 vocabtier (gap=0) | 0.868576 | **0.847592** ⭐ | **+0.000882 LB · 真信号** |
+| M21 (T34 gap=0.05) | gap=0.05 + T34 DCN | 0.843551 | 待评 | — |
+| M23 (T34 gap=0) | M9 + T34 DCN | 0.868311 | 待评 | dev 持平 (T34 疑似无效) |
+| M27-v2 (T31 + user_15) | M9 + T31 item+user_15 | 0.868166 | 待评 | dev 略负 (T31 疑似无效) |
 
 ### Active EXP (decision-relevant · 仅这些进 decision loop)
 
