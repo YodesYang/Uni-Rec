@@ -11,16 +11,16 @@
 > **Agent 铁律**: 给提案 / 陈述 / 判决前必先读本段·**只有列在"Active"区的 EXP/ADR/Task 才进 decision loop · 其他全部 ARCHIVED 默认跳过**。
 > 5/14 单日 5 次幻觉根因之一 = "把已 deprecated 方向当未消化候选"·本段就是 anti-hallucination 索引。
 
-### Work in flight (4 training jobs · CEST 13:48 · 时间已按"log = 北京 UTC+8" 校准)
+### Work in flight (4 training jobs · CEST 13:56 · 时间已按"log = 北京 UTC+8" 校准)
 
 | Job | Path | 进度 | 完成预计 (CEST = 北京 −6h) | EDA 对口 |
 |---|---|---|---|---|
-| **M21** (T34 DCN) | gap=0.05 | E2 完成 (Dev 0.836537 持平 baseline) | **~17:30** (北京 ~23:30) | ✅ EDA #3 |
-| **M22** (T29 vocabtier) | gap=0 | 跑中 | **~17:35** | 🟡 弱对口 (5/11 旧方向 retrace) |
-| **M23** (T34 DCN) | gap=0 | 跑中 | **~17:36** | ✅ EDA #3 |
-| **M27-v2** (T31 item + user_15) | gap=0 | 跑中 | **~18:15** | ✅ EDA #1 + EXP-049 修正 |
+| **M21** (T34 DCN) | gap=0.05 | E2 完成 (Dev 0.836537) · 已跑 5h12m · 预计 E3 末 | **~16:26** (北京 22:26 · E1=2h11m + E2=1h50m + E3+E4 估 3h40m) | ✅ EDA #3 |
+| **M22** (T29 vocabtier) | gap=0 | 跑中 (启动 ~CEST 12:35 = 北京 18:35) | **~17:35** (北京 23:35) | 🟡 弱对口 (5/11 旧方向) |
+| **M23** (T34 DCN) | gap=0 | 跑中 (启动 ~CEST 12:36) | **~17:36** | ✅ EDA #3 |
+| **M27-v2** (T31 + user_15) | gap=0 | 跑中 (启动 ~CEST 13:15) | **~18:15** | ✅ EDA #1 + EXP-049 修正 |
 
-**🔥 关键事实修正 (2026-05-14 CEST 13:48 用户澄清)**: 训练/评估 log 时间戳全部是**北京时间 UTC+8**(机器在中国机房) · agent 必须减 6h 换 CEST。M21 log 显示 14:44 启动 = CEST 08:44 启动 = ~17:30 完成 (今下午·非今晚)。**4 jobs 集中 CEST 17:30~18:15 一小时内全部回流**·而非之前误判的"M21 23:44"。
+**🔥 关键事实修正 (2026-05-14 CEST 13:56)**: 训练/评估 log 时间戳 = **北京时间 UTC+8** (机器在中国机房 · 用户 CEST 13:48 确认)。Agent 读 timestamp 必须减 6h 换 CEST。M21 真实完成时间 = **CEST ~16:26 (今下午)** · 不是之前误判的 23:44。**4 jobs 集中 CEST 16:26~18:15 一两小时内回流**·不是分散的。
 
 ### Active EXP (decision-relevant · 仅这些进 decision loop)
 
