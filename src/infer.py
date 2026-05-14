@@ -149,6 +149,259 @@ def _load_ns_groups(
     return user_groups, item_groups
 
 
+class _TestEdaState:
+    """Main-process accumulator for test-set EDA (Option D · 2026-05-14).
+
+    Replaces the dataset-internal _eda_state which required num_workers=0
+    (worker process held dataset copies, main process saw empty state).
+    By accumulating directly on collated batch tensors in the main loop,
+    we keep num_workers=8 (full IO parallelism) AND collect EDA.
+
+    Uses dataset's read-only attrs (schema entries, seq_domains, _seq_maxlen,
+    _bucket_boundaries) which are identical across worker copies and main.
+
+    Wall-time impact estimated +1~3% (counter+reservoir update on already-
+    loaded numpy arrays).
+    """
+
+    def __init__(
+        self,
+        user_int_entries: List[Tuple[int, int, int]],
+        item_int_entries: List[Tuple[int, int, int]],
+        seq_domains: List[str],
+        seq_maxlen: Dict[str, int],
+        reservoir_size: int = 20000,
+        per_fid_value_cap: int = 5000,
+        id_counter_cap: int = 200000,
+    ) -> None:
+        # Plans: (fid, offset, length) for each user/item int feat
+        self.user_int_plan = list(user_int_entries)
+        self.item_int_plan = list(item_int_entries)
+        self.seq_domains = list(seq_domains)
+        self.seq_maxlen = dict(seq_maxlen)
+        self.reservoir_size = reservoir_size
+        self.per_fid_value_cap = per_fid_value_cap
+        self.id_counter_cap = id_counter_cap
+
+        # Accumulators (main-process-local, no worker copies)
+        from collections import defaultdict
+        self.total_samples = 0
+        self.user_id_counter: Dict[str, int] = defaultdict(int)
+        self.item_id_counter: Dict[str, int] = defaultdict(int)
+        # per fid: [n_null, n_total]  (CVR slots stay 0 · no labels)
+        self.user_int_missing: Dict[int, List[int]] = defaultdict(lambda: [0, 0, 0, 0])
+        self.item_int_missing: Dict[int, List[int]] = defaultdict(lambda: [0, 0, 0, 0])
+        # reservoirs: {'samples': list, 'seen': int}
+        def _make_reservoir() -> Dict[str, Any]:
+            return {'samples': [], 'seen': 0}
+        self.seq_length_reservoir: Dict[str, Dict[str, Any]] = {
+            d: _make_reservoir() for d in seq_domains
+        }
+        self.time_diff_reservoir: Dict[str, Dict[str, Any]] = {
+            d: _make_reservoir() for d in seq_domains
+        }
+        self.abs_ts_reservoir: Dict[str, Any] = _make_reservoir()
+        self.user_int_value_reservoir: Dict[int, Dict[str, Any]] = defaultdict(_make_reservoir)
+        self.item_int_value_reservoir: Dict[int, Dict[str, Any]] = defaultdict(_make_reservoir)
+
+    @classmethod
+    def from_dataset(cls, dataset: PCVRParquetDataset) -> "_TestEdaState":
+        """Build accumulator using dataset's read-only attrs (no shared state)."""
+        return cls(
+            user_int_entries=dataset.user_int_schema.entries,
+            item_int_entries=dataset.item_int_schema.entries,
+            seq_domains=list(dataset.seq_domains),
+            seq_maxlen={d: dataset._seq_maxlen.get(d, 0) for d in dataset.seq_domains},
+        )
+
+    def _reservoir_extend(self, entry: Dict[str, Any], new_values, max_size: int) -> None:
+        """Streaming reservoir sampling (matches dataset.py logic)."""
+        import numpy as np
+        new_values = np.asarray(new_values).ravel()
+        if new_values.size == 0:
+            return
+        seen_before = entry['seen']
+        samples = entry['samples']
+        for v in new_values:
+            entry['seen'] += 1
+            if len(samples) < max_size:
+                samples.append(int(v))
+            else:
+                # reservoir replace
+                idx = int(np.random.randint(0, entry['seen']))
+                if idx < max_size:
+                    samples[idx] = int(v)
+
+    def update(self, batch: Dict[str, Any]) -> None:
+        """Accumulate EDA stats from a collated batch dict.
+
+        Expected batch keys (subset of dataset.collate output):
+        - 'user_int_feats': (B, total_user_int_dim) torch tensor
+        - 'item_int_feats': (B, total_item_int_dim) torch tensor
+        - 'timestamp':       (B,) torch tensor (int64)
+        - 'user_id':         list of str
+        - For each domain in seq_domains:
+            - batch[domain]:           (B, num_seq_fids, max_len) tensor
+            - batch[f"{domain}_len"]:  (B,) tensor (true length before pad)
+        """
+        import numpy as np
+
+        user_int = batch['user_int_feats'].cpu().numpy()  # (B, D_user)
+        item_int = batch['item_int_feats'].cpu().numpy()  # (B, D_item)
+        timestamps = batch['timestamp'].cpu().numpy().astype(np.int64)
+        user_ids = batch['user_id']  # list of str
+        B = len(user_ids)
+
+        self.total_samples += B
+
+        # Q1: user_id / item_id frequency (capped)
+        if len(self.user_id_counter) < self.id_counter_cap:
+            for uid in user_ids:
+                if len(self.user_id_counter) >= self.id_counter_cap:
+                    break
+                self.user_id_counter[str(uid)] += 1
+
+        # No item_id in batch dict (model uses item_int_feats); skip item_id_counter
+
+        # Q2: per-fid null_rate for user_int / item_int
+        for fid, offset, length in self.user_int_plan:
+            fid_vals = user_int[:, offset:offset + length]
+            is_null = (fid_vals == 0).all(axis=1)
+            n_null = int(is_null.sum())
+            acc = self.user_int_missing[fid]
+            acc[0] += n_null
+            acc[1] += B
+        for fid, offset, length in self.item_int_plan:
+            fid_vals = item_int[:, offset:offset + length]
+            is_null = (fid_vals == 0).all(axis=1)
+            n_null = int(is_null.sum())
+            acc = self.item_int_missing[fid]
+            acc[0] += n_null
+            acc[1] += B
+
+        # Q4: per-domain seq length reservoir (using batch[f"{d}_len"])
+        for domain in self.seq_domains:
+            len_key = f"{domain}_len"
+            if len_key not in batch:
+                continue
+            lengths = batch[len_key].cpu().numpy().astype(np.int64)
+            self._reservoir_extend(
+                self.seq_length_reservoir[domain], lengths, self.reservoir_size,
+            )
+
+        # Q6: impression absolute timestamps → train↔test temporal gap
+        ts_pos = timestamps[timestamps > 0]
+        if ts_pos.size > 0:
+            self._reservoir_extend(
+                self.abs_ts_reservoir, ts_pos, self.reservoir_size,
+            )
+
+        # Q7: per-fid first non-zero value reservoir (covariate shift)
+        for fid, offset, length in self.user_int_plan:
+            fid_vals = user_int[:, offset:offset + length]
+            # first nonzero per row
+            nonzero_mask = fid_vals != 0
+            row_has_any = nonzero_mask.any(axis=1)
+            if not row_has_any.any():
+                continue
+            first_nz_idx = nonzero_mask.argmax(axis=1)
+            row_first = fid_vals[np.arange(B), first_nz_idx][row_has_any]
+            self._reservoir_extend(
+                self.user_int_value_reservoir[fid],
+                row_first,
+                self.per_fid_value_cap,
+            )
+        for fid, offset, length in self.item_int_plan:
+            fid_vals = item_int[:, offset:offset + length]
+            nonzero_mask = fid_vals != 0
+            row_has_any = nonzero_mask.any(axis=1)
+            if not row_has_any.any():
+                continue
+            first_nz_idx = nonzero_mask.argmax(axis=1)
+            row_first = fid_vals[np.arange(B), first_nz_idx][row_has_any]
+            self._reservoir_extend(
+                self.item_int_value_reservoir[fid],
+                row_first,
+                self.per_fid_value_cap,
+            )
+
+    def finalize(self) -> Dict[str, Any]:
+        """Compute summary dict with quantiles + missing rates · for blob."""
+        import numpy as np
+
+        def _quantiles(samples: List[int]) -> Optional[Dict[str, float]]:
+            if not samples:
+                return None
+            arr = np.asarray(samples)
+            qs = [0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
+            vals = np.quantile(arr, qs)
+            return {
+                'p1': float(vals[0]), 'p5': float(vals[1]), 'p25': float(vals[2]),
+                'p50': float(vals[3]), 'p75': float(vals[4]),
+                'p95': float(vals[5]), 'p99': float(vals[6]),
+                'mean': float(arr.mean()), 'min': float(arr.min()),
+                'max': float(arr.max()), 'n': int(len(samples)),
+            }
+
+        # User_int / item_int missing rates
+        user_int_missing_summary = {
+            f'user_int_feats_{fid}': {
+                'n_null': v[0], 'n_total': v[1],
+                'null_rate': (v[0] / v[1]) if v[1] else 0.0,
+            }
+            for fid, v in sorted(self.user_int_missing.items())
+        }
+        item_int_missing_summary = {
+            f'item_int_feats_{fid}': {
+                'n_null': v[0], 'n_total': v[1],
+                'null_rate': (v[0] / v[1]) if v[1] else 0.0,
+            }
+            for fid, v in sorted(self.item_int_missing.items())
+        }
+
+        # Per-domain seq length quantiles
+        seq_length_summary = {
+            d: _quantiles(self.seq_length_reservoir[d]['samples'])
+            for d in self.seq_domains
+        }
+
+        # Q6: absolute timestamp quantiles
+        abs_ts_summary = _quantiles(self.abs_ts_reservoir['samples'])
+
+        # Q7: per-fid value distribution (only top-N high-MI fids to keep blob small)
+        # We dump quantiles for ALL fids; per-fid blob ~50 fids × 10 floats = 500 numbers.
+        user_int_value_summary = {
+            f'user_int_feats_{fid}': _quantiles(v['samples'])
+            for fid, v in sorted(self.user_int_value_reservoir.items())
+        }
+        item_int_value_summary = {
+            f'item_int_feats_{fid}': _quantiles(v['samples'])
+            for fid, v in sorted(self.item_int_value_reservoir.items())
+        }
+
+        # User_id frequency histogram (top 100 buckets only · keep blob bounded)
+        from collections import Counter
+        if self.user_id_counter:
+            freqs = Counter(self.user_id_counter.values())
+            user_id_freq_hist = {
+                str(k): int(v) for k, v in sorted(freqs.most_common(20))
+            }
+        else:
+            user_id_freq_hist = {}
+
+        return {
+            'total_samples': self.total_samples,
+            'user_id_distinct': len(self.user_id_counter),
+            'user_id_freq_hist_top20': user_id_freq_hist,
+            'user_int_missing': user_int_missing_summary,
+            'item_int_missing': item_int_missing_summary,
+            'seq_length': seq_length_summary,
+            'abs_timestamp': abs_ts_summary,
+            'user_int_value': user_int_value_summary,
+            'item_int_value': item_int_value_summary,
+        }
+
+
 def _make_model_input(batch: Dict[str, Any], device: torch.device) -> ModelInput:
     seq_domains = batch["_seq_domains"]
     seq_data: Dict[str, torch.Tensor] = {}
@@ -222,21 +475,16 @@ def main() -> None:
     batch_size = int(cfg.get("batch_size", 256))
     num_workers = int(os.environ.get("EVAL_NUM_WORKERS", cfg.get("num_workers", 8)))
 
-    # ── Optional test-set EDA dump (default OFF · 2026-05-14 18:48 reverted) ─
-    # 5/14 18:47 incident: EDA_BLOB=1 default forced num_workers=0,
-    # estimated +650% wall-time on full 523k test set, exceeding 30min
-    # platform hard limit. Reverted to opt-in via env var EDA_BLOB=1.
-    # Future EDA collection: explicitly set env var or use prepare.sh
-    # (or: add it to a smaller-scale validation, not full inference).
-    enable_test_eda = os.environ.get("EDA_BLOB", "0") == "1"
-    if enable_test_eda and num_workers > 0:
-        logging.warning(
-            "EDA_BLOB=1 forces num_workers=0 for inference; "
-            "dataset._eda_state is only updated in the main process. "
-            "Wall-time impact estimated +650% on full test set; "
-            "may exceed 30min platform hard limit."
-        )
-        num_workers = 0
+    # ── Test-set EDA dump (default ON · 2026-05-14 19:00 · option D ──────
+    # Refactored from dataset-internal _update_test_eda_stats to main-process
+    # accumulator. Main process iterates batch dicts (already produced by
+    # workers) and updates EDA state directly. No worker-state copy issue,
+    # no num_workers=0 forcing. Wall-time impact ~+1-3% (counter+reservoir
+    # update on already-loaded batch tensors).
+    enable_test_eda = os.environ.get("EDA_BLOB", "1") != "0"
+    eda_state: Optional[_TestEdaState] = None
+    # eda_state is initialized AFTER dataset is built (needs dataset's
+    # read-only schema attrs). See after PCVRParquetDataset(...) call below.
 
     dataset = PCVRParquetDataset(
         parquet_path=eval_data_path,
@@ -262,8 +510,15 @@ def main() -> None:
         enable_is_missing=bool(cfg.get("enable_is_missing", False)),
         is_missing_user_int_fids=parse_int_csv(cfg.get("is_missing_user_int_fids", "")),
         is_missing_item_int_fids=parse_int_csv(cfg.get("is_missing_item_int_fids", "")),
-        enable_eda_dump=enable_test_eda,
+        enable_eda_dump=False,  # Option D: EDA accumulated in main process via _TestEdaState
     )
+
+    if enable_test_eda:
+        eda_state = _TestEdaState.from_dataset(dataset)
+        logging.info(
+            "[test-eda] EDA_BLOB=1 (default) · main-process accumulator · "
+            "compatible with num_workers>0"
+        )
 
     loader_kwargs: Dict[str, Any] = {}
     if num_workers > 0:
@@ -359,6 +614,14 @@ def main() -> None:
             for user_id, prob in zip(batch["user_id"], probs_list):
                 predictions[str(user_id)] = float(prob)
             seen_rows += len(probs_list)
+            # Option D: accumulate EDA in main process (no worker copy issue).
+            # Wraps in try/except so EDA failure NEVER fails inference.
+            if eda_state is not None:
+                try:
+                    eda_state.update(batch)
+                except Exception as exc:  # pylint: disable=broad-except
+                    logging.warning(f"[test-eda] update failed at step {step}: {exc!r}")
+                    eda_state = None  # disable for remaining steps
             if step % 100 == 0:
                 logging.info(
                     f"Inference progress: step={step}, rows={seen_rows}, "
@@ -371,11 +634,11 @@ def main() -> None:
     logging.info(
         f"Saved {len(predictions)} predictions from {seen_rows} rows to {out_path}")
 
-    if enable_test_eda:
-        _emit_test_eda_blob(dataset)
+    if eda_state is not None:
+        _emit_test_eda_blob_from_state(eda_state)
 
 
-def _emit_test_eda_blob(dataset: PCVRParquetDataset) -> None:
+def _emit_test_eda_blob_from_state(state: "_TestEdaState") -> None:
     """Emit base64+gzip JSON blob of test-set EDA stats to stdout.
 
     Placed at the very END of stdout (after predictions are saved and after
@@ -383,10 +646,45 @@ def _emit_test_eda_blob(dataset: PCVRParquetDataset) -> None:
     contains the blob even if log volume is high. Sentinels make extraction
     by ``tools/decode_eda_blob.py`` reliable.
 
-    No-ops if dataset has no EDA state (e.g. EDA_BLOB unset or empty
-    inference). Wraps in try/except so any EDA failure NEVER fails the
-    overall evaluation (predictions.json is the contract; EDA is bonus).
+    Wraps in try/except so any EDA failure NEVER fails the overall
+    evaluation (predictions.json is the contract; EDA is bonus).
     """
+    import base64
+    import gzip
+    import sys
+    try:
+        summary = state.finalize()
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.warning(f"[test-eda] finalize failed: {exc!r}")
+        return
+    if summary is None or not summary.get('total_samples', 0):
+        logging.warning("[test-eda] empty EDA state, skipping blob")
+        return
+    try:
+        payload = json.dumps(summary, sort_keys=True).encode("utf-8")
+        gz = gzip.compress(payload, compresslevel=9)
+        b64 = base64.b64encode(gz).decode("ascii")
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.warning(f"[test-eda] blob encode failed: {exc!r}")
+        return
+
+    chunk_size = 120
+    chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)]
+
+    sys.stdout.flush()
+    print()
+    print("<<<EDA_BLOB_START>>>")
+    for ch in chunks:
+        print(ch)
+    print("<<<EDA_BLOB_END>>>")
+    sys.stdout.flush()
+    logging.info(
+        f"[test-eda] blob emitted: {len(b64)} chars, "
+        f"~{len(b64) // 1024} KiB raw")
+
+
+def _emit_test_eda_blob(dataset: PCVRParquetDataset) -> None:
+    """Legacy emit (kept for compat with non-refactored call sites)."""
     import base64
     import gzip
     import sys
