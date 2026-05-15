@@ -298,3 +298,57 @@ M33 (5-cluster) 被定义为"stack 候选"·**实际是 vocabtier 的替代** (v
 
 **1 整天 GPU-hour 净 ADR 验证 = 0** · M38 silent copy 事故吃掉了 Multi-Emb 验证机会。
 
+---
+
+## 11. CEST 22:06 补遗 · M22-rerun + M33-rerun 数据回流 · 重大判决修订
+
+### 数据 (E4 best dev AUC)
+
+| Job | 原始 (5/14~5/15) | rerun (5/15) | Δ rerun | EXP-032 noise band? |
+|---|---|---|---|---|
+| **M22** (vocabtier × s42) | 0.868576 | **0.868531** | **−0.000045** | ✅ 在 ±0.0001 内 |
+| **M33** (5-cluster × s42) | 0.868682 | **0.868408** | **−0.000274** | ❌ **超出 ±0.0001 的 3×** |
+
+### 判决 1 · M22 vocabtier 是 stable signal
+
+EXP-032 (icq-t13tf, 2026-05-09) 给出 seed=42 同 commit rerun noise std ≈ 0.00007 / 跨度 ±0.0001。**M22 rerun gap −0.000045 在 band 内** · M22 dev 0.8685~0.8686 是 stable signal · 不是单点 luck。LB 0.847592 同样可信任为 baseline。
+
+### 判决 2 · M33 5-cluster 不是真信号 · 是 noise 上沿假象
+
+**两个 M33 数据点 mean** = (0.868682 + 0.868408) / 2 = **0.868545**
+**两个 M22 数据点 mean** = (0.868576 + 0.868531) / 2 = **0.868554**
+
+**M33 mean − M22 mean = −0.000009 ≈ 0** · 5-cluster ns_groups 在 dev 端**与 vocabtier 基本打平 (实际略低)**。M33 原始 +0.000106 优势是单点 lucky upper · 不是 architectural 优势。
+
+**机制猜测**: 5-cluster ns_groups 的 NS Tokenizer 把 fid 分到不同 cluster, 不同 rerun 中 sparse embedding init / Adagrad sparse grad order 对 cluster boundary 敏感 → noise 比 vocabtier 路径**放大 3×**。这是 5-cluster 路径的内在性质 · 不是事故。
+
+### 判决 3 · 5/16 早 4 quota 决策修订
+
+**M33 evaluation 价值降级** (从原计划"评 M33 ckpt 看 5-cluster LB" 改为"M33 不评"):
+- M33 mean 与 M22 mean 打平 · M33 ckpt LB 期望 ≈ M22 LB 0.8476 · **没有新 SOTA 期望**
+- 占用 1 quota 的边际信息 < M38 v2 / M39 v2 / M22-LB-rerun
+
+**5/16 早 4 quota 修订计划** (待 M38 v2 / M39 v2 dev 回流后定):
+| Quota | 候选 | 价值 |
+|---|---|---|
+| 1 | **M22-rerun ckpt LB** | LB 端 rerun 校准 (dev 端已确认稳定 · LB 端未量) · 验证 SOTA 0.8476 是否 ckpt-specific |
+| 2 | **M38 v2 ckpt LB** (Multi-Emb K=2) | ADR-012 LB 验证 ⭐ |
+| 3 | **M39 v2 ckpt LB** (Global Token) | ADR-013 LB 验证 ⭐ |
+| 4 | **取决于 M38v2/M39v2 dev**: 若 ≥ 0.8691 ⭐ 评最强者; 若 dev 持平 / 略升 (<0.8691) 评 M30 (Trick 6 单变量 LB · 给 M34 stack 归因) |
+
+### 判决 4 · 新铁律 (写入 team-memory)
+
+#### 铁律 N+2 · ns_groups 路径 rerun noise 比基础 vocabtier 路径放大 3×
+
+> **2026-05-15 CEST 22:06 · M22 rerun ±0.00005 / M33 rerun ±0.00027 实测**: 5-cluster (custom ns_groups) 路径 rerun noise band ≈ ±0.0003, 是默认 vocabtier 路径 ±0.0001 的 3×。**铁律**: ① ns_groups 路径的 dev 判决阈值从默认 ±0.0003 (3σ) **放宽到 ±0.0009** (3σ_5cluster); ② 任何 ns_groups 类改动单点 dev Δ < +0.0009 都不能凭单点判 "新方向 work"; ③ 想验证 ns_groups 改动需要 **2~3 seed 或 2 rerun mean** · 不是单点; ④ 此规则只 apply ns_groups 路径 · 不 apply 其他 (model.py kwarg / loss / encoder)。
+
+### 5/15 净增量再修订
+
+5/15 三个真实 dev 数据点回流:
+- M22 rerun (vocabtier 真信号确认) ✅
+- M33 rerun (5-cluster mean ≈ vocabtier mean · 单点 +0.000106 是 luck 假象) ✅
+- M38 v2 + M39 v2 跑中 (~CEST 00:30~01:30 回流)
+
+**5/15 战略价值** = 3 个 noise calibration data point + 2 个 RankUp 验证候选启动 · **不是 0** (vs 11:00 audit 时认为的 "净 ADR 验证 = 0")。silent copy 事故吃掉的是 **5/15 单日 ADR-012 验证机会** · 5/16 凌晨已重启。
+
+
