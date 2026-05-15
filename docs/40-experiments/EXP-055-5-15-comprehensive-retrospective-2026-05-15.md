@@ -532,20 +532,101 @@ M33 vs M22 LB 反向放大 27× · M33-rerun vs M22-rerun LB 期望: **0.844710 
 | 3 | **M30 ckpt LB** (Trick 6 alone) | ⭐⭐ 单变量归因 (给 M34 stack 解释) |
 | 4 | **取决于 M38v2/M39v2 dev**: 若 ≥ 0.8691 → 评双方最佳 ckpt 并占 4 个 quota · 若 dev 持平 → 评 M37 (NLIR) 或 M17 (seq_d=768) | flexible | 看 dev 决 |
 
-### 5/15 战略价值再审视 (晚 22:48)
+---
 
-**5/15 LB 数据点 (今晚增 2 个)**:
-- M22-rerun LB 0.847324 (rerun noise +0.000268) → 同 seed rerun LB noise band ±0.0003 铁律
-- M33 原始 LB 0.844710 (反向放大 27×) → 5-cluster 路径关闭 + ns_groups 类改动新铁律
+## 15. CEST 23:30 补遗 · 元宵节 covariate shift 重大认知 + M40/M41 启动
 
-**5/15 LB 信息增量**:
-1. ✅ M22 SOTA 0.847592 是 stable signal (不是 ckpt-specific luck)
-2. ✅ 同 seed rerun LB noise band ≈ ±0.0003 (项目首次量化)
-3. ✅ 5-cluster 路径关闭 (原 +0.000106 dev 优势是 luck 假象)
-4. ✅ "破 SOTA" 阈值修订 (同 seed 重训实验阈值 ≥ 0.8484)
+### 15.1 元宵节认知 · 颠覆 5/10 EXP-035 ROI 错判
 
-**5/15 净 LB SOTA 增益 = 0** (0.847592 仍 5/14 SOTA · 但今晚校准让 SOTA 可信度大幅提升)。
-**5/15 净铁律增量 = 4 条 (M38 silent copy / Args 30s / ns_groups noise / LB rerun band)** · 系统性提升后续判决质量。
+**核心事实** (用户 5/15 23:27 提问触发):
+- **2026-03-03 = 农历正月十五 = 元宵节** ⭐
+- Train 数据 03-03 占 63% 不是 sampling artifact · 是**真实元宵节流量峰**
+- Test (北京 03-04 09:00~14:00 周三) = **元宵节翌日工作日午前 daypart**
+- Train→Test = 节日峰 → 节后回归 · **不是远未来 covariate shift · 是 daypart shift**
+
+### 15.2 元宵节日期表
+
+| 日期 | 农历 | 阳历 weekday | 性质 | Train 占比 |
+|---|---|---|---|---|
+| 02-28 | 正月十二 | 周六 | 周末 | 3-25% |
+| 03-01 | 正月十三 | 周日 | 周末 | 3-25% |
+| 03-02 | 正月十四 | 周一 | 元宵节前夜 | 3-25% |
+| **03-03** ⭐ | **正月十五 元宵节** | 周二 | **节日 · 高流量峰** | **63%** |
+| **03-04** | 正月十六 | 周三 | **元宵节翌日 · 工作日** | 3-25% (test 同日) |
+
+### 15.3 5/10 EXP-035 §错误 4 ROI 修订错判
+
+**5/10 EXP-035 line 109 当时判断**:
+> "数据已经隐式 heavy recency (最近一天占 63%)" → recency reweight ROI 从 +0.002~0.003 下调到 +0~+0.001
+
+**修订** (5/15 元宵节认知后):
+- ❌ 03-03 不是最近一天 · **03-04 才是** (test 同日 · 占比仅 3-25%)
+- ❌ 03-03 占 63% 不是 recency · 是 **元宵节流量峰**
+- ✅ **真正的 recency = 03-04 数据** · 但占比最少
+- ✅ `temporal_weight_alpha=2.5` 真实作用 = **修正 03-04 underweight + 03-03 元宵节 overweight 的不平衡** · 不是放大 recency
+- **ROI 修订回归原估**: **+0.001~+0.003 LB** (高 ROI 候选)
+
+### 15.4 当前 M22 baseline 含 dow 特征 · 大概率有害
+
+**Comment 证据** (`src/dataset.py` line 2117-2121):
+> "DOW is excluded because training data is heavily skewed toward a single weekday (03-03, ~63%), which causes the model to overfit to that weekday's patterns and hurts generalization to the test set's temporal distribution."
+
+**机制** (含元宵节认知):
+- M22 baseline 用 `--enable_time_of_day_features` (5 dim · 含 dow_sin/cos + weekend)
+- Train 上 dow=1 (周二) 占 63% · 学到的 dow=1 pattern 实际上是**元宵节高 CVR pattern**
+- Test 是 dow=2 (周三) 元宵节翌日 · dow=1 学的元宵节 pattern **不延续到翌日**
+- **dow 特征在 test 上是误导信号**
+
+`enable_hour_only_features` 修复**已实现但从未实测** (CLI / dataset / infer 通路完整)。
+
+### 15.5 5/15 23:00 起的 M38 v2 copy + M39 v2 copy 取消 · 改起 M40 + M41
+
+**用户决策**: 取消 M38 v2 copy + M39 v2 copy (sunk 30 min GPU) · 改起 M40 + M41 (元宵节认知修复)。
+
+**理由**:
+- M38 v2 copy / M39 v2 copy 价值 = 论文方法 noise band 校准 (中价值)
+- M40 / M41 价值 = 直接 target 元宵节 daypart shift (高价值 · 论文方法 covariate shift 折扣后 ROI 比 daypart-target 低)
+- 完成时间几乎同时 (~CEST 04:00~04:30 5/16) · 5/16 早评 4 不同方向比 4 同方向更高 ROI
+
+### 15.6 M40 / M41 设计 · 单变量 ablation vs M22
+
+| Job | 配置变化 vs M22 | 期望 dev | 期望 LB |
+|---|---|---|---|
+| **M40-houronly** | 删 `--enable_time_of_day_features` + 加 `--enable_hour_only_features` | ~M22 ± 0.0001 | **+0.0005~+0.002** |
+| **M41-temporalweight25** | 加 `--temporal_weight_alpha 2.5` (保持 time_of_day 不动) | ~M22 ± 0.0003 (sample reweight 影响 dev sample 分布) | **+0.001~+0.003** |
+
+### 15.7 5/16 早 4 quota 矩阵再修订 (含 M40 / M41)
+
+| Quota | 候选 | 优先级 |
+|---|---|---|
+| 1 | **M38 v2 ckpt LB** (Multi-Emb K=2) | ⭐⭐⭐ 必评 |
+| 2 | **M39 v2 ckpt LB** (Global Token) | ⭐⭐⭐ 必评 |
+| 3 | **M40 ckpt LB** (hour_only · 元宵节 daypart fix) | ⭐⭐⭐ 必评 |
+| 4 | **M41 ckpt LB** (temporal_weight 2.5) | ⭐⭐⭐ 必评 |
+
+→ **5/16 早全部 4 quota 评新方向 LB · 不评 M30 / M37 等老候选** (老候选 dev 已知低于 M22 · LB 不可能创新高)。
+
+### 15.8 真正的 5/15 ~ 5/25 路径 (含元宵节认知)
+
+| Tier | 方向 | 期望 LB | 实施成本 |
+|---|---|---|---|
+| ⭐⭐⭐ S1 (M40) | hour_only 替换 time_of_day | +0.0005~+0.002 | 0 代码 · 跑中 |
+| ⭐⭐⭐ S2 (M41) | temporal_weight_alpha 2.5 | +0.001~+0.003 | 0 代码 · 跑中 |
+| ⭐⭐ S3 (新方向) | is_holiday + days_since_lunar_holiday | +0.001~+0.003 | ~50 行 + ADR |
+| ⭐⭐ M38 v2 (Multi-Emb) | RankUp 论文方法 | +0.0005 | 跑中 |
+| ⭐⭐ M39 v2 (Global Token) | RankUp 论文方法 | +0.0005 | 跑中 |
+| ⭐ S4 (5/24 final) | 100% data run no valid split | +0.0005~+0.001 | ~10 行 |
+
+**Top 20 概率 (含元宵节认知)**: **20~30%** (上调 vs CEST 22:55 估的 10~15%)
+
+**核心 takeaway**: **元宵节认知是 5/15 最重要的发现 · 比 RankUp 方向 ROI 更高 · 不是 architecture-level breakthrough · 是 dataset-mechanism understanding** · 这是研究员视角的关键差异 (论文方法 < 数据集机制理解)。
+
+### 15.9 新铁律候选 (待 M40 / M41 LB 后落定)
+
+#### 候选铁律 N+5 · 中国数据集时间分布 grep 春节 / 元宵 / 端午 / 中秋等农历节日
+
+> **2026-05-15 CEST 23:30 · 元宵节认知触发**: 中国互联网数据集 (e.g. 腾讯 / 阿里 / 字节) 训练数据上 **农历节日是流量峰 · CVR 显著高于平日**。任何"train 某日占比异常 (e.g. 60%+)" 必须先 grep **该日是否农历节日** · 不能凭 sampling artifact 假设。**铁律**: ① 拿到中国数据集 · 第一时间用 `lunar_calendar` 工具 grep train/test 日期对应农历日 · 标记节日; ② 节日峰 (e.g. 元宵节 03-03) sample 不是 recency · 不能用 `temporal_weight_alpha` 简单 reweight; ③ 节后翌日 (e.g. 03-04) 是真正的 "回归常态" daypart · 与节日峰 distribution 完全不同; ④ 时间特征 (`enable_time_of_day_features`) 含 day-of-week 时 · 必须验证 train weekday 分布 vs test weekday 分布 · 不一致则用 `--enable_hour_only_features` 移除 dow 偏差; ⑤ 历史影响: 5/10 EXP-035 line 109 把 "63% 视为 recency" 错判 · 修订 `temporal_weight_alpha` ROI 回归 +0.001~+0.003。
+
 
 
 
