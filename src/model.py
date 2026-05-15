@@ -2176,6 +2176,7 @@ class RankMixerNSTokenizer(nn.Module):
         num_ns_tokens: int,
         emb_skip_threshold: int = 0,
         enable_fafe: bool = False,
+        multi_emb_k: int = 1,
     ) -> None:
         """Initializes RankMixerNSTokenizer.
 
@@ -2197,6 +2198,13 @@ class RankMixerNSTokenizer(nn.Module):
                 ``num_fids × (emb_dim² + 2·emb_dim)`` dense params (~130k
                 for 46 user fids @ emb_dim=64). When False (default),
                 behaviour is bit-identical to the pre-T25 tokenizer.
+            multi_emb_k: T34 / RankUp Multi-Embedding K. When K=1 (default),
+                bit-identical to pre-T34 single embedding table per fid.
+                When K>=2, each non-skipped fid has K independent embedding
+                tables; their outputs are concatenated and projected via a
+                shared ``Linear(K*emb_dim, emb_dim)`` to recover emb_dim.
+                Sparse reinit treats all K tables synchronously. RankUp paper
+                §4.2 ablation: +0.13~0.21% AUC online (Tencent self).
         """
         super().__init__()
         self.feature_specs = feature_specs
@@ -2204,17 +2212,35 @@ class RankMixerNSTokenizer(nn.Module):
         self.emb_dim = emb_dim
         self.num_ns_tokens = num_ns_tokens
         self.emb_skip_threshold = emb_skip_threshold
+        self.multi_emb_k = int(multi_emb_k)
 
         # One embedding table per fid (None if skipped by emb_skip_threshold
         # or if vocab_size <= 0 / no vocab info).
+        # T34 Multi-Emb: K>=2 produces K tables per fid (wrapped in ModuleList).
         embs = []
         for vs, offset, length in feature_specs:
             skip = int(vs) <= 0 or (emb_skip_threshold > 0 and int(vs) > emb_skip_threshold)
             if skip:
                 embs.append(None)
-            else:
+            elif self.multi_emb_k == 1:
+                # Backward-compat path · single Embedding (bit-identical baseline)
                 embs.append(nn.Embedding(int(vs) + 1, emb_dim, padding_idx=0))
+            else:
+                # T34 Multi-Embedding · K independent tables per fid
+                # Each table is independently Xavier-initialized via PyTorch default
+                embs.append(nn.ModuleList([
+                    nn.Embedding(int(vs) + 1, emb_dim, padding_idx=0)
+                    for _ in range(self.multi_emb_k)
+                ]))
         self.embs = nn.ModuleList([e for e in embs if e is not None])
+
+        # T34 Multi-Emb projection: K*emb_dim → emb_dim
+        # Shared across all fids (consistent with RankUp §3.3)
+        if self.multi_emb_k >= 2:
+            self.multi_emb_proj = nn.Linear(self.multi_emb_k * emb_dim, emb_dim)
+        else:
+            self.multi_emb_proj = None
+
         # Map from fid index to position in self.embs (or -1 if filtered)
         self._emb_index = []
         real_idx = 0
@@ -2285,14 +2311,31 @@ class RankMixerNSTokenizer(nn.Module):
                     fid_emb = int_feats.new_zeros(int_feats.shape[0], self.emb_dim)
                 else:
                     emb_layer = self.embs[emb_real_idx]
-                    if length == 1:
-                        fid_emb = emb_layer(int_feats[:, offset].long())
+                    if self.multi_emb_k == 1:
+                        # Backward-compat path · single Embedding
+                        if length == 1:
+                            fid_emb = emb_layer(int_feats[:, offset].long())
+                        else:
+                            vals = int_feats[:, offset:offset + length].long()
+                            emb_all = emb_layer(vals)
+                            mask = (vals != 0).float().unsqueeze(-1)
+                            count = mask.sum(dim=1).clamp(min=1)
+                            fid_emb = (emb_all * mask).sum(dim=1) / count
                     else:
-                        vals = int_feats[:, offset:offset + length].long()
-                        emb_all = emb_layer(vals)
-                        mask = (vals != 0).float().unsqueeze(-1)
-                        count = mask.sum(dim=1).clamp(min=1)
-                        fid_emb = (emb_all * mask).sum(dim=1) / count
+                        # T34 Multi-Emb · K embedding tables · concat then project
+                        # emb_layer is nn.ModuleList of K Embedding tables
+                        sub_embs = []
+                        for k_emb in emb_layer:
+                            if length == 1:
+                                sub_embs.append(k_emb(int_feats[:, offset].long()))
+                            else:
+                                vals = int_feats[:, offset:offset + length].long()
+                                emb_all = k_emb(vals)
+                                mask = (vals != 0).float().unsqueeze(-1)
+                                count = mask.sum(dim=1).clamp(min=1)
+                                sub_embs.append((emb_all * mask).sum(dim=1) / count)
+                        cat_k = torch.cat(sub_embs, dim=-1)  # (B, K*emb_dim)
+                        fid_emb = self.multi_emb_proj(cat_k)  # (B, emb_dim)
                 # T25 / H2 · FaFE per-fid transform (before concatenation).
                 if self.enable_fafe:
                     fid_emb = self.fafe_transforms[fafe_slot](fid_emb)
@@ -2373,6 +2416,11 @@ class PCVRHyFormer(nn.Module):
         # item_conditioned_query (ICQ mix gate stays in outer layer).
         # Default False = no behaviour change (bit-identical baseline).
         q_init_item: bool = False,
+        # T34 / RankUp Multi-Embedding K=2 · ADR-012.
+        # When K>=2, each non-skipped fid in NS tokenizer has K independent
+        # embedding tables (concat + projection). Compatible with all ns
+        # tokenizer flags. Default 1 = bit-identical baseline.
+        multi_emb_k: int = 1,
         # ADR-004 · Target-item hard interaction injected into seq tokens
         # (seq-token level target-item conditioning, orthogonal to ICQ which
         # is query-side). Default 'off' keeps behaviour identical to baseline.
@@ -2503,6 +2551,7 @@ class PCVRHyFormer(nn.Module):
                 num_ns_tokens=user_ns_tokens,
                 emb_skip_threshold=emb_skip_threshold,
                 enable_fafe=self.enable_fafe,
+                multi_emb_k=multi_emb_k,
             )
             num_user_ns = user_ns_tokens
 
@@ -2514,6 +2563,7 @@ class PCVRHyFormer(nn.Module):
                 num_ns_tokens=item_ns_tokens,
                 emb_skip_threshold=emb_skip_threshold,
                 enable_fafe=self.enable_fafe,
+                multi_emb_k=multi_emb_k,
             )
             num_item_ns = item_ns_tokens
         else:
@@ -2843,8 +2893,14 @@ class PCVRHyFormer(nn.Module):
 
         for tokenizer in [self.user_ns_tokenizer, self.item_ns_tokenizer]:
             for emb in tokenizer.embs:
-                nn.init.xavier_normal_(emb.weight.data)
-                emb.weight.data[0, :] = 0
+                if isinstance(emb, nn.ModuleList):
+                    # T34 Multi-Emb · init all K tables
+                    for k_emb in emb:
+                        nn.init.xavier_normal_(k_emb.weight.data)
+                        k_emb.weight.data[0, :] = 0
+                else:
+                    nn.init.xavier_normal_(emb.weight.data)
+                    emb.weight.data[0, :] = 0
 
         if self.num_time_buckets > 0:
             nn.init.xavier_normal_(self.time_embedding.weight.data)
@@ -2896,10 +2952,18 @@ class PCVRHyFormer(nn.Module):
                     continue
                 emb = tokenizer.embs[real_idx]
                 if int(vs) > cardinality_threshold:
-                    nn.init.xavier_normal_(emb.weight.data)
-                    emb.weight.data[0, :] = 0
-                    reinit_ptrs.add(emb.weight.data_ptr())
-                    reinit_count += 1
+                    if isinstance(emb, nn.ModuleList):
+                        # T34 Multi-Emb · K embedding tables · synchronously reinit all
+                        for k_emb in emb:
+                            nn.init.xavier_normal_(k_emb.weight.data)
+                            k_emb.weight.data[0, :] = 0
+                            reinit_ptrs.add(k_emb.weight.data_ptr())
+                            reinit_count += 1
+                    else:
+                        nn.init.xavier_normal_(emb.weight.data)
+                        emb.weight.data[0, :] = 0
+                        reinit_ptrs.add(emb.weight.data_ptr())
+                        reinit_count += 1
                 else:
                     skip_count += 1
 

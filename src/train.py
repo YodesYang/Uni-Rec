@@ -425,6 +425,16 @@ def parse_args() -> argparse.Namespace:
                              'stays in outer layer). First launch recommended single-variable. '
                              'Predicted +0.001~+0.003 LB (community-intel.md DECEM 2026-05-08).')
 
+    parser.add_argument('--multi_emb_k', type=int, default=1, choices=[1, 2],
+                        help='T34 / RankUp Multi-Embedding K · ADR-012. '
+                             'When K=1 (default), bit-identical to baseline single '
+                             'embedding table per fid. When K=2, each non-skipped fid '
+                             'has 2 independent embedding tables; outputs concatenated '
+                             'and projected via shared Linear(2*emb_dim, emb_dim). '
+                             'Adds ~+300M sparse params (~+1.2GB). May need '
+                             '--batch_size 96 for VRAM. RankUp ablation +0.13~0.21% '
+                             'AUC online (Tencent self · arXiv:2604.17878).')
+
     parser.add_argument('--target_item_seq_injection', type=str, default='off',
                         choices=['off', 'additive'],
                         help='ADR-004: inject target-item representation into every '
@@ -842,6 +852,7 @@ def main() -> None:
         "seq_hash_vocab": args.seq_hash_vocab,
         "item_conditioned_query": args.item_conditioned_query,
         "q_init_item": args.enable_q_init_item,
+        "multi_emb_k": args.multi_emb_k,
         "target_item_seq_injection": args.target_item_seq_injection,
         "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
