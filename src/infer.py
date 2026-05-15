@@ -592,6 +592,7 @@ def main() -> None:
         "dcn_cross_user_fids": cfg.get("dcn_cross_user_fids"),
         "dcn_cross_item_fids": cfg.get("dcn_cross_item_fids"),
         "dcn_cross_layers": int(cfg.get("dcn_cross_layers", 2)),
+        "enable_global_token": bool(cfg.get("enable_global_token", False)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

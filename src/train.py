@@ -538,6 +538,16 @@ def parse_args() -> argparse.Namespace:
                              'Range [1, 4] is sensible; larger may overfit '
                              'on this dataset size (1.9M rows).')
 
+    parser.add_argument('--enable_global_token', action='store_true', default=False,
+                        help='T36 / ADR-013 (Plan B): replace the user_dense NS '
+                             'token slot with an aggregated Global Token '
+                             '(LN(Linear(concat[user_dense, mean(user_ns), '
+                             'mean(item_ns), mean(seq_*)]))). Preserves '
+                             'T-divisibility (num_ns unchanged) per RankUp §3.4 '
+                             'aggregation interpretation. Requires user_dense_dim>0. '
+                             'Adds ~25k dense params at d_model=64. Default off = '
+                             'bit-identical baseline.')
+
     parser.add_argument('--enable_torch_compile', action='store_true', default=False,
                         help='T27: wrap the model with torch.compile on the train '
                              'path only (evaluate/predict use the un-compiled raw '
@@ -865,6 +875,7 @@ def main() -> None:
         "dcn_cross_user_fids": dcn_user_fid_indices,
         "dcn_cross_item_fids": dcn_item_fid_indices,
         "dcn_cross_layers": args.dcn_cross_layers,
+        "enable_global_token": args.enable_global_token,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

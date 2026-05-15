@@ -2488,6 +2488,16 @@ class PCVRHyFormer(nn.Module):
         dcn_cross_user_fids: Optional[List[int]] = None,
         dcn_cross_item_fids: Optional[List[int]] = None,
         dcn_cross_layers: int = 2,
+        # T36 / RankUp Global Token (ADR-013 · Plan B). When True, the
+        # user_dense token slot is repurposed as a Global Token: instead
+        # of projecting only `user_dense_feats`, the projection input
+        # concatenates [user_dense_feats, mean_pool(user_ns),
+        # mean_pool(item_ns), concat(mean_pool(seq_d) for d in domains)]
+        # → Linear+LN+SiLU → 1 NS token. This preserves T-divisibility
+        # (num_ns unchanged) while injecting an aggregated global view per
+        # RankUp §3.4. Requires `user_dense_dim > 0` (the slot must exist).
+        # Default False = bit-identical baseline.
+        enable_global_token: bool = False,
     ) -> None:
         super().__init__()
 
@@ -2576,11 +2586,42 @@ class PCVRHyFormer(nn.Module):
 
         # User dense feature projection (if available)
         self.has_user_dense = user_dense_dim > 0
-        if self.has_user_dense:
-            self.user_dense_proj = nn.Sequential(
-                nn.Linear(user_dense_dim, d_model),
-                nn.LayerNorm(d_model),
+        # T36 / ADR-013 · Global Token (Plan B): when enabled, the
+        # user_dense token slot becomes an aggregated global view.
+        self.enable_global_token = bool(enable_global_token)
+        if self.enable_global_token and not self.has_user_dense:
+            raise ValueError(
+                "enable_global_token=True requires user_dense_dim > 0 "
+                "(Plan B reuses the user_dense token slot)."
             )
+        if self.has_user_dense:
+            if self.enable_global_token:
+                # Concat input: [user_dense, user_int_pool, item_int_pool,
+                #                seq_pool_a, ..., seq_pool_d]
+                # user_int_pool / item_int_pool are mean-pool of NS tokens
+                # (already in d_model), seq_pool is mean-pool of raw seq
+                # token embeddings (also d_model per domain).
+                global_in_dim = (
+                    user_dense_dim
+                    + d_model  # user_int_pool
+                    + d_model  # item_int_pool
+                    + self.num_sequences * d_model  # per-domain seq pool
+                )
+                self.global_token_proj = nn.Sequential(
+                    nn.Linear(global_in_dim, d_model),
+                    nn.LayerNorm(d_model),
+                )
+                # Keep user_dense_proj as None to make the absence explicit
+                self.user_dense_proj = None
+            else:
+                self.user_dense_proj = nn.Sequential(
+                    nn.Linear(user_dense_dim, d_model),
+                    nn.LayerNorm(d_model),
+                )
+                self.global_token_proj = None
+        else:
+            self.user_dense_proj = None
+            self.global_token_proj = None
 
         # Item dense feature projection (if available)
         self.has_item_dense = item_dense_dim > 0
@@ -3169,7 +3210,12 @@ class PCVRHyFormer(nn.Module):
         output = self.output_proj(output)
         return output
 
-    def _build_ns_tokens(self, inputs: ModelInput) -> torch.Tensor:
+    def _build_ns_tokens(
+        self,
+        inputs: ModelInput,
+        seq_tokens_list: Optional[List[torch.Tensor]] = None,
+        seq_masks_list: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
         """Build NS token tensor from user/item int and dense features.
 
         When ``enable_dense_bypass`` is True, user dense features are included
@@ -3177,18 +3223,68 @@ class PCVRHyFormer(nn.Module):
         also projected via ``_apply_dense_bypass`` directly to the classifier
         input. The two paths are complementary: NS gives contextual integration
         through HyFormer, bypass gives a full-strength undiluted signal.
+
+        T36 / ADR-013 · When ``enable_global_token`` is True, the user_dense
+        slot is replaced with an aggregated Global Token built from
+        ``[user_dense_feats, mean(user_ns), mean(item_ns), mean(seq_*)]``.
+        Requires ``seq_tokens_list`` and ``seq_masks_list`` to be passed in.
         """
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
         ns_parts = [user_ns]
         if self.has_user_dense:
-            ns_parts.append(
-                F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
+            if self.enable_global_token:
+                if seq_tokens_list is None or seq_masks_list is None:
+                    raise RuntimeError(
+                        "Global Token enabled but seq tokens not provided to "
+                        "_build_ns_tokens. forward() must compute seq tokens "
+                        "first when enable_global_token=True."
+                    )
+                global_token = self._build_global_token(
+                    inputs.user_dense_feats, user_ns, item_ns,
+                    seq_tokens_list, seq_masks_list,
+                )
+                ns_parts.append(global_token)
+            else:
+                ns_parts.append(
+                    F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
         ns_parts.append(item_ns)
         if self.has_item_dense:
             ns_parts.append(
                 F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1))
         return torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
+
+    def _build_global_token(
+        self,
+        user_dense_feats: torch.Tensor,
+        user_ns: torch.Tensor,
+        item_ns: torch.Tensor,
+        seq_tokens_list: List[torch.Tensor],
+        seq_masks_list: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """Compute the Global Token (T36 / ADR-013 Plan B).
+
+        Returns a (B, 1, d_model) tensor that occupies the user_dense slot
+        in ns_tokens. Aggregates user/item NS tokens and per-domain mean-
+        pooled raw sequence embeddings via a shared Linear+LN+SiLU.
+        """
+        user_int_pool = user_ns.mean(dim=1)  # (B, D)
+        item_int_pool = item_ns.mean(dim=1)  # (B, D)
+        seq_pools: List[torch.Tensor] = []
+        for seq_tok, seq_mask in zip(seq_tokens_list, seq_masks_list):
+            # seq_mask: True = padding (per _make_padding_mask). Take the
+            # mean over valid positions only; clamp denominator to avoid
+            # division by zero on all-padding rows (treat as zero pool).
+            valid = (~seq_mask).to(seq_tok.dtype).unsqueeze(-1)  # (B, L, 1)
+            denom = valid.sum(dim=1).clamp_min(1.0)  # (B, 1)
+            pool = (seq_tok * valid).sum(dim=1) / denom  # (B, D)
+            seq_pools.append(pool)
+        seq_pool_cat = torch.cat(seq_pools, dim=-1)  # (B, num_sequences * D)
+        global_concat = torch.cat(
+            [user_dense_feats, user_int_pool, item_int_pool, seq_pool_cat],
+            dim=-1,
+        )  # (B, user_dense_dim + 2D + num_sequences * D)
+        return F.silu(self.global_token_proj(global_concat)).unsqueeze(1)  # (B, 1, D)
 
     def _apply_dense_bypass(
         self, output: torch.Tensor, inputs: ModelInput
@@ -3311,8 +3407,17 @@ class PCVRHyFormer(nn.Module):
 
     def forward(self, inputs: ModelInput) -> torch.Tensor:
         """Runs the forward pass (HyFormer or OneTrans depending on use_onetrans)."""
-        ns_tokens = self._build_ns_tokens(inputs)
-        seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
+        # T36 / ADR-013 · When global_token is enabled, seq tokens must be
+        # built first so _build_ns_tokens can mean-pool them into the
+        # aggregated Global Token slot. Otherwise we keep the original
+        # (ns_first) order to minimize churn in unrelated paths.
+        if self.enable_global_token:
+            seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
+            ns_tokens = self._build_ns_tokens(
+                inputs, seq_tokens_list, seq_masks_list)
+        else:
+            ns_tokens = self._build_ns_tokens(inputs)
+            seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
         seq_tokens_list = self._maybe_inject_target_into_seq(
             ns_tokens, seq_tokens_list)
 
@@ -3350,8 +3455,13 @@ class PCVRHyFormer(nn.Module):
 
     def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
         """Runs inference without dropout, returning (logits, embedding)."""
-        ns_tokens = self._build_ns_tokens(inputs)
-        seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
+        if self.enable_global_token:
+            seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
+            ns_tokens = self._build_ns_tokens(
+                inputs, seq_tokens_list, seq_masks_list)
+        else:
+            ns_tokens = self._build_ns_tokens(inputs)
+            seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
         seq_tokens_list = self._maybe_inject_target_into_seq(
             ns_tokens, seq_tokens_list)
 
