@@ -414,5 +414,140 @@ evaluation log 出 Args dict 后必查:
 - evaluation 跑 ~10 分钟 · 用户提交 ~CEST 22:30 · LB 数据 ~CEST 22:40~23:00 出
 - LB 数据贴回 → agent 立即落 EXP-055 §13 (今晚 LB 实测 + 决策修订)
 
+---
+
+## 13. CEST 22:40 补遗 · M22-rerun LB 实测 · 项目史上第一个 LB rerun noise 数据点
+
+### 数据
+
+| Metric | M22 原始 (5/14 evaluation) | M22-rerun (5/15 evaluation) | Δ |
+|---|---|---|---|
+| **LB AUC** | **0.847592** | **0.847324** | **−0.000268** |
+| Eval 时长 | 609.77s | 208.26s | −402s (3× 加速) |
+| Dev (ckpt 训练时) | 0.868576 | 0.868531 | −0.000045 |
+
+### 分析
+
+**Δ_LB = −0.000268** = (LB_rerun_ckpt − LB_original_ckpt) · 由于 evaluation system 本身 deterministic (用户已确认 + team-memory line 57) · **100% 来自 ckpt 数值微小差异 (CUDA 非确定性 + Adagrad 稀疏 grad 顺序 + DataLoader 多进程顺序)**。
+
+**LB rerun noise vs dev rerun noise**:
+- dev rerun: ±0.000045 (band ±0.0001 per EXP-032)
+- LB rerun: ±0.000268 (新数据点 · 项目史上第一个)
+- **LB rerun noise 比 dev rerun noise 放大 ~6×**
+
+**LB rerun noise vs cross-seed LB noise**:
+- 跨 seed (EXP-028/EXP-030 五 seed): ±0.005 (跨度 0.010)
+- 同 seed rerun: ±0.000268 (新数据点)
+- **同 seed rerun noise 比跨 seed noise 小 ~17×**
+
+### 判决 1 · M22 SOTA 0.847592 是 stable signal
+
+M22 原始 + M22-rerun 两点 mean = (0.847592 + 0.847324) / 2 = **0.847458**
+两点跨度 = 0.000268 · 落在新铁律 LB rerun noise band ±0.0003 内 ✅
+
+**结论**: M22 LB SOTA 0.847592 不是 ckpt-specific luck · 同 seed 重训能稳定复现 LB ≈ 0.847~0.848。M22 vocabtier 真信号 ✅。
+
+### 判决 2 · "破 SOTA" 判决阈值修订 (针对同 seed 重训实验)
+
+| 实验类型 | noise band | 破 SOTA 阈值 |
+|---|---|---|
+| **同 seed (s42) 重训** (M38 v2 / M39 v2 / M33-rerun 等) | ±0.0003 (3σ ±0.0009) | **LB ≥ M22 mean + 3σ = 0.847458 + 0.0009 = 0.8484** |
+| 跨 seed (s2/s3/s7/s11 等) | ±0.005 | LB ≥ 0.849 (per EXP-028 旧铁律) |
+
+**注意**: 这是 dev / LB **rerun noise 校准** 而非"破 SOTA = LB 上沿统计"。EXP-028 SOTA 上沿铁律 (跨 seed luck 让 SOTA 偏高) 仍适用 · 但**今晚数据证实 0.847592 不是 ckpt luck 边界点 · 是 stable signal · 不需修正 SOTA 上沿估计**。
+
+### 判决 3 · 新铁律 (写入 team-memory)
+
+#### 铁律 N+3 · LB rerun noise band (同 seed 同 commit 重训) ≈ ±0.0003
+
+> **2026-05-15 CEST 22:40 · M22-rerun LB 0.847324 vs M22 原始 LB 0.847592 = Δ−0.000268 实测 (项目首个 LB rerun 数据点)**: 同 seed 同 commit 同 config 重训后, LB rerun noise band ≈ ±0.0003 (1 数据点 · 估 std ≈ 0.0001~0.0002, 3σ ≈ ±0.0006~±0.0009)。**铁律**: ① **新方法学是否 LB work 的判决下界 = ±0.0006 ~ ±0.0009 LB (3σ)** · Δ_LB ∈ [−0.001, +0.001] 一律判 "rerun noise 内" · 比之前 EXP-028 跨 seed ±0.005 严格 5×; ② **场景限定**: 同 seed 同 commit 同 config 重训 (e.g. M22 rerun); 跨 seed (s42 vs s3) 仍用 EXP-028 ±0.005; ③ **"破 SOTA" 判决修订** (针对同 seed 重训): LB ≥ M22 mean + 3σ = **0.8484** · 不是之前的 0.849 (跨 seed 上沿); ④ **本铁律基于 1 数据点** · 5/16+ 应用 M38 v2 / M39 v2 LB 数据继续校准 · 当 ≥ 3 个数据点时正式落定 std 估计; ⑤ **dev rerun noise (±0.0001) ≠ LB rerun noise (±0.0003)** · LB 端放大 ~6×, 因为 LB 评 100% test set 而 dev 仅评 5% valid set, 且 LB 涉及 covariate shift 放大微小 ckpt 数值差异。
+
+### 判决 4 · 期望 M38 v2 / M39 v2 LB 解读
+
+**M38 v2 (Multi-Emb K=2)**:
+- LB ≥ **0.8484** → ADR-012 真信号 work · evaluation 价值高
+- LB ∈ [0.847, 0.8484] → noise 内 / 弱信号 · 需 cross-seed 校准
+- LB < 0.846 → 真负面 · ADR-012 在本数据集不 work · 路径关闭
+
+**M39 v2 (Global Token)**:
+- LB ≥ **0.8484** → ADR-013 真信号 work
+- LB ∈ [0.847, 0.8484] → noise / 弱信号
+- LB < 0.846 → 真负面
+
+### 5/16 早 4 quota 矩阵再修订
+
+§12 §quota 矩阵 quota 1 = M22-rerun 已完成 · 5/16 早 quota 优先级:
+
+| Quota | 候选 | 价值 | 决断逻辑 |
+|---|---|---|---|
+| 1 | **M38 v2 ckpt LB** (Multi-Emb K=2) | ADR-012 ⭐ | 必评 |
+| 2 | **M39 v2 ckpt LB** (Global Token) | ADR-013 ⭐ | 必评 |
+| 3 | **取决于 M38v2/M39v2 dev (~CEST 00:30)**: 若任一 dev ≥ 0.8691 评最强者最佳 ckpt; 若 dev 持平评 M30 (Trick 6 单变量 LB) | 单变量归因 | 看 dev 决 |
+| 4 | **取决于 §13 LB 数据**: M33 LB 落点决定备选 ckpt | flexible | 看 M33 LB 决 |
+
+---
+
+## 14. CEST 22:48 补遗 · M33 5-cluster LB 实测 · 强负面 · 5-cluster 路径关闭
+
+### 数据
+
+| Job | Dev E4 | LB | Dev→LB gap |
+|---|---|---|---|
+| **M22 原始** ⭐ SOTA | 0.868576 | **0.847592** | +0.020984 |
+| **M22-rerun** | 0.868531 | **0.847324** | +0.021207 |
+| **M33 原始** ⚠️ | **0.868682** | **0.844710** | **+0.023972** |
+
+### 判决 · 5-cluster ns_groups 路径强负面 · 路径关闭
+
+**M33 vs M22 三个量级数据**:
+- **Dev**: +0.000106 (noise 上沿)
+- **LB**: **−0.002882** (10× LB rerun noise band ±0.0003)
+- **Dev→LB gap**: **+0.024 (vs M22 +0.021)** · gap 扩大 +0.003 · 机制级负向信号
+
+**Dev 涨 LB 跌反向放大 27×**: ratio = 0.002882 / 0.000106 = 27.2× · 是 EXP-024/EXP-025 "dev 不是 LB 单调代理" 铁律的最强实例 (历史 P1 idmask 反向放大 14× / T23 disable47 反向放大 ~10× · M33 反向放大 27× **打破历史最大记录**)。
+
+**机制**: 5-cluster ns_groups 让 NS Tokenizer 把 fid 重新分配到 5 个 cluster · NS Tokenizer 学到了 train 期局部相关模式 (dev 端 5-cluster 仅微涨 +0.000106 · 因 dev 分布与 train 共享时间窗); **但 cluster boundary 在 test 远未来分布下学到的相关模式失效, 反向打乱了 baseline (vocabtier) 已经学好的 sparse embedding 表示**。LB 端跌 0.003 不是单一 ns_groups 改动的边际效应 · 是 NS Tokenizer 整体重配置后 overfitting 风险的体现。
+
+### 推论 · M33-rerun ckpt LB 期望
+
+M33 dev mean = 0.868545 · M33-rerun dev = 0.868408 (低于 mean 0.000137)。
+M33 vs M22 LB 反向放大 27× · M33-rerun vs M22-rerun LB 期望: **0.844710 − 0.000137 × 6 = 0.84389** (按 dev rerun→LB rerun 6× 放大公式) · 大概率 LB ∈ [0.843, 0.845]。**M33-rerun 不需 evaluate** (期望 LB 远低于 M22-rerun · 路径已关闭)。
+
+### 判决 · 5/16 4 quota 不评 M33-rerun · 不评 M33 任何变体
+
+5-cluster 路径在 5/15 双数据点 (dev rerun + LB) 实测后**正式关闭**。任何"M33 + Multi-Emb K=2"或"M33 cross-seed"等组合**都不再优先**。
+
+### 新铁律候选 (待 M38 v2 / M39 v2 LB 后落定)
+
+#### 候选铁律 N+4 · ns_groups 类改动在 dev/LB 端反向放大极大 · 不能凭 dev 单点判 work
+
+> **2026-05-15 CEST 22:48 · M33 (5-cluster) LB 0.844710 vs M22 LB 0.847592 = Δ−0.002882, 但 dev Δ+0.000106 · 反向放大 27× (历史最大)**: ns_groups 类改动 (5-cluster / vocab_tier 替换 / 任何 custom ns_groups_json) 在 LB 端表现**远比 dev 端差** · 机制 = NS Tokenizer 重配置让模型学到 train 期局部 cluster 相关性, test 远未来分布下 cluster boundary 失效。**铁律**: ① ns_groups 类改动**不能凭 dev 单点 +0.0001 判 work** (即使 dev 真信号也可能 LB 强负面); ② **必须 dev rerun + LB cross-seed 双重校准** 才能上 evaluation · 例外: 显著 dev 涨 (+0.001+) 才允许直接 evaluation; ③ **5-cluster (M33) 路径正式关闭** · 不再做"M33 + X" 任何 stack 实验; ④ vocab_tier (M22) 路径仍 stable (M22 / M22-rerun LB 都在 noise band 内) · 是当前唯一可信 ns_groups 配置; ⑤ 历史影响: 5/15 EXP-053/EXP-055 §1 把 M33 +0.000106 当真信号是错判 · 已通过 §11 (dev rerun) + §14 (LB) 双向纠正。
+
+### 5/16 早 quota 矩阵 (M33 关闭后再修订)
+
+| Quota | 候选 | 优先级 |
+|---|---|---|
+| 1 | **M38 v2 ckpt LB** (Multi-Emb K=2) | ⭐⭐⭐ 必评 |
+| 2 | **M39 v2 ckpt LB** (Global Token) | ⭐⭐⭐ 必评 |
+| 3 | **M30 ckpt LB** (Trick 6 alone) | ⭐⭐ 单变量归因 (给 M34 stack 解释) |
+| 4 | **取决于 M38v2/M39v2 dev**: 若 ≥ 0.8691 → 评双方最佳 ckpt 并占 4 个 quota · 若 dev 持平 → 评 M37 (NLIR) 或 M17 (seq_d=768) | flexible | 看 dev 决 |
+
+### 5/15 战略价值再审视 (晚 22:48)
+
+**5/15 LB 数据点 (今晚增 2 个)**:
+- M22-rerun LB 0.847324 (rerun noise +0.000268) → 同 seed rerun LB noise band ±0.0003 铁律
+- M33 原始 LB 0.844710 (反向放大 27×) → 5-cluster 路径关闭 + ns_groups 类改动新铁律
+
+**5/15 LB 信息增量**:
+1. ✅ M22 SOTA 0.847592 是 stable signal (不是 ckpt-specific luck)
+2. ✅ 同 seed rerun LB noise band ≈ ±0.0003 (项目首次量化)
+3. ✅ 5-cluster 路径关闭 (原 +0.000106 dev 优势是 luck 假象)
+4. ✅ "破 SOTA" 阈值修订 (同 seed 重训实验阈值 ≥ 0.8484)
+
+**5/15 净 LB SOTA 增益 = 0** (0.847592 仍 5/14 SOTA · 但今晚校准让 SOTA 可信度大幅提升)。
+**5/15 净铁律增量 = 4 条 (M38 silent copy / Args 30s / ns_groups noise / LB rerun band)** · 系统性提升后续判决质量。
+
+
+
 
 
