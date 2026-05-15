@@ -351,4 +351,68 @@ EXP-032 (icq-t13tf, 2026-05-09) 给出 seed=42 同 commit rerun noise std ≈ 0.
 
 **5/15 战略价值** = 3 个 noise calibration data point + 2 个 RankUp 验证候选启动 · **不是 0** (vs 11:00 audit 时认为的 "净 ADR 验证 = 0")。silent copy 事故吃掉的是 **5/15 单日 ADR-012 验证机会** · 5/16 凌晨已重启。
 
+---
+
+## 12. CEST 22:25 补遗 · 今晚 2 quota 决策 (用户 22:17 反问触发)
+
+### 决策依据
+
+- **5/15 quota 状态**: 已用 2 (M28 LB 0.846514 / M29 LB 0.845312) · **剩 2** · CEST 06:00 5/16 重置 → **2 quota 用不完 = 浪费** (team-memory line 9 铁律)
+- **不能挪到明早**: 今晚 2 = 5/15 quota; 明早 4 = 5/16 quota; **两个独立 4-quota window** · 不累积
+- **5 候选 ckpt**: M22-rerun / M33 原始 / M33-rerun / M30 / M37
+- **战略权重**: 信息价值 (校准 / 路径判决 / 归因) > 大概率突破 SOTA (今晚候选都没有强突破期望 · LB 期望 ≤ 0.847~0.848)
+
+### 今晚 2 quota 选择 · A 方案 (用户决议)
+
+| Eval | ckpt | 战略价值 |
+|---|---|---|
+| **1** | **M22-rerun (dev 0.868531)** | **同 seed 同 commit rerun LB noise band 校准 (史无前例)** · LB 落点决定: ① ≈ 0.847 ± 0.0005 → SOTA stable ② 显著偏离 → ckpt-specific luck 重大警示 |
+| **2** | **M33 原始 (dev 0.868682)** | **5-cluster 路径 LB 端验证** (dev 端 mean 已知 ≈ M22 · LB 端可能有路径独有特性) · LB 落点决定: ① > 0.848 → 5-cluster LB 真有路径优势 ② ≈ M22 0.8475 → 路径关闭 ③ < 0.846 → 路径有害 |
+
+### 拒绝候选 · 理由
+
+- **M30 (Trick 6 alone)**: dev 0.868438 < M22 dev 0.868576 = −0.000138 (out-of-band 边界) · LB 期望 ≈ 0.846 · 大概率不破 SOTA · 价值 = 给 M34 stack 归因 · 但 M34 dev 也低 · 不是优先候选
+- **M22-rerun + M33-rerun 双校准**: 占 2 quota 全用 noise · 0 架构信号增量 · M33-rerun dev (0.868408) < M22-rerun (0.868531) · LB 已知大概率低于 M22-rerun · 不需 quota 验证
+- **M37 (NLIR) / M17 (seq_d=768)**: dev 离 M22 远 · LB 期望 < SOTA · 信息增量低于 A 方案
+
+### Publish 三步检查 (team-memory line 25)
+
+1. ✅ 是 `*.best_model/` 子目录 (路径含)
+2. ✅ 训练完成 (stop_reason=max_epochs_completed)
+3. ⚠️ 子目录内含 `model.pt` + `train_config.json` + `schema.json` (用户 platform UI 确认)
+4. ⚠️ M33: 子目录内含 `ns_groups_5cluster.json` (trainer auto-copy · 通常都对 · 但需 verify)
+
+### Evaluation 上传文件 (3 件套)
+
+- `src/infer.py`
+- `src/dataset.py`
+- `src/model.py`
+
+(防 silent failure · 即使是 M22 baseline 不带新 kwarg · commit 6045954 起 train_config.json 落了 `enable_global_token` 字段 · 平台 default infer.py 兼容性未验证)
+
+### Args dict 30s 验证 (5 keys)
+
+evaluation log 出 Args dict 后必查:
+- `enable_global_token`: False · `enable_nlir_gating`: False · `multi_emb_k`: 1 · `enable_din_interest`: True
+- `ns_groups_json`: M22-rerun = vocab_tier / M33 = 5cluster
+- `seq_max_lens`: `seq_a:256,seq_b:256,seq_c:512,seq_d:512`
+- 任一不对 · 立即 cancel · 不浪费 2 quota 任何一个
+
+### 5/16 早 4 quota 矩阵更新
+
+§11 §判决 3 中 quota 1 = M22-rerun LB 已**今晚提前完成** · 5/16 早 4 quota 候选修订:
+
+| Quota | 候选 | 价值 |
+|---|---|---|
+| 1 | **M38 v2 ckpt LB** (Multi-Emb K=2) | ADR-012 LB 验证 ⭐ |
+| 2 | **M39 v2 ckpt LB** (Global Token) | ADR-013 LB 验证 ⭐ |
+| 3 | **取决于 M38v2/M39v2 dev**: 若 ≥ 0.8691 ⭐ 评最强者最佳 ckpt; 若 dev 持平 评 M30 (Trick 6 单变量 LB · 给 M34 stack 归因) |
+| 4 | **取决于今晚 LB**: 若 M22-rerun 偏离 0.847 显著 → 评 M22 原始 ckpt 二度校准 (但不太可能·0.847 应该 stable) · 否则 评 M37 (NLIR) 或 M30 (上一项备选) |
+
+### 时间预期
+
+- evaluation 跑 ~10 分钟 · 用户提交 ~CEST 22:30 · LB 数据 ~CEST 22:40~23:00 出
+- LB 数据贴回 → agent 立即落 EXP-055 §13 (今晚 LB 实测 + 决策修订)
+
+
 
