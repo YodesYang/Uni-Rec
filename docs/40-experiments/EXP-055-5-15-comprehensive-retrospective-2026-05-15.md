@@ -236,3 +236,65 @@ M33 (5-cluster) 被定义为"stack 候选"·**实际是 vocabtier 的替代** (v
 - 5/15 14:25 user 自主起 M22-rerun + M33-rerun (rerun 噪声测量) · agent 没想到
 
 **5 次 agent 主动 / 用户被动**: agent 应主动测 cross-seed · 不应等用户提醒。
+
+---
+
+## 10. CEST 19:25 补遗 · M38 Silent Copy 事故
+
+### 事故描述
+
+`M38-m9stack-multi_emb_k2-gap0-seed42-4ep` 5/15 18:30~01:08 跑完 5h40m · dev E4 0.868347。**实际 platform args 显示**:
+
+| Flag | M38 实际值 | 期望 (M22 + multi_emb_k=2) | M37 (NLIR) | 偏差 |
+|---|---|---|---|---|
+| `multi_emb_k` | **1** | 2 | 1 | ❌ Multi-Emb 没启用 |
+| `enable_nlir_gating` | **True** | False | True | ❌ NLIR 错误启用 |
+| `enable_din_interest` | True | True | True | ✅ |
+| `seq_max_lens` (seq_d) | 512 | 512 | 512 | ✅ |
+| `ns_groups_json` | vocab_tier | vocab_tier | vocab_tier | ✅ |
+
+**实际等价**: M22 + NLIR + seq_d=512 = **M37 复刻**。
+
+### Root cause = 平台 Silent Copy
+
+- agent CEST 12:42 给的 M38 run.sh **正确**包含 `--multi_emb_k 2`、不含 `--enable_nlir_gating` (transcript line 1585)
+- 用户在平台用 "Copy from M37" 起 M38 (M37 是上午刚跑完的 NLIR job, 5/15 11:40 起)
+- 用户编辑 run.sh / 选上传文件 · UI 上 "看起来" 修改了
+- **但 backend 实际 snapshot 仍是 M37 的 frozen run.sh + frozen 上传文件 (5/15 早 commit, 不含 ADR-012 multi_emb_k 代码)**
+- Silent failure: 没 unrecognized args error · **因为 `--multi_emb_k 2` 根本没传给 train.py · NLIR flag 被 M37 frozen run.sh 携带**
+
+### M38 数据处理决定
+
+- **Drop M38 当 Multi-Emb K=2 数据点** · 完全不入主表
+- **Footnote 当 M37 cross-rerun 样本**: M37 0.868311 vs M38 0.868347 = +0.000036 · 落在 EXP-032 实测 rerun noise 带 ±0.0001 内 → 加固 §M37 NLIR 真负面方向判决 (vs M22 0.868576 双点 mean 0.868329 = −0.000247 · 不是 single seed luck)
+- **M38 ckpt 不 publish** · 平台自然 GC
+
+### ADR-012 Multi-Embedding K=2 仍未验证
+
+5/15 EXP-053 触发 ADR-012 起草 · CEST 12:42 实施完成 · 但 **5/15 一整天没拿到任何 platform 数据点**。M38 v2 (`M38v2-multiembk2-m22-gap0-seed42-4ep`) 5/15 CEST 19:30 重起 · ~01:30 5/16 完成。
+
+### 新铁律 (写入 team-memory)
+
+#### 铁律 N · 平台 Silent Copy 风险
+
+> **平台 Training "Copy from XX" 即使用户编辑了 run.sh / 重新上传文件, backend 仍可能保留 frozen snapshot**。已知模式: 2026-05-01 unrecognized-args 失败模式 (loud); 2026-05-15 silent-success 模式 (M38 跑了旧 NLIR config 5h)。**只能信赖 "Create New Training Job"**, 重新上传所有文件 + 重新粘贴 run.sh。**Copy 永远禁用** (除非 0 代码改动 0 args 改动 · 仅改 job name)。
+
+#### 铁律 N+1 · 启动后 30s grep Args dict 验证
+
+> **任何 platform job 启动后 30 秒内 必须 grep `Args: {...}` log dict 验证 5+ key flags**:
+>
+> 1. job 名标榜的核心 flag (e.g. `multi_emb_k`, `enable_global_token`)
+> 2. 任何上一类似 job 引入的 flag, 必须确认**没继承** (e.g. `enable_nlir_gating`)
+> 3. STRUCTURAL 不变 flags: `ns_tokenizer_type` / `user_ns_tokens` / `item_ns_tokens` / `num_queries` / `ns_groups_json` / `seed`
+> 4. baseline 关联 flag: `seq_max_lens` (M22 = seq_d:512, M17 = seq_d:768)
+> 5. AMP / compile / ckpt 相关 (`enable_amp`, `keep_topk_ckpt`)
+>
+> **任一不对**: cancel job (sunk 30s) · Create New Training Job (NOT Copy) 重起。**5h GPU 浪费 vs 30s 验证 = 600x ROI**。
+
+### 5/15 实际净增量 vs 计划
+
+5/15 12:00~22:00 计划 = "M37 + M38 双 RankUp 论文核心方向数据点齐全"
+5/15 实际 22:00 = "M37 单点 (NLIR) + M38 仅作 M37 cross-rerun + Multi-Emb K=2 / Global Token 全部 pending"
+
+**1 整天 GPU-hour 净 ADR 验证 = 0** · M38 silent copy 事故吃掉了 Multi-Emb 验证机会。
+
