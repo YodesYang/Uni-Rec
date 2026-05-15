@@ -47,9 +47,21 @@ TokenFormer 作者团队 = Tencent Ads（Junwei Pan, Jie Jiang, Haijie Gu 等，
 - NLIR 和 BFTS **几乎独立可加**（5.76 ≈ 4.87 + 4.91 - 4.02 residual overlap），证明 gating 机制本身就是值得单独迁移的 trick。
 - TokenFormer 在 Tencent 生产环境 A/B 测试：**NLIR alone vs 基线 +0.14% → +NLIR 后 +0.22%**（§5.7 Online Ablation Study）。
 
-#### 3. 本赛题数据支持：dev→LB gap 的共性机制
+#### 3. 本赛题数据 · 机制假说（非实证）
 
-本项目 EXP-019 / EXP-040 / EXP-041 多次观察到 **Dev→LB gap 扩大 = 模型过度 memorize 训练期 NS token 分布 → test 远未来泛化失败**。这正是 **SCP 的 mechanism**（低基数 NS token 压缩 Seq token 表示的有效秩）。**NLIR 的理论功能就是缓解 SCP**。
+⚠️ **2026-05-15 修订（10 年研究员严格 audit · 收回过度引用）**：原 v2 此段写 "EXP-019/040/041 多次观察到 Dev→LB gap 扩大 = SCP mechanism" · **严格 grep 这 3 EXP 文档无 SCP / NS-shift / cross-attn 线性等字眼** · **是机制猜测被包装成实证观察**。
+
+**实际情况**：
+- EXP-019 / EXP-040 真实结论 = "seed × DIN × gap 交互敏感" (target/seed 交互机制)
+- EXP-041 真实结论 = "per-X 独立参数三连败" (gradient starve)
+- **本赛题观察到 dev→LB gap 是事实** · **SCP 是 *一个* 可能机制 · 未经实证**
+
+**NLIR 的核心论据保留**：
+- TokenFormer §5.7 ablation **NLIR alone +4.87‰ AUC** (KuaiRand-27k)
+- 同团队 Tencent 生产 A/B online **+0.14% → +0.22%**
+- 本项目 cross-attn 是**纯线性 softmax · V**（事实层 · 机制对口）
+
+**SCP 是否在本赛题成立 · 由 S2/S3 实测判决**·不再以"实证"姿态引用。
 
 #### 4. 和已证伪方向的关键差异
 
@@ -126,25 +138,36 @@ decoded_q_i = gate * raw_q_i + q_tokens_list[i]                   # NLIR + resid
   3. train 5 steps（demo 1k）+ infer 1000 predictions 无 state_dict mismatch
 - Gate 数值健康检查：打印首个 batch 的 `gate.mean() / gate.std() / gate.min() / gate.max()`，期望 mean ≈ 0.5 / std > 0.1（不全饱和）
 
-### S2 平台 half-train（Go/No-go 阈值）
+### S2 平台 half-train（Go/No-go 阈值 · 2026-05-15 修订）
 
-| Job Name | Config | 阈值（vs `icq-half-gap05` E3 Dev 0.842443） |
+⚠️ **2026-05-15 严格修订**: 论文 §5.7 online ablation **NLIR alone +0.08% AUC**（推算 BFTS+NLIR 0.22% − BFTS 0.14%）· **不是 KuaiRand academic +4.87‰**。本赛题工业规模 1.9M · **必须以 online ablation 为基准**。Academic +4.87‰ 是 27k user 上的 absolute 增量·与 1.9M 工业规模不严格类比。
+
+#### gap=0 path (主路 · M22 baseline E3 Dev ≈ 0.8686)
+
+| Job Name | Config | 阈值 |
 |---|---|---|
-| `t33-nlir-halftrain-gap05-seed42` | gap=0.05 + `--enable_nlir_gating` + 其余 = M9 非 DIN config | **E3 Dev ≥ 0.8437**（+0.0013 = 3× rerun 噪声）→ 🎯 强信号 |
-| `t33-nlir-halftrain-gap05-seed3` | 同上 seed=3 · 松 guard | 双 seed 确认阈值 |
+| `t33-nlir-halftrain-gap0-seed42` | gap=0 + `--enable_nlir_gating` + M22 config | **E3 Dev ≥ 0.8693**（+0.0007 = 100% online 迁移）→ 🎯 强信号 |
+| `t33-nlir-halftrain-gap0-seed3` | 同上 seed=3 · 松 guard | 双 seed 确认 |
 
-**判决矩阵**：
-- E3 Dev ≥ 0.845（+0.0026 · 对标 TokenFormer +4.87‰ 的 1/2 迁移率）→ 🎯🎯 **强真信号** · 立即 LB 校准
-- E3 Dev ∈ [0.8437, 0.845) → 🎯 真信号 · eval
-- E3 Dev ∈ [0.8433, 0.8437) → 🟡 疑似 · seed=3 rerun 复现
-- E3 Dev ∈ [0.8421, 0.8433) → ⚪ 持平（±0.0003 rerun 噪声 + ±0.001 采样偏差内）→ Deprecated
-- E3 Dev < 0.8421 → ❌ 负向 → 关闭
+**判决矩阵 (gap=0 path)**:
+- E3 Dev ≥ 0.8693（+0.0007 Dev）→ 🎯🎯 **强真信号** · 100% online 迁移
+- E3 Dev ∈ [0.8689, 0.8693) → 🎯 真信号 · ~50% online 迁移 · eval
+- E3 Dev ∈ [0.8683, 0.8689) → 🟡 疑似 · ±0.0003 rerun 噪声内 · seed=3 复现
+- E3 Dev < 0.8683 → ❌ 负向
 
-### S3 Leaderboard 校准（仅 S2 通过）
+#### gap=0.05 path (历史参考 · baseline 0.842443)
 
+| Job Name | 阈值 |
+|---|---|
+| `t33-nlir-halftrain-gap05-seed42` | E3 Dev ≥ **0.8439** (+0.0015 = 论文 +0.18% × baseline) → 真信号 |
+
+### S3 Leaderboard 校准（仅 S2 通过 · 2026-05-15 修订）
+
+⚠️ **阈值修订** (基于 online +0.08% 迁移率):
 - 消耗 1 evaluation quota / seed
-- 阈值：**LB ≥ 0.842**（vs baseline 0.839223 · Δ+0.003 = 方法学信号）
-- 强信号：**LB ≥ 0.846**（破 T25 bypass B LB 0.843433 + Δ+0.0026）
+- **LB ≥ 0.8478** (M22 0.84759 + 25% online 迁移率) → 真信号
+- **LB ≥ 0.8482** (M22 + 75% online 迁移率) → 强真信号
+- **LB ≥ 0.8500** (Top 20 阈值) → 🎯🎯🎯 必须叠加 Multi-Emb + Global Token + S4 才能到
 
 ### S4 叠加（仅 S3 真信号）
 

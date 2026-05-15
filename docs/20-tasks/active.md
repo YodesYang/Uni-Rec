@@ -11,14 +11,14 @@
 > **Agent 铁律**: 给提案 / 陈述 / 判决前必先读本段·**只有列在"Active"区的 EXP/ADR/Task 才进 decision loop · 其他全部 ARCHIVED 默认跳过**。
 > 5/14 单日 5 次幻觉根因之一 = "把已 deprecated 方向当未消化候选"·本段就是 anti-hallucination 索引。
 
-### Work in flight (4 training jobs · CEST 20:32 · M22 LB 实测后启 stack 系列)
+### Work in flight (4 training jobs · CEST 11:40 5/15 · M33/M34/M36 跑中 + T33 NLIR 接管 slot 4)
 
 | Job | Path | 进度 | 完成预计 (CEST = 北京 −6h) | 预期信号 |
 |---|---|---|---|---|
-| **M28** (vocabtier + Trick 1) | gap=0 | 跑中 (~20:25 起) | **~01:30 (5/15)** | stack 第一步 · LB 估 0.848~0.849 |
-| **M29** (vocabtier × seed=3) | gap=0 | 待起 | ~01:30 | 校准 vocabtier 真信号 |
-| **M30** (Trick 6 Q_init) | gap=0 | 待 50 行 code apply (~21:00 起) | ~02:00 | DECEM 唯一未试方向 |
-| Slot 4 | — | 留作 backup · 看 M28 早期 dev 决 | — | — |
+| **M33** (5-cluster ns_groups) | gap=0 | 跑中 | ~15:30 | T35 EDA-049 cluster 真信号校准 |
+| **M34** (vocabtier + Trick 6) | gap=0 | 跑中 | ~15:30 | M22 + Trick 6 双 stack |
+| **M36** (vocabtier × seed=7) | gap=0 | 跑中 | ~15:30 | vocabtier cross-seed std 真测 |
+| **t33-nlir-halftrain-gap0-seed42** ⭐ | gap=0 (M22 + NLIR) | 11:40 启 (用户操作中) | ~16:35 | EXP-054 · T33 NLIR gap=0 path 首测 |
 
 ### 🔥 5/14 关键 LB 数据点 (EXP-052 落档)
 

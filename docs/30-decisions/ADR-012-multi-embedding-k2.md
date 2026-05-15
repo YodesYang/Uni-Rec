@@ -154,18 +154,38 @@ Multi-Emb **精确对口结论 2/3**：对"信息丰富 + 大 vocab" 的 fid（�
 | `t34-multiemb-k2-halftrain-gap05-seed42` | gap=0.05 + `--multi_emb_k 2` + `--batch_size 96` + M9 非 DIN config | E3 Dev ≥ 0.8437 · Go |
 | `t34-multiemb-k2-halftrain-gap05-seed3` | 同上 seed=3 · 松 guard | 双 seed 确认 |
 
-**判决矩阵（gap=0.05 配置下）**：
-- E3 Dev ≥ 0.846（+0.0036）→ 🎯🎯 **强真信号**（对标论文 +0.18% AUC 迁移到 dev）→ 立即 LB 校准
-- E3 Dev ∈ [0.8437, 0.846) → 🎯 真信号 · eval
-- E3 Dev ∈ [0.8421, 0.8437) → ⚪ 持平 · Deprecated
-- E3 Dev < 0.8421 → ❌ 负向 + 回顾是不是 VRAM 降 batch 造成的收敛问题
+**判决矩阵（2026-05-15 严格修订 · RankUp §4.2 Table 1 严格审计）**：
 
-### S3 Leaderboard 校准（仅 S2 通过）
+⚠️ **严格审计**: 论文 +0.21% / +0.18% / +0.13% 是 **"Global Token + Multi-Emb 组合"**·**不是 Multi-Emb alone**。Multi-Emb 单独贡献估 **+0.08%~+0.15% online AUC**（减去 Global Token ~+0.05% 份额）。
 
+#### gap=0 path (主路 · M22 baseline E3 Dev ≈ 0.8686)
+
+| Job Name | Config | 阈值 |
+|---|---|---|
+| `t34-multiemb-k2-halftrain-gap0-seed42` | gap=0 + `--multi_emb_k 2` + M22 config + `--batch_size 96` | **E3 Dev ≥ 0.8696**（+0.0010 = 100% online 迁移）→ 强信号 |
+| `k1-batch96-baseline-seed42` | 同上但 `--multi_emb_k 1` | 隔离 batch=128→96 penalty |
+
+**判决矩阵 (gap=0 path)**:
+- E3 Dev (K=2) − E3 Dev (K=1 batch=96) ≥ +0.0010 → 🎯🎯 100% online 迁移 · 强真信号
+- ΔDev ∈ [+0.0005, +0.0010) → 🎯 50% online 迁移 · 真信号 · eval
+- ΔDev ∈ [+0.0001, +0.0005) → 🟡 疑似 · seed=3 复现
+- ΔDev < 0 → ❌ 负向 (K=2 干扰)
+
+#### gap=0.05 path (历史参考 · baseline 0.842443)
+
+| Job Name | 阈值 |
+|---|---|
+| `t34-multiemb-k2-halftrain-gap05-seed42` | E3 Dev ≥ **0.8440** (+0.0016 = 论文 +0.18% × baseline) → 真信号 |
+| 同 K=1 batch=96 对照 | ΔDev > 0 = 真信号 |
+
+### S3 Leaderboard 校准（仅 S2 通过 · 2026-05-15 修订）
+
+⚠️ **阈值修订** (基于 online +0.10% Multi-Emb alone 迁移率):
 - 1 eval quota / seed
-- LB ≥ 0.842 → 真信号 · 进 S4
-- LB ≥ 0.846（破 T25 bypass B）→ 🎯🎯 强真信号 · 优先叠加
-- LB < 0.841 → 疑似 noise · seed=3 rerun
+- **LB ≥ 0.8480** (M22 0.84759 + 25% online 迁移) → 真信号
+- **LB ≥ 0.8485** (M22 + 50% online 迁移) → 强信号
+- **LB ≥ 0.8489** (M22 + 75% online 迁移 ≈ ADR-013 Global Token 叠加门槛)
+- **LB < 0.8475** → 疑似 noise / batch=96 penalty 主导 · seed=3 rerun
 
 ### S4 叠加
 
