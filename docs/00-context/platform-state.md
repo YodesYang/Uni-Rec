@@ -2,7 +2,7 @@
 
 > **每次 agent 推荐 platform 操作前必须 grep 此文件**。任何资源状态陈述 (slot / quota / in-flight) 凭此文件 · 不凭印象。
 >
-> **Last updated**: 2026-05-16 CEST 14:50 (M49 evaluation 已提交 · today quota 用满 4/4)
+> **Last updated**: 2026-05-16 CEST 21:15 (M49 LB 0.848162 · 项目首个超 SOTA · path B 弱真信号)
 
 ---
 
@@ -48,9 +48,9 @@
 
 | Day | Used | Remaining | Used by |
 |---|---|---|---|
-| **5/16 (today)** | **4** | **0** | M40 LB 0.846931 + M41 LB 0.847846 + M23 retry LB 0.836631 + **M49 evaluation in-flight** ⭐ |
+| **5/16 (today)** | **4** | **0** | M40 LB 0.846931 + M41 LB 0.847846 + M23 retry LB 0.836631 + **M49 LB 0.848162 ⭐ 新 SOTA** |
 | 5/15 (closed) | 4 | 0 | M28 LB 0.846514 + M29 LB 0.845312 + M22-rerun LB 0.847324 + M33 LB 0.844710 |
-| 5/14 (closed) | 1 | (overflow to 5/15 ❌) | M22 LB 0.847592 ⭐ SOTA |
+| 5/14 (closed) | 1 | (overflow to 5/15 ❌) | M22 LB 0.847592 (前 SOTA · 现 #2) |
 
 **Next reset**: CEST 06:00 5/17 = 北京 12:00 5/17
 
@@ -82,11 +82,13 @@
 
 ## Strategic Status (5/16 CEST 08:43)
 
-**LB SOTA**: M22 (vocabtier × s42) = **0.847592** (5/14)
+**LB SOTA**: **M49 (UE split T37 ADR-014) = 0.848162** ⭐ NEW (5/16)
+**前 SOTA**: M22 (vocabtier × s42) = 0.847592 (5/14)
+**M49 vs M22 Δ**: +0.000570 (超 same-seed rerun band ±0.0003 · 未破 0.8484 严格阈值)
 **LB rerun band**: ±0.0003 (M22 / M22-rerun)
 **LB cross-seed band**: ±0.005 (EXP-028)
 **破 SOTA 阈值 (same-seed rerun)**: ≥ 0.8484
-**距 0.85 (Top 20)**: 还差 +0.0024
+**距 0.85 (Top 20)**: 还差 +0.0018
 
 **🔴 5/22 前 seed 策略 (用户 5/16 CEST 08:48 战略决断)**:
 - **默认锁 `seed=42`** (实证 LB 上沿 · EXP-028 + M22 路径双重确认)
@@ -145,6 +147,7 @@
 
 ## Update Log
 
+- **2026-05-16 CEST 21:15**: 🎉 **M49 LB 0.848162** = 项目首个超 SOTA · UE split (T37 ADR-014) 弱真信号 · Δ+0.000570 vs M22 · 超 rerun band 但未破 0.8484 严格阈值 · dev→LB 衰减 73% · 5/17 早 4 quota 优先评 M50 / M37 / M38v2 · 不破 cross-seed 铁律 · 见 EXP-059
 - **2026-05-16 CEST 14:50**: M49 evaluation 已提交 · today quota 用满 4/4 · 等 LB 结果 (~CEST 19:00 上榜) · 期望区间 0.847~0.850 (path B 首测 · 决 5/17 4 quota 方向)
 - **2026-05-16 CEST 14:43**: M23 retry LB 0.836631 (−0.011 强负 · path A DCN cross 死透闭环) + M45/M48/M49 dev 回流 · M49 dev 0.870741 (+0.002122 项目首个超 M22 真信号 · UE split ADR-014 实证) · 5/16 today quota 修订为 used=3 / remaining=1 · 晚 1 quota 必评 M49 LB
 - **2026-05-16 CEST 08:43**: 文件创建 (用户反问 "彻底解决问题" 触发) · 状态镜像 5/16 早 4 jobs 完成 + 早 2 evaluation 完成
