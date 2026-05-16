@@ -52,7 +52,9 @@
 **Next reset**: CEST 06:00 5/17 = 北京 12:00 5/17
 
 **Today (5/16) remaining 2 quota usage plan**:
-- 晚 2 (CEST ~21:00): 候选基于早 2 LB 决 (M38 v2 + M39 v2 RankUp 闭环 · 或基于 5/16 下午 dev 数据调整)
+- 晚 2 (CEST ~21:00) **修订 (CEST 09:00 5/16 audit)**:
+  - ⭐⭐⭐ **M23** (T34 DCN gap=0 · dev 0.868311 · LB 待评) · 决 cross 路径 work 不 work · 期望 LB +0.001~+0.003
+  - ⭐⭐ **M38 v2** (Multi-Emb K=2) · RankUp 闭环 · 期望 LB ~0.847
 
 ---
 
@@ -93,10 +95,10 @@
 - 7/7 新方向 (M37/M38/M39/M40/M41/Multi-Emb/Global Token) dev 都不超 M22 · vocabtier 路径**接近局部最优**
 - **path B (UE 分离 + int pairwise cross)** 是当前唯一未尝试的破局方向 · ADR-014 待起草
 
-**5/16 下午 14:00 计划** (4 free slot):
-- 1 slot: path B first job (依赖 ADR-014 ~14:00 完成 + smoke ~14:00)
-- 1 slot: M44 = M22 + temporal_weight 2.5 + Multi-Emb K=2 stack (无依赖 · 现在能起)
-- 2 slot: 留空 / 信号驱动 / 5/16 晚晚 2 LB 后决
+**5/16 下午 14:00 计划 (CEST 09:00 audit 修订)** (4 free slot):
+- 1 slot: **path B first** (M22 + UE 分离 + DCN cross stack · 依赖 ADR-014 ~14:00 完成)
+- 1 slot: **M44** = M22 + temporal_weight 2.5 + Multi-Emb K=2 stack + EDA_BLOB 搭车 (Tier 1 EDA)
+- 2 slot: 留空 / 信号驱动 / 5/16 晚 LB 后决
 
 **关键 deprecated 方向** (不再投资源):
 - ❌ 5-cluster ns_groups (M33 LB 反向放大 27× · 路径关闭)
