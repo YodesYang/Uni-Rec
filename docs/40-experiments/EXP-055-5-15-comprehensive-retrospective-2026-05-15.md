@@ -803,6 +803,111 @@ M33 vs M22 LB 反向放大 27× · M33-rerun vs M22-rerun LB 期望: **0.844710 
 | 22:30 | 晚 2 LB 数据出 | — |
 | 23:00 | 晚 LB audit · 决 5/17 早 quota | — |
 
+---
+
+## 17. CEST 08:35 5/16 补遗 · 早 2 LB 数据回流 · M41 dev↓ LB↑ 项目史上首个反例
+
+### 17.1 数据
+
+| Job | Dev | LB | Δ_LB vs M22 SOTA (0.847592) | dev/LB 关系 |
+|---|---|---|---|---|
+| M22 ⭐ SOTA | 0.868576 | 0.847592 | (anchor) | — |
+| M22-rerun | 0.868531 | 0.847324 | −0.000268 (in band) | dev↓ LB↓ |
+| **M40** (hour_only) | 0.866881 | **0.846931** | **−0.000661** | dev↓ LB↓ (但 LB 跌幅小于 dev) |
+| **M41** (temporal_weight 2.5) | 0.868069 | **0.847846** | **+0.000254** ⭐ | **dev↓ LB↑ 项目首个反例** |
+
+### 17.2 重大判读 · M41 LB > M22 SOTA + dev↓ LB↑ 反向
+
+**M41 dev↓ LB↑ 是 5/4 ~ 5/16 项目首个反例**:
+- 之前 8 个 dev↓ 实验 LB 全跌 (M28/M29/M36 + EXP-019 full 等)
+- M41 是第一个 dev 跌但 LB 涨的实验
+- **机制完美匹配** EXP-055 §16.9 ex-ante 估的 "M41 是 LB-target reweight · 50% 反向可能"
+- **完美 confirm** "method 类型决定 dev/LB 关系" (容量扩张类 vs anti-memorization / LB-target 类)
+
+**ratio 计算**: dev 跌 0.000507 / LB 涨 0.000254 = **dev/LB 反向比 0.5** (LB 涨幅是 dev 跌幅的 50%)
+
+### 17.3 M41 LB +0.000254 是真信号还是 rerun noise?
+
+**严格用 LB rerun band ±0.0003 (5/15 立的铁律) 判**:
+
+- M22 mean (M22 + M22-rerun) = **0.847458**
+- 破 SOTA 3σ 阈值 = 0.847458 + 0.0009 = **0.8484**
+- M41 LB **0.847846** vs 阈值 0.8484 = **−0.0006** · **没破 3σ 阈值**
+- M41 LB 0.847846 vs M22 anchor 0.847592 = +0.000254 = **0.85σ** · **弱信号 · 在 noise band 内**
+
+→ **真信号还是 rerun noise · 不能凭单点判 · 需 cross-seed 校准**。
+
+### 17.4 M40 dev↓ LB↓ 但 LB 跌幅小于 dev · dow 假设半证伪
+
+**ratio 计算**: dev 跌 0.001695 / LB 跌 0.000661 = LB 跌是 dev 跌的 **39%**
+
+**机制解读**:
+- 移除 dow 在 valid set 上完全失去信号 (valid 含 03-03/03-04 双 weekday) → dev 大跌
+- LB 全是 03-04 dow=2 单 weekday → dow 部分失效但**仍有用** (因 train 03-03/03-04 mixed 学的 dow=1 info 仍能从 hour 隐式 transfer)
+- → dow 不是纯误导信号 · 是 **混合信号** (有用 + 有误导)
+- **dow 假设半证伪** (不是完全错 · 是部分错)
+
+### 17.5 5/16 下午 14:00 training 决策 · M41 cross-seed
+
+**早 2 LB 综合**:
+- M41 弱信号 (LB +0.000254 · noise band 内 · 机制 plausible)
+- M40 半证伪 (dow 移除负向但不强)
+- → daypart 路径整体仍有 ROI · 不立即 path B pivot
+
+**5/16 下午 training 推荐** (2 jobs):
+
+| Job | 配置 | 期望 dev | 期望 LB | 战略价值 |
+|---|---|---|---|---|
+| **M42** = M41 × s3 | M22 + temporal_weight 2.5 + seed=3 | ~0.867 | 0.845~0.848 | M41 真信号判 |
+| **M43** = M41 × s7 | M22 + temporal_weight 2.5 + seed=7 | ~0.866 | 0.840~0.847 | M41 cross-seed 第 2 数据点 |
+
+**Why s3 + s7**:
+- M22 × s3 (M29) LB 已知 0.845312 → ΔLB_M41×s3 vs M29 是 reweight 真信号
+- M22 × s7 (M36) LB 已知 0.836413 → ΔLB_M41×s7 vs M36 是 reweight 真信号 (s7 路径)
+- 双 cross-seed sample 比单 seed 更稳
+
+**铁律 check**: EXP-035 "每假设 ≤ 2 seed (除最终上沿搜索阶段)" · 5/25 ddl 距 9 天 · 最终上沿搜索阶段 · **允许 ≥ 2 seed**。
+
+**拒绝候选**:
+- M41 × Multi-Emb K=2 stack: stack 第 2 步 5/14~5/15 全失败 · 不在弱信号上盲堆 stack
+- M40 + M41 stack: M40 LB 已 confirmed 半负 · stack 风险高
+- path B 立即切换: M41 弱信号给 daypart 路径 1 天验证机会 · 不浪费 5/16 下午
+
+### 17.6 晚 2 evaluation (CEST 21:00) 候选
+
+**目标**: 在 5/16 下午 training jobs 完成前 (~5/17 凌晨) · 用晚 2 评 RankUp 闭环 + 任何 5/15 早 ckpt。
+
+| 优先级 | 候选 | 期望 LB | 战略价值 |
+|---|---|---|---|
+| 1 ⭐⭐⭐ | **M38 v2 ckpt** (Multi-Emb K=2) | ~0.846~0.847 | RankUp 论文方向闭环 · ADR-012 |
+| 2 ⭐⭐⭐ | **M39 v2 ckpt** (Global Token) | ~0.844~0.847 | RankUp 论文方向闭环 · ADR-013 |
+
+→ **晚 2 = M38 v2 + M39 v2 · 5/16 一次性闭环 RankUp 路径**。
+
+### 17.7 5/17 早 quota refresh 预案
+
+**取决于 M42 / M43 dev (~CEST 23:00 5/16) + M38 v2 / M39 v2 LB (~CEST 22:30 5/16)**:
+
+- **场景 P · M42 + M43 dev > M22 × s3/s7 dev** 显著 → reweight 真信号 → 5/17 早 4 quota: M42 + M43 + M22 × s11/s2 (拓宽 cross-seed 上沿)
+- **场景 Q · M42 + M43 dev ≈ M22 × s3/s7 dev** → reweight noise · daypart 路径关闭 → 5/17 早 4 quota: 评其他老候选 / path B 切换
+- **场景 R · M38 v2 / M39 v2 LB > 0.8484** (~10% 概率): RankUp 真信号 → 5/17 早评 cross-seed
+
+### 17.8 真实 Top 20 概率 (再再修订)
+
+- 22:55 (5/15 晚) 估: 10~15%
+- 23:30 (5/15 晚) 估: 20~30% (元宵节认知方向 ex-ante)
+- **07:35 (5/16 早) 估: 5~10%** (4/4 dev 全负面 · 元宵节方向 dev 端证伪)
+- **08:35 (5/16 早) 估: 10~15%** ⭐ 上调 (M41 LB +0.000254 弱真信号 · daypart 路径仍有 ROI · 但仍距 0.85 还差 0.0022)
+
+**核心更新**: M41 LB +0.000254 让 daypart 路径**没死透** · 但仍是弱信号 · cross-seed 是关键判决。
+
+### 17.9 新铁律候选 (待 M42/M43 数据后落定)
+
+#### 候选铁律 N+6 · LB-target reweight 类方法可在 dev↓ 时仍 LB↑
+
+> **2026-05-16 CEST 08:35 · M41 (temporal_weight_alpha=2.5) dev −0.000507 / LB +0.000254 · 项目首个 dev↓ LB↑ 反例**: temporal_weight reweight 让 train 期 03-04 sample (test 同日) 升权 · 03-03 元宵节 sample 降权 · valid set (混合 daypart) 上 dev 跌 · 但 LB (全 03-04) 上模型对 03-04 daypart 学习更充分 · LB 涨。**机制**: reweight 是**直接 LB-target** 操作 (test 同日 sample 升权) · 不是改 model 表示力 · 与 valid 测的 "记忆 + 局部泛化" 部分独立。**铁律**: ① **LB-target reweight 类方法 (e.g. temporal_weight / sample weighting based on test distribution match)** dev↓ 不一定 LB↓ · 应该 evaluate LB 而非凭 dev 否决; ② 与之相对 · **容量扩张 / 表示力增加类方法** (Multi-Emb K=2 / Global Token / per-token FFN) dev↓ → LB↓ ~90% · 可凭 dev 大致判决; ③ **anti-memorization 类方法** (feature removal e.g. M40 hour_only) 介于两者之间 · dev↓ → LB↓ ~60% · LB 半证伪可能; ④ 历史影响: 5/16 早原本计划 "dev 全跌 → 4/4 LB 也跌 → 立即 path B pivot" 是 over-pessimism · M41 LB +0.000254 reset 这个判断 · daypart 路径仍有 ROI; ⑤ 5/15 23:30 元宵节认知**部分正确** (reweight 03-04 有用) · **部分错** (移除 dow 在 LB 上半证伪)。
+
+
 
 
 
