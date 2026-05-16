@@ -2,7 +2,7 @@
 
 > **每次 agent 推荐 platform 操作前必须 grep 此文件**。任何资源状态陈述 (slot / quota / in-flight) 凭此文件 · 不凭印象。
 >
-> **Last updated**: 2026-05-16 CEST 08:43 (用户反问 "为什么 slot 混乱" 触发 root cause fix)
+> **Last updated**: 2026-05-16 CEST 14:50 (M49 evaluation 已提交 · today quota 用满 4/4)
 
 ---
 
@@ -26,12 +26,15 @@
 
 | Slot | Status | Job | 起 (CEST) | 完成预估 (CEST) | dev (E4 best) |
 |---|---|---|---|---|---|
-| 1 | **free** | — | — | — | — |
-| 2 | **free** | — | — | — | — |
-| 3 | **free** | — | — | — | — |
-| 4 | **free** | — | — | — | — |
+| 1 | **free** | M45 done | ~10:50 | ~14:15 ✅ | **0.858907** ⚠️ −0.0097 |
+| 2 | **free** | M48 done | ~10:50 | ~12:30 ✅ | **0.802487** (E2 best) ⚠️ −0.066 灾难 |
+| 3 | **free** | M49 done (UE split) | ~11:10 | ~14:00 ✅ | **0.870741** 🚨 +0.002122 |
+| 4 | **in-flight** | M50 (UE split + weekend filter · 双 stack) | ~11:11 | ~16:30 | — |
 
 **Last completed jobs** (按时间倒序):
+- **M49** ⭐⭐⭐ (UE split T37 ADR-014): completed CEST ~14:00 5/16 · dev **0.870741** · 项目首个 dev > M22 真信号 (+0.002122)
+- **M45** (weekend filter): completed CEST ~14:15 5/16 · dev 0.858907 · daypart filter 路径死 (−0.0097)
+- **M48** (03-04 only): completed CEST ~12:30 5/16 · dev 0.802487 · data 不足灾难 (−0.066)
 - **M41** (temporal_weight 2.5): completed CEST ~04:30 5/16 · dev 0.868069 / LB 0.847846 ⭐
 - **M40** (hour_only): completed CEST ~04:30 5/16 · dev 0.866881 / LB 0.846931
 - **M39 v2** (Global Token): completed CEST ~01:30 5/16 · dev 0.867963 · LB 待评
@@ -45,18 +48,18 @@
 
 | Day | Used | Remaining | Used by |
 |---|---|---|---|
-| **5/16 (today)** | **2** | **2** | M40 LB 0.846931 (CEST ~09:30) + M41 LB 0.847846 (CEST ~09:30) |
+| **5/16 (today)** | **4** | **0** | M40 LB 0.846931 + M41 LB 0.847846 + M23 retry LB 0.836631 + **M49 evaluation in-flight** ⭐ |
 | 5/15 (closed) | 4 | 0 | M28 LB 0.846514 + M29 LB 0.845312 + M22-rerun LB 0.847324 + M33 LB 0.844710 |
 | 5/14 (closed) | 1 | (overflow to 5/15 ❌) | M22 LB 0.847592 ⭐ SOTA |
 
 **Next reset**: CEST 06:00 5/17 = 北京 12:00 5/17
 
-**Today (5/16) remaining 2 quota usage plan**:
-- 晚 2 (CEST ~21:00) **修订 (CEST 09:00 5/16 audit)**:
-  - ⭐⭐⭐ **M23** (T34 DCN gap=0 · dev 0.868311 · LB 待评) · 决 cross 路径 work 不 work · 期望 LB +0.001~+0.003
-  - ⭐⭐ **M38 v2** (Multi-Emb K=2) · RankUp 闭环 · 期望 LB ~0.847
+**M49 evaluation 状态 (CEST 14:50)**: 用户提交 · 等 LB 结果 (~CEST 15:30 平台 inference + ~CEST 19:00 leaderboard 上榜延迟)
 
-**5/16 10:00 incident**: M23 evaluation 第 1 次失败 (`'<=' int vs str` · src/infer.py 没解析 dcn_cross_user_fids raw csv str) · quota refund · 修复 commit `0a16a98` (`_resolve_dcn_fids` helper) · M23 retry 待用户重新提交。
+**5/17 早 4 quota 预案 (基于 M49 LB)**:
+- 场景 A · M49 LB ≥ 0.849 (强真信号 · path B work) → 4 quota 优先 M50 LB (双 stack) + cross-seed (5/22 前破例) + UE split α/β grid
+- 场景 B · M49 LB ∈ [0.847, 0.849] (弱信号 / 持平) → 4 quota: M50 LB + M37/M38v2/M30 闭环老候选
+- 场景 C · M49 LB < 0.847 (反例 dev↑LB↓) → 4 quota: M50 LB (验是否一致) + 切回 path A 残量 / 等 M46/M47 dev
 
 ---
 
@@ -142,4 +145,6 @@
 
 ## Update Log
 
+- **2026-05-16 CEST 14:50**: M49 evaluation 已提交 · today quota 用满 4/4 · 等 LB 结果 (~CEST 19:00 上榜) · 期望区间 0.847~0.850 (path B 首测 · 决 5/17 4 quota 方向)
+- **2026-05-16 CEST 14:43**: M23 retry LB 0.836631 (−0.011 强负 · path A DCN cross 死透闭环) + M45/M48/M49 dev 回流 · M49 dev 0.870741 (+0.002122 项目首个超 M22 真信号 · UE split ADR-014 实证) · 5/16 today quota 修订为 used=3 / remaining=1 · 晚 1 quota 必评 M49 LB
 - **2026-05-16 CEST 08:43**: 文件创建 (用户反问 "彻底解决问题" 触发) · 状态镜像 5/16 早 4 jobs 完成 + 早 2 evaluation 完成
