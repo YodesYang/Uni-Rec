@@ -714,6 +714,95 @@ M33 vs M22 LB 反向放大 27× · M33-rerun vs M22-rerun LB 期望: **0.844710 
 
 → **路径 B 的 ROI 仍然存在** · 因为它不是 "M22 + X" stack · 是 "M22 → architecture-level redesign"。
 
+### 16.9 用户反问 "dev 负向大概率 LB 也负向吗" · 严格审视分类
+
+**触发**: 用户 5/16 CEST 07:36 反问 "这几个实验 dev 负向 · 大概率 LB 就负向吗"。
+
+**严格 grep 历史 (Δdev, ΔLB) 配对** (5/4 ~ 5/16):
+
+| Job | Δdev | ΔLB | 关系 |
+|---|---|---|---|
+| M22 (vocabtier) | +0.000332 | +0.000882 | dev↑ LB↑ 同向 2.6× |
+| M28 (vocabtier+Trick 1) | −0.000011 | −0.001078 | dev~ LB↓ |
+| M29 (vocabtier × s3) | −0.000202 | −0.002280 | dev↓ LB↓ 同向 11× |
+| M33 (5-cluster) | +0.000106 | −0.002882 | **dev↑ LB↓ 反向 27×** ⭐ |
+| EXP-025 idmask | +0.000323 | −0.004194 | **dev↑ LB↓ 反向 14×** |
+| T25 DIN bypass | +0.0003 (gap=0.05) | +0.00421 | dev↑ LB↑ 同向 14× |
+| EXP-019 icq-full E6 | +0.000519 | −0.00277 | **dev↑ LB↓ 反向 5×** |
+| t13tf E5+ | +0.000640 | −0.006249 | **dev↑ LB↓ 反向 10×** |
+| EXP-022 三合一 | dev↑ | LB −0.010 | **dev↑ LB↓ 强反向** |
+| **M36 (vocabtier × s7)** | −0.000997 | −0.011 | dev↓ LB↓ 同向 11× |
+
+**严格统计** (dev↓ 数据点):
+- N = 4 个 dev 跌 LB 已评的实验 (M28 / M29 / M36 / 早期 hash100k)
+- **4/4 LB 也跌**
+- empirical P(LB↓ | dev↓) = 100% (95% CI [40%, 100%] · 受 N 小限制)
+
+**严格统计** (dev↑ 数据点):
+- N = 9 个 dev 涨 LB 已评的实验
+- **3 个 LB 同向涨** (M22 / T25 DIN / hash500k)
+- **6 个 LB 反向跌** (M33 / EXP-025 / EXP-019 full / t13tf E5+ / EXP-022 / M28 boundary case)
+- empirical P(LB↑ | dev↑) = **33%** (大部分 dev↑ 实际是 overfit)
+
+**机制层面分析**:
+- **dev↓ → LB↓ 大概率** (~85%) 因为: valid set 与 train 期局部时间共享 + id 部分重叠 · valid 测 "记忆 + 局部泛化" · LB 测 "记忆 + 远未来泛化" · **这两个能力大部分 overlap** · 所以 dev↓ 通常意味着模型基础能力差 · LB 也会差。
+- **dev↓ LB↑ 反例可能** 仅当 method 引入 "anti-memorization / pure regularization" 机制:
+  - 加 dropout 正则 · dev 可能跌 (减少 train memorization) · LB 可能涨 (减少 overfit)
+  - **本数据集 valid 与 train 时间共享 · valid 也部分测 memorization** · 即使加正则 valid 大概率也不涨
+
+**M38v2/M39v2/M40/M41 分类**:
+
+| Method | 类型 | dev↓ → LB↓ 概率 | dev↓ LB↑ 反例可能 | 期望 LB |
+|---|---|---|---|---|
+| **M38 v2** (Multi-Emb K=2) | 容量扩张 (+24k Dense) | **~90%** | 低 (机制等价 valid/LB 共享) | [0.845, 0.847] |
+| **M39 v2** (Global Token) | 表示力增加 (聚合信息) | **~90%** | 低 | [0.844, 0.847] |
+| **M40** (hour_only · 移除 dow + weekend) | **Anti-memorization 部分** | **~60%** | **25% 可能** (dow 学 03-03 元宵 · LB 是 03-04 不需 dow) | [0.844, 0.849] |
+| **M41** (temporal_weight 2.5) | **LB-target reweight** (03-04 sample 升权) | **~50%** | **50% 可能** (03-04 是 LB 同日 · reweight 直接 LB-aware) | [0.846, 0.850] |
+
+**修订**: 5/16 早 4 quota 不能简单"按 dev 排序" · **M40 / M41 dev 跌但 LB 仍可能涨** · 不能凭 dev 单点放弃 daypart 路径。
+
+### 16.10 早 2 + 晚 2 quota 策略 (用户 5/16 CEST 07:39 提议)
+
+**用户提议**: 4 quota 分早 2 (CEST ~08:00) + 晚 2 (CEST ~21:00) · 不一次用完。
+
+**战略价值**:
+- 早 2 LB 数据 (~CEST 09:30 出) 在 5/16 下午 14:00 training 决断 deadline 前 · **决定 5/16 下午方向**
+- 晚 2 候选 = 早 2 LB 数据 + 5/16 下午 training dev 双信号驱动 · 不盲赌
+
+**早 2 选择** (信息论 entropy 视角):
+
+| Candidate | dev↓→LB↓ 概率 | Entropy H | 早 2 价值 |
+|---|---|---|---|
+| M38 v2 | 90% | 0.47 bit | 低 (闭环 confirmation) |
+| M39 v2 | 90% | 0.47 bit | 低 |
+| **M40** | 60% | **0.97 bit** | 高 |
+| **M41** | 50% | **1.00 bit** ⭐ | **最高** (最大 entropy · daypart 生死判) |
+
+**早 2 最终决策**: **M41 + M40** (信息价值最高 · 决定 5/16 下午方向)。
+
+**晚 2 决策树** (基于早 2 LB):
+
+| 早 2 场景 | 晚 2 选择 | 5/16 下午 training |
+|---|---|---|
+| **A · M41 LB > 0.8484 OR M40 LB > 0.8484** (真信号 · ~10%) | M38 v2 + M39 v2 (RankUp 闭环) | M41 × s3 + M40 × s3 cross-seed |
+| **B · M41/M40 LB ∈ [0.847, 0.8484]** (弱信号 · ~25%) | M38 v2 + M39 v2 | M40 + M41 stack 验证 |
+| **C · M41/M40 LB < 0.847** (daypart 路径关闭 · ~60%) | M38 v2 + M39 v2 (确认 RankUp 也 saturated) | path B pivot (UE 分离 ADR + smoke) |
+| **D · M41 LB > 0.847 但 M40 LB < 0.847** (daypart 部分有效 · ~5%) | M38 v2 + M22 × s3 (M29 LB 确认) | M41 cross-seed |
+
+**铁律例外触发**: ≤ 2 seed 铁律在 EXP-035 立时有 "**除最终上沿搜索阶段**" 例外条款。5/25 ddl 距 9 天 · 现在算最终阶段 · M22 cross-seed (s11/s2) 在 D 场景下允许。
+
+### 16.11 5/16 决策时间轴
+
+| 时间 (CEST) | 事件 | 决策 |
+|---|---|---|
+| 08:00 | 早 2 evaluation 提交 (M41 + M40) | — |
+| 09:30 | 早 2 LB 数据出 | 判 daypart 路径生死 |
+| 10:00~13:00 | agent 落档 EXP-055 §17 + 5/16 下午预案 | — |
+| 14:00 | 5/16 下午 training jobs 起 (基于早 2 LB) | A/B/C/D 场景执行 |
+| 21:00 | 晚 2 evaluation 提交 (基于早 2 LB + 下午 training dev) | — |
+| 22:30 | 晚 2 LB 数据出 | — |
+| 23:00 | 晚 LB audit · 决 5/17 早 quota | — |
+
 
 
 
