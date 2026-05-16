@@ -2,7 +2,7 @@
 
 > **每次 agent 推荐 platform 操作前必须 grep 此文件**。任何资源状态陈述 (slot / quota / in-flight) 凭此文件 · 不凭印象。
 >
-> **Last updated**: 2026-05-16 CEST 16:25 (publish 状态全 audit · 4 free slot 启 M51-M54 stack overnight · 5/17 quota matrix 修订)
+> **Last updated**: 2026-05-16 CEST 16:58 (M51-M54 4 jobs 启动成功 · T38 NameError 已修复 · in-flight overnight)
 
 ---
 
@@ -26,10 +26,10 @@
 
 | Slot | Status | Job | 起 (CEST) | 完成预估 (CEST) | dev (E4 best) |
 |---|---|---|---|---|---|
-| 1 | **about to start** | **M51** (M49 + temporal_weight 2.5 · path B + M41 stack) | ~20:30 5/16 | ~01:30 5/17 | 待 |
-| 2 | **about to start** | **M52** (M49 + per-domain time bucket · 修复 M28) | ~20:30 5/16 | ~01:30 5/17 | 待 |
-| 3 | **about to start** | **M53** (M49 + NLIR · path B + Linear gating stack) | ~20:30 5/16 | ~01:30 5/17 | 待 |
-| 4 | **about to start** | **M54** (M22 + per-domain bucket alone · M28 修复单变量) | ~20:30 5/16 | ~01:30 5/17 | 待 |
+| 1 | 🟡 **in-flight** | **M51** (M22 + UE split + temporal_weight 2.5 · path B + M41 stack) | ~16:55 5/16 (T38 fix 后重启) | ~22:00 5/16 | TBD |
+| 2 | 🟡 **in-flight** | **M52** (M22 + UE split + per-domain time bucket · 修复 M28) | ~16:55 5/16 | ~22:00 5/16 | TBD |
+| 3 | 🟡 **in-flight** | **M53** (M22 + UE split + NLIR · path B + Linear gating stack) | ~16:55 5/16 | ~22:00 5/16 | TBD |
+| 4 | 🟡 **in-flight** | **M54** (M22 + per-domain bucket alone · M28 修复单变量) | ~16:55 5/16 | ~22:00 5/16 | TBD |
 
 **Last completed jobs** (按时间倒序):
 - **M50** (UE split + weekend filter 双 stack): completed CEST ~15:53 5/16 · dev 0.861974 · 双 stack 损害 net (−0.0066 vs M22) · LB 待评 (5/17 早 ⭐⭐ 候选)
@@ -163,6 +163,7 @@
 
 ## Update Log
 
+- **2026-05-16 CEST 16:58**: M51-M54 4 jobs 启动成功 (T38 NameError fix commit `2638e1b` 后) · 全部 in-flight 预计 ~CEST 22:00 完成 dev · 5/17 早 quota refresh 时数据齐全 · 4 jobs Args verify 全通过 (M51 path B+M41 / M52 path B+per-domain / M53 path B+NLIR / M54 per-domain alone)
 - **2026-05-16 CEST 16:25**: publish 状态全 audit (用户确认 M37/M38v2/M39v2/M30/M27v2/M17/M40/M41 都已 publish · M34 已丢失 · M45/M48/M50 publish 状态待 verify) · 5/17 早 quota matrix 修订为 "2 老 (M37 + M38v2) + 2 新 (M51-M54 dev 最高 + M50/M30)" · 4 free slot 启 M51-M54 stack overnight train (CEST ~20:30 起 ~01:30 5/17 完成) · 见 EXP-061
 - **2026-05-16 CEST 16:00**: M50 dev 0.861974 (双 stack 损害 net −0.0066) · 用户反问 "train/valid 是否一致" 触发 src/dataset.py source-of-truth audit · 确认 M22/M49/M50 valid set 完全相同 · dev 严格可对比 · M50 LB 加入 5/17 早 quota 候选 (优先级 ⭐⭐) · 5/17 矩阵终版定稿 · 见 EXP-060
 - **2026-05-16 CEST 21:15**: 🎉 **M49 LB 0.848162** = 项目首个超 SOTA · UE split (T37 ADR-014) 弱真信号 · Δ+0.000570 vs M22 · 超 rerun band 但未破 0.8484 严格阈值 · dev→LB 衰减 73% · 5/17 早 4 quota 优先评 M50 / M37 / M38v2 · 不破 cross-seed 铁律 · 见 EXP-059
