@@ -2693,6 +2693,11 @@ def get_pcvr_data(
     id_mask_seq_domains: Optional[List[str]] = None,
     disable_seq_fids: Optional[List[int]] = None,
     enable_eda_dump: bool = False,
+    # 5/16 EXP-056 · weekend-CVR-low daypart filter (M45+):
+    # When set, train rows with timestamp < user_train_timestamp_min are
+    # dropped (e.g. exclude 02-28/03-01 weekend with CVR 0.024-0.034 ·
+    # 5x lower than weekday). Valid set unaffected (still uses tail RGs).
+    user_train_timestamp_min: Optional[int] = None,
     eda_reservoir_size: int = 20000,
     bucket_boundaries: Optional[np.ndarray] = None,
     enable_is_missing: bool = False,
@@ -3081,6 +3086,12 @@ def get_pcvr_data(
     train_timestamp_max = None
     valid_timestamp_min = None
     valid_timestamp_max = None
+    # 5/16 EXP-056 · merge user-supplied timestamp_min (weekend filter) into
+    # train_timestamp_min. enable_row_time_cutoff / valid_gap will overwrite
+    # train_timestamp_max / valid_timestamp_min later · but train_timestamp_min
+    # only set here (no internal mechanism produces it).
+    if user_train_timestamp_min is not None:
+        train_timestamp_min = int(user_train_timestamp_min)
     cutoff_train_rows = None
     cutoff_valid_rows = None
     if enable_row_time_cutoff:

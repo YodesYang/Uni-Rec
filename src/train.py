@@ -182,6 +182,15 @@ def parse_args() -> argparse.Namespace:
                              'by the validation minimum timestamp so train keeps '
                              'timestamp < cutoff and valid keeps timestamp >= cutoff '
                              '(default off)')
+    parser.add_argument('--user_train_timestamp_min', type=int, default=0,
+                        help='M45 / EXP-056 · weekend-CVR-low filter (5/16 EDA): '
+                             'when > 0, drop train rows with timestamp < this value. '
+                             'For TAAC 2026 train data: ts=1772554800 corresponds to '
+                             'UTC 2026-03-01 16:00 = 北京 03-02 00:00 = exclude '
+                             '02-28/03-01 weekend rows (CVR 0.024-0.034 · 5x lower '
+                             'than weekday CVR 0.10-0.12 · per EXP-056 EDA Q6). '
+                             'Valid set unaffected. Default 0 = no filter (backward '
+                             'compatible).')
     parser.add_argument('--enable_row_valid_gap', action='store_true', default=False,
                         help='C6 / T22-fix switch: row-level double cutoff so '
                              'train / gap (dropped) / dev are separated by '
@@ -741,6 +750,9 @@ def main() -> None:
         enable_time_of_day_features=args.enable_time_of_day_features,
         temporal_weight_alpha=args.temporal_weight_alpha,
         enable_hour_only_features=args.enable_hour_only_features,
+        # M45 / EXP-056 · weekend-CVR-low filter (0 = disabled · backward compat)
+        user_train_timestamp_min=(args.user_train_timestamp_min
+                                  if args.user_train_timestamp_min > 0 else None),
         holdout_ratio=args.holdout_ratio,
         valid_gap_ratio=args.valid_gap_ratio,
         id_mask_prob=args.id_mask_prob,
