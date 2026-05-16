@@ -847,31 +847,38 @@ M33 vs M22 LB 反向放大 27× · M33-rerun vs M22-rerun LB 期望: **0.844710 
 - → dow 不是纯误导信号 · 是 **混合信号** (有用 + 有误导)
 - **dow 假设半证伪** (不是完全错 · 是部分错)
 
-### 17.5 5/16 下午 14:00 training 决策 · M41 cross-seed
+### 17.5 5/16 下午 14:00 training 决策 · M41 cross-seed (单 sample · ≤ 2 seed 铁律)
 
 **早 2 LB 综合**:
 - M41 弱信号 (LB +0.000254 · noise band 内 · 机制 plausible)
 - M40 半证伪 (dow 移除负向但不强)
 - → daypart 路径整体仍有 ROI · 不立即 path B pivot
 
-**5/16 下午 training 推荐** (2 jobs):
+**5/16 下午 training 推荐** (1 job · 不是 2 · ≤ 2 seed 铁律):
 
 | Job | 配置 | 期望 dev | 期望 LB | 战略价值 |
 |---|---|---|---|---|
-| **M42** = M41 × s3 | M22 + temporal_weight 2.5 + seed=3 | ~0.867 | 0.845~0.848 | M41 真信号判 |
-| **M43** = M41 × s7 | M22 + temporal_weight 2.5 + seed=7 | ~0.866 | 0.840~0.847 | M41 cross-seed 第 2 数据点 |
+| **M42** = M41 × s3 | M22 + temporal_weight 2.5 + seed=3 | ~0.867 | 0.845~0.848 | M41 真信号判 (binary work/not work) |
 
-**Why s3 + s7**:
-- M22 × s3 (M29) LB 已知 0.845312 → ΔLB_M41×s3 vs M29 是 reweight 真信号
-- M22 × s7 (M36) LB 已知 0.836413 → ΔLB_M41×s7 vs M36 是 reweight 真信号 (s7 路径)
-- 双 cross-seed sample 比单 seed 更稳
+**Why s3 only · 不起 s7**:
+- EXP-035 line 94 铁律 "同一方法学假设 ≤ 2 seed" · M41 已用 s42 + 加 s3 = 第 2 seed · **正好达上限**
+- 加 s7 = 第 3 seed · **违反铁律**
+- "最终上沿搜索阶段" 例外**只 apply 已 LB 确认破 SOTA 的方向** · M41 是弱信号 (band 内) · 不 apply
+- M22 × s3 (M29) LB 已知 0.845312 → ΔLB_M41×s3 vs M29 是 reweight 真信号 binary 判决
+- 单 cross-seed 已够 binary 判决 · 第 2 cross-seed 边际信息 ≈ 0
 
-**铁律 check**: EXP-035 "每假设 ≤ 2 seed (除最终上沿搜索阶段)" · 5/25 ddl 距 9 天 · 最终上沿搜索阶段 · **允许 ≥ 2 seed**。
+**5/16 下午剩 1 slot 不起 training** · 留给 5/16 晚 ~CEST 19:00 起 path B first job (假设 ADR-014 ~14:00~17:00 起草完成 · smoke ~17:00~19:00):
+- 5/16 14:00~17:00 agent 起 ADR-014 (UE 分离 + int pairwise cross 草稿)
+- 17:00~19:00 smoke + commit
+- 19:00 起 path B first job · 5/17 凌晨完成
+
+**铁律 check**: ≤ 2 seed 严格遵守 (M41 总 2 seed: s42 + s3) · 不依赖例外条款。
 
 **拒绝候选**:
-- M41 × Multi-Emb K=2 stack: stack 第 2 步 5/14~5/15 全失败 · 不在弱信号上盲堆 stack
-- M40 + M41 stack: M40 LB 已 confirmed 半负 · stack 风险高
-- path B 立即切换: M41 弱信号给 daypart 路径 1 天验证机会 · 不浪费 5/16 下午
+- ❌ M43 = M41 × s7: 违反 ≤ 2 seed 铁律 (用户 5/16 08:38 反问触发 audit)
+- ❌ M41 × Multi-Emb K=2 stack: stack 第 2 步 5/14~5/15 全失败 · 不在弱信号上盲堆 stack
+- ❌ M40 + M41 stack: M40 LB 已 confirmed 半负 · stack 风险高
+- ❌ path B 立即切换: M41 弱信号给 daypart 路径 1 天验证机会 · 不浪费 5/16 下午
 
 ### 17.6 晚 2 evaluation (CEST 21:00) 候选
 
