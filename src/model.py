@@ -2514,6 +2514,16 @@ class PCVRHyFormer(nn.Module):
         enable_ue_split: bool = False,
         ue_offset: int = 0,
         ue_dim: int = 256,
+        # T39 / M55 · enable_ue_int_bilinear: gate the "other" dense feats
+        # by a Linear projection of the pooled user_int representation
+        # before the dense_bypass projection. Implements Seed 主楼 5/5
+        # 第 (1) 条后半句 "其他跟 int pair 加权". Mechanism differs from
+        # DCN-V2 (M23 LB −0.011 dead): single-layer multiplicative gating
+        # (not recursive cross) · OOV-friendly because it reweights
+        # existing dense features by user_int signal rather than learning
+        # train-internal user × item co-occurrence.
+        enable_ue_int_bilinear: bool = False,
+        ue_int_bilinear_alpha_init: float = 0.5,
     ) -> None:
         super().__init__()
 
@@ -2711,6 +2721,35 @@ class PCVRHyFormer(nn.Module):
                 nn.LayerNorm(d_model),
                 nn.SiLU(),
             )
+
+        # T39 / M55 · UE × user_int Bilinear gating. Only effective when
+        # has_dense_bypass=True (other dense feats route through bypass).
+        # Gates the "other" dense feats by a Linear projection of pooled
+        # user_int representation: gated = other_dense * (1 + alpha *
+        # tanh(Linear(user_int_pool))). The (1 + ...) form ensures
+        # bit-identical behavior at alpha=0 (back-compat) and the tanh
+        # caps the gating in [-alpha, +alpha] · default alpha=0.5 so
+        # gating is in [0.5, 1.5] (mild reweighting).
+        self.enable_ue_int_bilinear = bool(enable_ue_int_bilinear)
+        if self.enable_ue_int_bilinear and not self.has_dense_bypass:
+            raise ValueError(
+                "enable_ue_int_bilinear requires has_dense_bypass=True "
+                "(set enable_dense_bypass=True or enable_ue_split=True)")
+        if self.enable_ue_int_bilinear:
+            bilinear_in_dim = d_model  # pooled user_ns is (B, D)
+            bypass_dense_dim = (user_dense_dim - self.ue_dim
+                                if self.enable_ue_split else user_dense_dim)
+            self.ue_int_bilinear_proj = nn.Linear(
+                bilinear_in_dim, bypass_dense_dim)
+            # learnable alpha · scalar · init from CLI · clamped via
+            # tanh in forward so alpha can grow without exploding.
+            self.ue_int_bilinear_alpha = nn.Parameter(
+                torch.tensor(float(ue_int_bilinear_alpha_init)))
+            # init bilinear_proj to zeros so initial gating ≈ 1 + 0 = 1
+            # (bit-identical to non-bilinear path at step 0 · learns
+            # gating gradually as user_int signal becomes useful).
+            nn.init.zeros_(self.ue_int_bilinear_proj.weight)
+            nn.init.zeros_(self.ue_int_bilinear_proj.bias)
 
         # T25 / G1 · DIN-style target-aware interest pooling (bypass mode).
         self.enable_din_interest = bool(enable_din_interest)
@@ -3356,7 +3395,10 @@ class PCVRHyFormer(nn.Module):
         return F.silu(self.global_token_proj(global_concat)).unsqueeze(1)  # (B, 1, D)
 
     def _apply_dense_bypass(
-        self, output: torch.Tensor, inputs: ModelInput
+        self,
+        output: torch.Tensor,
+        inputs: ModelInput,
+        user_ns: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Concatenate bypassed dense vector to the backbone output.
 
@@ -3367,15 +3409,33 @@ class PCVRHyFormer(nn.Module):
         is the "other" dense feats (everything except the UE slice
         user_dense_feats[ue_offset:ue_offset+ue_dim]). The UE slice goes
         to the NS token path via ue_proj.
+
+        T39 / M55 · When ``enable_ue_int_bilinear`` is True, the "other"
+        dense feats are gated by a Linear projection of pooled user_int
+        representation BEFORE the bypass projection: gated = other_dense
+        * (1 + alpha * tanh(Linear(mean_pool(user_ns)))). Implements
+        Seed 主楼 "其他跟 int pair 加权". Caller must pass ``user_ns``
+        when this flag is True.
         """
         if self.enable_ue_split:
-            # 其他 dense = concat(left, right) excluding [ue_offset, ue_offset+ue_dim)
             left = inputs.user_dense_feats[:, :self.ue_offset]
             right = inputs.user_dense_feats[:, self.ue_offset + self.ue_dim:]
-            other_dense = torch.cat([left, right], dim=-1)  # (B, user_dense_dim - ue_dim)
-            bypass = self.user_dense_bypass_proj(other_dense)  # (B, D)
+            other_dense = torch.cat([left, right], dim=-1)
         else:
-            bypass = self.user_dense_bypass_proj(inputs.user_dense_feats)  # (B, D)
+            other_dense = inputs.user_dense_feats
+
+        if self.enable_ue_int_bilinear:
+            if user_ns is None:
+                raise RuntimeError(
+                    "enable_ue_int_bilinear=True but user_ns not provided "
+                    "to _apply_dense_bypass; caller must pass it explicitly.")
+            user_int_pooled = user_ns.mean(dim=1)  # (B, D)
+            gating_logits = self.ue_int_bilinear_proj(user_int_pooled)
+            gating = 1.0 + self.ue_int_bilinear_alpha * torch.tanh(
+                gating_logits)
+            other_dense = other_dense * gating  # (B, bypass_dense_dim)
+
+        bypass = self.user_dense_bypass_proj(other_dense)  # (B, D)
         return torch.cat([output, bypass], dim=-1)  # (B, 2D)
 
     def _apply_din_interest_bypass(
@@ -3522,7 +3582,11 @@ class PCVRHyFormer(nn.Module):
                 target_repr=target_repr)
 
         if self.has_dense_bypass:
-            output = self._apply_dense_bypass(output, inputs)
+            user_ns_for_bilinear = (
+                ns_tokens[:, :self.num_user_ns, :]
+                if self.enable_ue_int_bilinear else None)
+            output = self._apply_dense_bypass(
+                output, inputs, user_ns=user_ns_for_bilinear)
 
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(
@@ -3564,7 +3628,11 @@ class PCVRHyFormer(nn.Module):
                 target_repr=target_repr)
 
         if self.has_dense_bypass:
-            output = self._apply_dense_bypass(output, inputs)
+            user_ns_for_bilinear = (
+                ns_tokens[:, :self.num_user_ns, :]
+                if self.enable_ue_int_bilinear else None)
+            output = self._apply_dense_bypass(
+                output, inputs, user_ns=user_ns_for_bilinear)
 
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(

@@ -505,6 +505,28 @@ def parse_args() -> argparse.Namespace:
                         help='T37: raw schema fid for UE (default 61 = 预归一化 user '
                              'embedding · 256-dim). Resolved to (ue_offset, ue_dim) via '
                              'pcvr_dataset.user_dense_schema.entries.')
+    parser.add_argument('--enable_ue_int_bilinear', action='store_true',
+                        default=False,
+                        help='T39 / M55 · UE × user_int Bilinear gating. Implements '
+                             'Seed 主楼 5/5 第 (1) 条后半句 "其他跟 int pair 加权": '
+                             'gate the "other" dense feats (everything except UE '
+                             'fid_61 slice when --enable_ue_split) by a Linear '
+                             'projection of the pooled user_int representation '
+                             'BEFORE the dense_bypass projection. Mechanism '
+                             'differs from DCN-V2 (M23 LB −0.011 dead): single-'
+                             'layer multiplicative gating (not recursive cross), '
+                             'OOV-friendly because it reweights existing dense '
+                             'features by user_int signal rather than learning '
+                             'train-internal user × item co-occurrence. Requires '
+                             '--enable_dense_bypass=True or --enable_ue_split=True. '
+                             'Init weights to zero so initial gating ≈ 1 (bit-'
+                             'identical to non-bilinear path at step 0).')
+    parser.add_argument('--ue_int_bilinear_alpha_init', type=float, default=0.5,
+                        help='T39 / M55 · Initial value for the learnable scalar '
+                             'alpha controlling gating range: gating ∈ [1-alpha, '
+                             '1+alpha] (via tanh). Default 0.5 = mild reweighting '
+                             '[0.5, 1.5]. Larger = more aggressive gating, more '
+                             'risk of training instability.')
     parser.add_argument('--enable_din_interest', action='store_true', default=False,
                         help='T25 / G1: DIN-style target-aware interest pooling. '
                              'Per-domain cross-attention uses the mean of item_ns '
@@ -957,6 +979,8 @@ def main() -> None:
         "enable_ue_split": args.enable_ue_split,
         "ue_offset": ue_offset_resolved,
         "ue_dim": ue_dim_resolved,
+        "enable_ue_int_bilinear": args.enable_ue_int_bilinear,
+        "ue_int_bilinear_alpha_init": args.ue_int_bilinear_alpha_init,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
