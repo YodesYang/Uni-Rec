@@ -81,8 +81,14 @@
 **破 SOTA 阈值 (same-seed rerun)**: ≥ 0.8484
 **距 0.85 (Top 20)**: 还差 +0.0024
 
+**🔴 5/22 前 seed 策略 (用户 5/16 CEST 08:48 战略决断)**:
+- **默认锁 `seed=42`** (实证 LB 上沿 · EXP-028 + M22 路径双重确认)
+- **不做 cross-seed 实验** (M22 × s11/s2 / 任何方向 × s3/s7 都不起)
+- **唯一例外**: 强真信号 (LB ≥ 0.8484) 出现时才做 cross-seed (但 9 天内几乎不可能出现)
+- **5/22~5/24 final 阶段** 才做 final config × s11/s2 上沿搜索
+
 **今日新发现**:
-- ⭐ M41 LB +0.000254 = 项目首个 dev↓ LB↑ 反例 (但弱信号 · band 内)
+- ⭐ M41 LB +0.000254 = 项目首个 dev↓ LB↑ 反例 (但弱信号 · band 内 · 不 cross-seed)
 - ⚠️ M40 LB −0.000661 = dow 半证伪 (移除 dow 在 LB 上不全错也不全对)
 - 7/7 新方向 (M37/M38/M39/M40/M41/Multi-Emb/Global Token) dev 都不超 M22 · vocabtier 路径**接近局部最优**
 - **path B (UE 分离 + int pairwise cross)** 是当前唯一未尝试的破局方向 · ADR-014 待起草
