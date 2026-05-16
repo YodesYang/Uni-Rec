@@ -185,12 +185,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--user_train_timestamp_min', type=int, default=0,
                         help='M45 / EXP-056 · weekend-CVR-low filter (5/16 EDA): '
                              'when > 0, drop train rows with timestamp < this value. '
-                             'For TAAC 2026 train data: ts=1772554800 corresponds to '
-                             'UTC 2026-03-01 16:00 = 北京 03-02 00:00 = exclude '
-                             '02-28/03-01 weekend rows (CVR 0.024-0.034 · 5x lower '
-                             'than weekday CVR 0.10-0.12 · per EXP-056 EDA Q6). '
-                             'Valid set unaffected. Default 0 = no filter (backward '
-                             'compatible).')
+                             'Reference timestamps (verified · UTC midnight): '
+                             '1772236800=02-28 / 1772323200=03-01 / 1772409600=03-02 / '
+                             '1772496000=03-03 / 1772582400=03-04. '
+                             'M45 weekend filter: 1772409600 (drop 02-28/03-01 · keep '
+                             '92.8% rows). M48 daypart-only: 1772582400 (drop 4 days · '
+                             'keep only 03-04 · 24.6% rows). Per EXP-056 EDA Q6: '
+                             '02-28/03-01 weekend CVR 0.024-0.034 · 5x lower than '
+                             'weekday CVR 0.10-0.12 · noise removal target. '
+                             'Valid set unaffected. Default 0 = no filter.')
     parser.add_argument('--enable_row_valid_gap', action='store_true', default=False,
                         help='C6 / T22-fix switch: row-level double cutoff so '
                              'train / gap (dropped) / dev are separated by '
