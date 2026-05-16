@@ -279,6 +279,17 @@ def main() -> None:
     # Q4/Q5: reservoirs
     seq_len_buf: Dict[str, List[np.ndarray]] = {d: [] for d in seq_cfg}
     time_diff_buf: Dict[str, List[np.ndarray]] = {d: [] for d in seq_cfg}
+    # Q6/Q7 · CVR by absolute time bucket
+    # Q6: day-of-year bucketing (UTC days since epoch). Each entry stores
+    #     [n_rows, n_pos]. Captures train weekday/lunar-festival CVR shift.
+    # Q7: hour-of-day bucketing (UTC hour 0-23). Each entry stores
+    #     [n_rows, n_pos]. Captures daypart shift relevant to test (北京
+    #     03-04 09:00~14:00 = UTC 01:00~06:00).
+    #
+    # Both use plain dict[int -> [int, int]] for O(1) update + O(B/24)
+    # finalization. Memory bounded (≤ 30 entries each).
+    cvr_by_day: Dict[int, List[int]] = {}
+    cvr_by_hour: Dict[int, List[int]] = {}
     # seq domain prefix / ts_fid
     dom_prefix = {d: c['prefix'] for d, c in seq_cfg.items()}
     dom_ts_fid = {d: c.get('ts_fid') for d, c in seq_cfg.items()}
@@ -352,6 +363,39 @@ def main() -> None:
 
             # Q4 / Q5 · per-domain seq length + time_diff
             ref_ts = _scalar_to_numpy(rg.column('timestamp'))
+
+            # Q6 · CVR by day · group ref_ts // 86400 · vectorized bincount
+            day_idx = (ref_ts.astype(np.int64) // 86400).astype(np.int64)
+            day_min = int(day_idx.min()) if day_idx.size > 0 else 0
+            day_max = int(day_idx.max()) if day_idx.size > 0 else -1
+            for d in range(day_min, day_max + 1):
+                mask = (day_idx == d)
+                cnt = int(mask.sum())
+                if cnt == 0:
+                    continue
+                pos = int(labels[mask].sum())
+                acc = cvr_by_day.get(d)
+                if acc is None:
+                    cvr_by_day[d] = [cnt, pos]
+                else:
+                    acc[0] += cnt
+                    acc[1] += pos
+
+            # Q7 · CVR by hour-of-day · UTC hour 0-23
+            hour_of_day = ((ref_ts.astype(np.int64) // 3600) % 24).astype(np.int64)
+            for h in range(24):
+                mask = (hour_of_day == h)
+                cnt = int(mask.sum())
+                if cnt == 0:
+                    continue
+                pos = int(labels[mask].sum())
+                acc = cvr_by_hour.get(h)
+                if acc is None:
+                    cvr_by_hour[h] = [cnt, pos]
+                else:
+                    acc[0] += cnt
+                    acc[1] += pos
+
             for dom, cfg in seq_cfg.items():
                 ts_fid = dom_ts_fid.get(dom)
                 if ts_fid is None:
@@ -448,6 +492,45 @@ def main() -> None:
         out.sort(key=lambda x: -abs(x['cvr_gap']))
         return out
 
+    def _cvr_bucket_summary(
+        acc: Dict[int, List[int]],
+        time_unit: str,
+    ) -> List[Dict[str, Any]]:
+        """Q6/Q7 · CVR per time bucket (day / hour-of-day).
+
+        Returns sorted list with absolute time, count, pos, cvr, and
+        human-readable date/hour. ``time_unit`` chooses formatting:
+          - 'day': bucket = days since Unix epoch · adds date_utc + date_beijing
+          - 'hour': bucket = hour-of-day 0-23 (UTC) · adds hour_beijing (UTC+8)
+        """
+        out = []
+        for bucket in sorted(acc.keys()):
+            cnt, pos = acc[bucket]
+            cvr = (pos / cnt) if cnt > 0 else 0.0
+            entry: Dict[str, Any] = {
+                'bucket': int(bucket),
+                'count': int(cnt),
+                'pos': int(pos),
+                'cvr': float(cvr),
+                'count_pct': float(cnt / total_rows) if total_rows else 0.0,
+            }
+            if time_unit == 'day':
+                # bucket = days since 1970-01-01 (Thursday) UTC
+                # Convert via stdlib for human-readable strings
+                from datetime import datetime, timezone, timedelta
+                ts_utc = datetime(1970, 1, 1, tzinfo=timezone.utc) + \
+                         timedelta(days=bucket)
+                ts_beijing = ts_utc + timedelta(hours=8)
+                entry['date_utc'] = ts_utc.strftime('%Y-%m-%d')
+                entry['date_beijing'] = ts_beijing.strftime('%Y-%m-%d')
+                # Day-of-week: Mon=0 ... Sun=6
+                entry['weekday'] = ts_utc.weekday()
+            elif time_unit == 'hour':
+                entry['hour_utc'] = int(bucket)
+                entry['hour_beijing'] = int((bucket + 8) % 24)
+            out.append(entry)
+        return out
+
     summary = {
         'version': 1,
         'source': {
@@ -481,6 +564,8 @@ def main() -> None:
                                               args.reservoir_size, rng))
             for d in seq_cfg
         },
+        'q6_cvr_by_day': _cvr_bucket_summary(cvr_by_day, time_unit='day'),
+        'q7_cvr_by_hour': _cvr_bucket_summary(cvr_by_hour, time_unit='hour'),
     }
 
     # -------------------------------------------------------------------
@@ -593,6 +678,27 @@ def _print_pretty_summary(summary: Dict[str, Any]) -> None:
         print('  %s: n=%d p25=%.0f p50=%.0f p75=%.0f p95=%.0f p99=%.0f'
               % (dom, q['n'], qs['p25'], qs['p50'], qs['p75'], qs['p95'],
                  qs['p99']))
+
+    # Q6 · CVR by day (UTC days since epoch · with 北京 date for 元宵节 audit)
+    q6 = summary.get('q6_cvr_by_day', [])
+    if q6:
+        print('# Q6 CVR by day (UTC date · 北京 date · count_pct · cvr):')
+        for entry in q6:
+            print('  %s · 北京 %s · weekday=%d · cnt=%d (%.1f%%) · pos=%d · cvr=%.5f'
+                  % (entry['date_utc'], entry['date_beijing'],
+                     entry['weekday'], entry['count'],
+                     entry['count_pct'] * 100, entry['pos'], entry['cvr']))
+
+    # Q7 · CVR by hour-of-day (UTC + 北京 hour for daypart audit)
+    q7 = summary.get('q7_cvr_by_hour', [])
+    if q7:
+        print('# Q7 CVR by hour-of-day (UTC · 北京 hour · count_pct · cvr):')
+        for entry in q7:
+            print('  UTC %02d · 北京 %02d · cnt=%d (%.1f%%) · pos=%d · cvr=%.5f'
+                  % (entry['hour_utc'], entry['hour_beijing'],
+                     entry['count'], entry['count_pct'] * 100,
+                     entry['pos'], entry['cvr']))
+
     print('#' * 72)
     sys.stdout.flush()
 
