@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 import torch
 import torch.multiprocessing
 from torch.utils.data import IterableDataset, DataLoader
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 # numpy.typing is available since numpy >= 1.20; on older numpy fall back to a
 # no-op shim so that forward-referenced annotations like ``npt.NDArray[np.int64]``
@@ -145,6 +145,130 @@ BUCKET_BOUNDARIES = DEFAULT_BUCKET_BOUNDARIES
 # Because T30 overrides keep ``len(...)`` unchanged, this constant is also
 # correct for tuned runs.
 NUM_TIME_BUCKETS = len(DEFAULT_BUCKET_BOUNDARIES) + 1
+
+
+def fit_log_scale_boundaries(
+    time_diffs: np.ndarray,
+    num_boundaries: int = 63,
+    min_sec: int = 5,
+) -> np.ndarray:
+    """T38 · Fit log-scale bucket boundaries to a sample of time_diffs.
+
+    Used by per-domain time bucket (T38). Given a 1D array of positive
+    time_diff values (in seconds), fit ``num_boundaries`` log-spaced
+    boundaries spanning [min_sec, p99(time_diffs)] so each domain gets
+    boundaries matching its own time-scale rather than a hand-tuned global
+    ladder.
+
+    The output length MUST equal ``len(DEFAULT_BUCKET_BOUNDARIES)`` (=63)
+    so the embedding table shape (NUM_TIME_BUCKETS=64) stays bit-identical
+    between default and tuned runs.
+
+    Args:
+        time_diffs: 1D array of time_diff values in seconds (positive). Zeros
+            and negatives are filtered before fitting.
+        num_boundaries: Number of boundary edges (default 63).
+        min_sec: Minimum boundary value in seconds (default 5).
+
+    Returns:
+        1D int64 array of strictly-increasing positive boundary values, with
+        length == num_boundaries.
+    """
+    valid = time_diffs[time_diffs > 0]
+    if valid.size < 100:
+        # Insufficient data for robust quantile fit. Fall back to default
+        # ladder. Caller should log this case.
+        return DEFAULT_BUCKET_BOUNDARIES.copy()
+    p99 = float(np.quantile(valid, 0.99))
+    if p99 <= min_sec:
+        return DEFAULT_BUCKET_BOUNDARIES.copy()
+    log_min = np.log(min_sec)
+    log_max = np.log(p99)
+    log_edges = np.linspace(log_min, log_max, num_boundaries)
+    edges = np.round(np.exp(log_edges)).astype(np.int64)
+    # Clamp first edge to >= min_sec (round() can produce min_sec-1 for
+    # log-min boundary due to floating-point round-trip).
+    edges[0] = max(edges[0], min_sec)
+    # Enforce strict monotonic increase by adding 1 to any duplicate.
+    for i in range(1, len(edges)):
+        if edges[i] <= edges[i - 1]:
+            edges[i] = edges[i - 1] + 1
+    return edges
+
+
+def _scan_per_domain_time_diffs(
+    train_rgs: List[Tuple[str, int, int]],
+    schema_path: Optional[str],
+    sample_rgs: int = 8,
+    max_rows_per_rg: int = 50000,
+) -> Dict[str, np.ndarray]:
+    """T38 · Scan a sample of train RGs to gather per-domain time_diff data.
+
+    Returns a Dict[domain, np.ndarray] where each array contains positive
+    time_diff values (current row timestamp - seq item timestamp). Used to
+    fit per-domain log-scale bucket boundaries.
+
+    Args:
+        train_rgs: List of (parquet_file, rg_idx, n_rows) tuples for training.
+        schema_path: Optional path to schema.json (forwarded to schema parser
+            in caller). If None, the same default discovery applies.
+        sample_rgs: Number of Row Groups to scan (default 8 ≈ 6.4M time_diff
+            samples per domain at typical RG size).
+        max_rows_per_rg: Cap rows per RG to bound scan time.
+
+    Returns:
+        Dict[domain, 1D np.ndarray of int64 time_diff seconds]. Domains
+        without timestamp columns are skipped.
+    """
+    import pyarrow.parquet as pq  # local import: scan-only helper.
+    if not train_rgs:
+        raise ValueError("_scan_per_domain_time_diffs: train_rgs is empty")
+    sample = train_rgs[:max(1, sample_rgs)]
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+    seq_domains = ['seq_a', 'seq_b', 'seq_c', 'seq_d']
+    diffs: Dict[str, List[np.ndarray]] = {d: [] for d in seq_domains}
+    for parquet_path, rg_idx, _n_rows in sample:
+        pf = pf_cache.get(parquet_path)
+        if pf is None:
+            pf = pq.ParquetFile(parquet_path)
+            pf_cache[parquet_path] = pf
+        # Read only the columns we need.
+        cols_to_read = ['timestamp']
+        for d in seq_domains:
+            cols_to_read.append(f'{d}_timestamp')
+        avail = set(pf.schema_arrow.names)
+        cols_to_read = [c for c in cols_to_read if c in avail]
+        if 'timestamp' not in cols_to_read:
+            continue
+        table = pf.read_row_group(rg_idx, columns=cols_to_read)
+        if table.num_rows == 0:
+            continue
+        if table.num_rows > max_rows_per_rg:
+            table = table.slice(0, max_rows_per_rg)
+        ts = table.column('timestamp').to_numpy().astype(np.int64)
+        for d in seq_domains:
+            ts_col_name = f'{d}_timestamp'
+            if ts_col_name not in cols_to_read:
+                continue
+            seq_ts_col = table.column(ts_col_name)
+            seq_offs = seq_ts_col.offsets.to_numpy()
+            seq_vals = seq_ts_col.values.to_numpy().astype(np.int64)
+            for i in range(table.num_rows):
+                s = int(seq_offs[i])
+                e = int(seq_offs[i + 1])
+                if e <= s:
+                    continue
+                td = ts[i] - seq_vals[s:e]
+                td = td[td > 0]
+                if td.size > 0:
+                    diffs[d].append(td)
+    out: Dict[str, np.ndarray] = {}
+    for d in seq_domains:
+        if diffs[d]:
+            out[d] = np.concatenate(diffs[d])
+        else:
+            out[d] = np.array([], dtype=np.int64)
+    return out
 
 
 def parse_bucket_boundaries(spec: str | None) -> np.ndarray:
@@ -386,7 +510,9 @@ class PCVRParquetDataset(IterableDataset):
         disable_seq_fids: Optional[List[int]] = None,
         enable_eda_dump: bool = False,
         eda_reservoir_size: int = 20000,
-        bucket_boundaries: Optional[np.ndarray] = None,
+        bucket_boundaries: Optional[
+            Union[np.ndarray, Dict[str, np.ndarray]]
+        ] = None,
         enable_is_missing: bool = False,
         is_missing_user_int_fids: Optional[List[int]] = None,
         is_missing_item_int_fids: Optional[List[int]] = None,
@@ -517,8 +643,29 @@ class PCVRParquetDataset(IterableDataset):
         # hand-designed ladder" which keeps historical behavior bit-identical.
         # Overrides MUST have len == len(DEFAULT_BUCKET_BOUNDARIES) so the
         # embedding table shape (NUM_TIME_BUCKETS) is unaffected.
+        #
+        # T38 · per-domain bucket boundaries: when bucket_boundaries is a
+        # Dict[str, np.ndarray], each domain uses its own boundaries.
+        # Otherwise (np.ndarray or None) all domains share the same ladder.
+        # Note: ``self._bucket_boundaries`` is read in the seq batching
+        # pipeline; helper ``_get_boundaries(domain)`` resolves the right
+        # ladder per call.
         if bucket_boundaries is None:
-            self._bucket_boundaries = DEFAULT_BUCKET_BOUNDARIES
+            self._bucket_boundaries: Union[
+                np.ndarray, Dict[str, np.ndarray]
+            ] = DEFAULT_BUCKET_BOUNDARIES
+        elif isinstance(bucket_boundaries, dict):
+            per_domain: Dict[str, np.ndarray] = {}
+            for domain_key, arr_in in bucket_boundaries.items():
+                arr_d = np.asarray(arr_in, dtype=np.int64)
+                if arr_d.ndim != 1 or arr_d.shape[0] != len(
+                        DEFAULT_BUCKET_BOUNDARIES):
+                    raise ValueError(
+                        f"bucket_boundaries[{domain_key!r}] must be a 1D "
+                        f"array of length {len(DEFAULT_BUCKET_BOUNDARIES)}; "
+                        f"got shape {arr_d.shape}")
+                per_domain[domain_key] = arr_d
+            self._bucket_boundaries = per_domain
         else:
             arr = np.asarray(bucket_boundaries, dtype=np.int64)
             if arr.ndim != 1 or arr.shape[0] != len(DEFAULT_BUCKET_BOUNDARIES):
@@ -2039,7 +2186,13 @@ class PCVRParquetDataset(IterableDataset):
                 # and is always a valid Embedding index. Time-diffs beyond the
                 # largest boundary collapse into the last bucket.
                 # T30: use per-run boundaries (defaults to DEFAULT_BUCKET_BOUNDARIES).
-                boundaries = self._bucket_boundaries
+                # T38: select per-domain boundaries when self._bucket_boundaries
+                # is a dict. Falls back to default ladder if domain not present.
+                if isinstance(self._bucket_boundaries, dict):
+                    boundaries = self._bucket_boundaries.get(
+                        domain, DEFAULT_BUCKET_BOUNDARIES)
+                else:
+                    boundaries = self._bucket_boundaries
                 raw_buckets = np.clip(
                     np.searchsorted(boundaries, time_diff.ravel()),
                     0, len(boundaries) - 1,
@@ -2699,7 +2852,14 @@ def get_pcvr_data(
     # 5x lower than weekday). Valid set unaffected (still uses tail RGs).
     user_train_timestamp_min: Optional[int] = None,
     eda_reservoir_size: int = 20000,
-    bucket_boundaries: Optional[np.ndarray] = None,
+    bucket_boundaries: Optional[
+        Union[np.ndarray, Dict[str, np.ndarray]]
+    ] = None,
+    # T38 · per-domain time bucket: when enabled, fit log-scale boundaries
+    # per seq domain from a sample of train timestamps. Output is a Dict[
+    # str, np.ndarray] passed to PCVRParquetDataset.
+    enable_per_domain_buckets: bool = False,
+    per_domain_bucket_sample_rgs: int = 8,
     enable_is_missing: bool = False,
     is_missing_user_int_fids: Optional[List[int]] = None,
     is_missing_item_int_fids: Optional[List[int]] = None,
@@ -3260,6 +3420,33 @@ def get_pcvr_data(
         )
         logging.info(
             f"[P0-C] History CVR selected item fids: {selected_fids}")
+
+    # T38 · per-domain time bucket boundaries fitting. When enabled, scan a
+    # sample of train Row Groups, gather per-domain time_diff (current ts -
+    # seq ts), and fit log-scale boundaries to each domain's distribution.
+    # The result is a Dict[str, np.ndarray] passed to PCVRParquetDataset
+    # via bucket_boundaries. This addresses EXP-058 §Error C: 4 seq domains
+    # have time_diff scales spanning 11x (seq_d p99=56d vs seq_c p99=629d).
+    if enable_per_domain_buckets and bucket_boundaries is None:
+        per_domain_diffs = _scan_per_domain_time_diffs(
+            train_rgs, schema_path, sample_rgs=per_domain_bucket_sample_rgs)
+        fitted_boundaries: Dict[str, np.ndarray] = {}
+        for domain, diffs in per_domain_diffs.items():
+            fitted = fit_log_scale_boundaries(diffs)
+            fitted_boundaries[domain] = fitted
+            logging.info(
+                f"[T38] per-domain bucket fit · domain={domain} "
+                f"n_samples={diffs.size} "
+                f"p50={int(np.quantile(diffs[diffs > 0], 0.5)) if (diffs > 0).any() else 0}s "
+                f"p99={int(np.quantile(diffs[diffs > 0], 0.99)) if (diffs > 0).any() else 0}s "
+                f"first_5_boundaries={fitted[:5].tolist()} "
+                f"last_5_boundaries={fitted[-5:].tolist()}")
+        bucket_boundaries = fitted_boundaries
+    elif enable_per_domain_buckets and bucket_boundaries is not None:
+        logging.warning(
+            "[T38] enable_per_domain_buckets=True but bucket_boundaries "
+            "already supplied (likely from --time_bucket_boundaries CLI). "
+            "Skipping per-domain fit; using supplied boundaries.")
 
     train_dataset = PCVRParquetDataset(
         parquet_path=data_dir,

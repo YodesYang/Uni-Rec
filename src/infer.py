@@ -119,6 +119,30 @@ def _parse_disable_seq_fids(raw: Any) -> Optional[List[int]]:
         f"Unexpected type for disable_seq_fids: {type(raw).__name__}")
 
 
+def _resolve_bucket_boundaries(cfg: Dict[str, Any]):
+    """T38 · Resolve time bucket boundaries from train_config.json.
+
+    Priority:
+    1. ``fitted_per_domain_bucket_boundaries`` (T38) · Dict[domain, List[int]]
+       written by train.py when --enable_per_domain_buckets was set. Returned
+       as-is to PCVRParquetDataset which will validate per-domain length.
+    2. ``time_bucket_boundaries`` (T30) · csv string in train_config. Parsed
+       to np.ndarray of length 63.
+    3. None (default ladder) when neither is supplied.
+
+    Back-compat: pre-T38 ckpts have neither key set (or
+    ``fitted_per_domain_bucket_boundaries=None``). They keep using the T30
+    csv path or the default ladder, bit-identical to before.
+    """
+    import numpy as np
+    fitted = cfg.get("fitted_per_domain_bucket_boundaries", None)
+    if fitted is not None and isinstance(fitted, dict) and len(fitted) > 0:
+        return {
+            d: np.asarray(arr, dtype=np.int64) for d, arr in fitted.items()
+        }
+    return parse_bucket_boundaries(cfg.get("time_bucket_boundaries", ""))
+
+
 def _load_ns_groups(
     path: str,
     user_schema: FeatureSchema,
@@ -506,7 +530,7 @@ def main() -> None:
         enable_time_of_day_features=bool(cfg.get("enable_time_of_day_features", False)),
         enable_hour_only_features=bool(cfg.get("enable_hour_only_features", False)),
         disable_seq_fids=_parse_disable_seq_fids(cfg.get("disable_seq_fids", "")),
-        bucket_boundaries=parse_bucket_boundaries(cfg.get("time_bucket_boundaries", "")),
+        bucket_boundaries=_resolve_bucket_boundaries(cfg),
         enable_is_missing=bool(cfg.get("enable_is_missing", False)),
         is_missing_user_int_fids=parse_int_csv(cfg.get("is_missing_user_int_fids", "")),
         is_missing_item_int_fids=parse_int_csv(cfg.get("is_missing_item_int_fids", "")),

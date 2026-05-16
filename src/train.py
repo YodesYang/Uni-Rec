@@ -303,6 +303,29 @@ def parse_args() -> argparse.Namespace:
                              'time_diff distribution after EDA dump; demo-'
                              'smoke showed p1≈7.3h so many default buckets '
                              'under 1h are starved in the real data.')
+    parser.add_argument('--enable_per_domain_buckets', action='store_true',
+                        default=False,
+                        help='T38 · per-domain time bucket boundaries. When '
+                             'set, fit log-scale 63-edge ladders separately '
+                             'for each seq domain (a/b/c/d) by scanning a '
+                             'sample of train RGs at startup. EXP-058 §Error '
+                             'C reasoning: 4 domains have time_diff scales '
+                             'spanning 11x (seq_d p99=56d vs seq_c p99=629d) '
+                             '· global ladder either too coarse for short '
+                             'domains or too sparse for long ones. NUM_TIME_'
+                             'BUCKETS stays 64 so embedding table shape and '
+                             'ckpt compat are bit-identical. Mutually '
+                             'exclusive with --time_bucket_boundaries (when '
+                             'both supplied, --time_bucket_boundaries takes '
+                             'priority and per-domain fit is skipped with a '
+                             'warning).')
+    parser.add_argument('--per_domain_bucket_sample_rgs', type=int, default=8,
+                        help='T38 · Number of train Row Groups to scan when '
+                             'fitting per-domain bucket boundaries. Default '
+                             '8 (~6.4M time_diff samples per domain at '
+                             'typical 800k-row RGs). Higher = more robust '
+                             'p99 estimate but slower startup. Ignored when '
+                             '--enable_per_domain_buckets is off.')
     parser.add_argument('--rank_mixer_mode', type=str, default='full',
                         choices=['full', 'ffn_only', 'none'],
                         help='RankMixer mode: full = token mixing + FFN, '
@@ -785,6 +808,8 @@ def main() -> None:
         enable_eda_dump=args.enable_eda_dump,
         eda_reservoir_size=args.eda_reservoir_size,
         bucket_boundaries=parse_bucket_boundaries(args.time_bucket_boundaries),
+        enable_per_domain_buckets=args.enable_per_domain_buckets,
+        per_domain_bucket_sample_rgs=args.per_domain_bucket_sample_rgs,
         enable_is_missing=args.enable_is_missing,
         is_missing_user_int_fids=parse_int_csv(args.is_missing_user_int_fids),
         is_missing_item_int_fids=parse_int_csv(args.is_missing_item_int_fids),
@@ -995,10 +1020,21 @@ def main() -> None:
         # infer.py 端已修复解析 raw str (resolve_dcn_fids · 兼容已有 ckpt)。
         # 同时这里 override · 让新 ckpt 的 train_config.json 直接存 list
         # of int · 与 model_args 保持一致 · 避免 raw str 再传给下游。
+        # T38 (5/16): 把 fitted per-domain bucket boundaries 也存进 config
+        # 给 infer.py 复现 (否则 infer.py fit 出来的 boundaries 与 train 不一致 ·
+        # silent bug)。Dict[domain, List[int]] · None 时用 default ladder。
         train_config={
             **vars(args),
             "dcn_cross_user_fids": dcn_user_fid_indices,
             "dcn_cross_item_fids": dcn_item_fid_indices,
+            "fitted_per_domain_bucket_boundaries": (
+                {
+                    d: arr.tolist()
+                    for d, arr in train_dataset._bucket_boundaries.items()
+                }
+                if isinstance(train_dataset._bucket_boundaries, dict)
+                else None
+            ),
         },
         logloss_rebound_patience=args.logloss_rebound_patience,
         logloss_rebound_delta=args.logloss_rebound_delta,
