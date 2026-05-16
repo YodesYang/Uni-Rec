@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 TAAC 2026 competition baseline — post-click conversion rate prediction (pCVR) for Tencent advertising. Single-model architecture (`PCVRHyFormer`) evaluated by AUC on held-out test data.
 
 - **Preliminary deadline**: May 25, 2026 (25 days from 2026-05-02)
-- **Platform**: Tencent Angel (太极 Taiji), 4 training quota, 4 evaluation submissions/day
+- **Platform**: Tencent Angel (太极 Taiji), **4 training slots (always available, frees on completion · NOT a daily quota)**, 4 evaluation submissions/day (北京 12:00 / CEST 06:00 reset)
 - **Remote**: `git@github.com:YodesYang/Tencent_Uni_Rec.git` (main branch)
+- **🔴 Agent platform 操作前必读**: [`docs/00-context/platform-state.md`](docs/00-context/platform-state.md) (single source of truth · 每次操作前 grep)
 
 ---
 

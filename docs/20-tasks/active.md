@@ -11,15 +11,10 @@
 > **Agent 铁律**: 给提案 / 陈述 / 判决前必先读本段·**只有列在"Active"区的 EXP/ADR/Task 才进 decision loop · 其他全部 ARCHIVED 默认跳过**。
 > 5/14 单日 5 次幻觉根因之一 = "把已 deprecated 方向当未消化候选"·本段就是 anti-hallucination 索引。
 
-### Work in flight (4 training jobs · CEST 12:39 5/15 · M33/M34/M36 跑中 + T33 NLIR (M37) + M38 Multi-Emb K=2 ready)
+### 🔴 Platform 实时状态 → 见 [`docs/00-context/platform-state.md`](../00-context/platform-state.md)
 
-| Job | Path | 进度 | 完成预计 (CEST = 北京 −6h) | 预期信号 |
-|---|---|---|---|---|
-| **M33** (5-cluster ns_groups) | gap=0 | 跑中 | ~15:30 | T35 EDA-049 cluster 真信号校准 |
-| **M34** (vocabtier + Trick 6) | gap=0 | 跑中 | ~15:30 | M22 + Trick 6 双 stack |
-| **M36** (vocabtier × seed=7) | gap=0 | 跑中 | ~15:30 | vocabtier cross-seed std 真测 |
-| **M37 (NLIR gap=0)** ⭐ | gap=0 (M22 + NLIR) | 跑中 (~10:55 起) | ~16:35 | EXP-054 · T33 NLIR gap=0 path 首测 |
-| **M38 (Multi-Emb K=2)** ⭐ | gap=0 (M22 + multi_emb_k=2) | 5/15 12:33 平台 ready · 待 slot 释放 | ~5h after start | EXP-055 待落 · ADR-012 §RankUp +0.13~0.21% AUC online |
+> **2026-05-16 CEST 08:43 修复**: 之前 "Work in flight" 段是 stale info 源 (5/16 早 agent 凭印象错判 slot 状态触发) · 删除 · 改用 platform-state.md 作 single source of truth。
+> **agent 推荐 platform 操作前必须先 grep platform-state.md** · 不凭印象。
 
 ### 🔥 5/14 关键 LB 数据点 (EXP-052 落档)
 
