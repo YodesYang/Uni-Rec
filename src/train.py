@@ -1030,9 +1030,9 @@ def main() -> None:
             "fitted_per_domain_bucket_boundaries": (
                 {
                     d: arr.tolist()
-                    for d, arr in train_dataset._bucket_boundaries.items()
+                    for d, arr in pcvr_dataset._bucket_boundaries.items()
                 }
-                if isinstance(train_dataset._bucket_boundaries, dict)
+                if isinstance(pcvr_dataset._bucket_boundaries, dict)
                 else None
             ),
         },
