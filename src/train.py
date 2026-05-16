@@ -829,7 +829,22 @@ def main() -> None:
         ),
         enable_eda_dump=args.enable_eda_dump,
         eda_reservoir_size=args.eda_reservoir_size,
-        bucket_boundaries=parse_bucket_boundaries(args.time_bucket_boundaries),
+        # T38 silent skip bug fix (5/16 EXP-061 M52/M54 事故 · 见 EXP-064)
+        # 当 --enable_per_domain_buckets=True 时,必须传 None 让 dataset.py
+        # line 3430 的 fit 分支触发 (检测条件 = `bucket_boundaries is None`)。
+        # 否则 parse_bucket_boundaries('') 返回 default ladder copy (非 None),
+        # 进入 line 3445 elif 触发 silent skip warning · per-domain fit 被
+        # 跳过 · 实际跑全局 default ladder · M52/M54 因此实际 = M49/M22 rerun。
+        # 历史损失: 10 GPU-hour + per-domain bucket 路径 0 数据点。
+        # 互斥语义: 当用户**同时**显式给 --time_bucket_boundaries 非空字符串
+        # + --enable_per_domain_buckets=True 时,supplied 优先 (现有 elif 警告
+        # 路径) · 这是 train.py CLI help line 318-321 文档化的语义。
+        bucket_boundaries=(
+            None
+            if args.enable_per_domain_buckets
+            and not str(args.time_bucket_boundaries).strip()
+            else parse_bucket_boundaries(args.time_bucket_boundaries)
+        ),
         enable_per_domain_buckets=args.enable_per_domain_buckets,
         per_domain_bucket_sample_rgs=args.per_domain_bucket_sample_rgs,
         enable_is_missing=args.enable_is_missing,
