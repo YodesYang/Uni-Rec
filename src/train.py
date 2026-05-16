@@ -467,6 +467,21 @@ def parse_args() -> argparse.Namespace:
                              'token path. The bypass vector is concatenated to the '
                              'output_proj output, making the classifier input 2*d_model. '
                              'This avoids dense signal dilution inside HyFormer blocks.')
+    parser.add_argument('--enable_ue_split', action='store_true', default=False,
+                        help='T37 / Path B Step 1 (ADR-014 修订版 5/16): UE 分离 = '
+                             '把 user_dense_feats_61 (256-dim 预归一化 production user '
+                             'embedding) 单独成 NS token (复用 user_dense slot). 其他 '
+                             'dense feats (count fid_62~66 + fid_87/89/90/91 共 732-dim) '
+                             '走 dense_bypass 路径 (T25 已 work · 自动启用). 不与 '
+                             '--enable_global_token 同启 (raise ValueError). 与 '
+                             '--enable_dense_bypass 自动 stack。基于 Seed 主楼 LB 0.85+ '
+                             '第 (1) 条情报 + EXP-011 实证 fid_61 是预归一化 UE. '
+                             'ue_offset/ue_dim 由 dataset 动态计算 (从 user_dense_schema '
+                             '取 fid_61 在 user_dense_feats tensor 中的 (offset, length)).')
+    parser.add_argument('--ue_split_fid', type=int, default=61,
+                        help='T37: raw schema fid for UE (default 61 = 预归一化 user '
+                             'embedding · 256-dim). Resolved to (ue_offset, ue_dim) via '
+                             'pcvr_dataset.user_dense_schema.entries.')
     parser.add_argument('--enable_din_interest', action='store_true', default=False,
                         help='T25 / G1: DIN-style target-aware interest pooling. '
                              'Per-domain cross-attention uses the mean of item_ns '
@@ -843,6 +858,29 @@ def main() -> None:
         dcn_user_fid_indices = None
         dcn_item_fid_indices = None
 
+    # T37 / ADR-014 · UE split fid resolution. fid_61 (default) 在
+    # user_dense_schema 中找 (offset, length) → 传给 model。
+    ue_offset_resolved = 0
+    ue_dim_resolved = 256  # default; updated by schema resolve below
+    if args.enable_ue_split:
+        target_fid = int(args.ue_split_fid)
+        ue_entry = None
+        for entry in pcvr_dataset.user_dense_schema.entries:
+            # entries: List[Tuple[fid, offset, length]]
+            if entry[0] == target_fid:
+                ue_entry = entry
+                break
+        if ue_entry is None:
+            raise ValueError(
+                f"--enable_ue_split=True but --ue_split_fid={target_fid} "
+                f"not found in user_dense_schema (available fids: "
+                f"{[e[0] for e in pcvr_dataset.user_dense_schema.entries]})")
+        ue_offset_resolved = int(ue_entry[1])
+        ue_dim_resolved = int(ue_entry[2])
+        logging.info(
+            f"T37 UE split: fid={target_fid} resolved to offset="
+            f"{ue_offset_resolved}, dim={ue_dim_resolved}")
+
     model_args = {
         "user_int_feature_specs": user_int_feature_specs,
         "item_int_feature_specs": item_int_feature_specs,
@@ -891,6 +929,9 @@ def main() -> None:
         "dcn_cross_item_fids": dcn_item_fid_indices,
         "dcn_cross_layers": args.dcn_cross_layers,
         "enable_global_token": args.enable_global_token,
+        "enable_ue_split": args.enable_ue_split,
+        "ue_offset": ue_offset_resolved,
+        "ue_dim": ue_dim_resolved,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)

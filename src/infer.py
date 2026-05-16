@@ -643,6 +643,9 @@ def main() -> None:
         "dcn_cross_item_fids": dcn_item_fid_indices,
         "dcn_cross_layers": int(cfg.get("dcn_cross_layers", 2)),
         "enable_global_token": bool(cfg.get("enable_global_token", False)),
+        "enable_ue_split": bool(cfg.get("enable_ue_split", False)),
+        "ue_offset": int(cfg.get("ue_offset", 0)),
+        "ue_dim": int(cfg.get("ue_dim", 256)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

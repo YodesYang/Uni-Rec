@@ -2498,6 +2498,22 @@ class PCVRHyFormer(nn.Module):
         # RankUp §3.4. Requires `user_dense_dim > 0` (the slot must exist).
         # Default False = bit-identical baseline.
         enable_global_token: bool = False,
+        # T37 / Path B Step 1 · UE 分离 (ADR-014 · 5/16 修订版).
+        # user_dense_feats 默认 988-dim · 含 fid_61 (256-dim 预归一化 UE
+        # embedding · production user pre-trained) + count features
+        # (fid_62~66) + 其他 embedding (fid_87/89/90/91). 当前
+        # user_dense_proj 把全部 988-dim 一起 Linear → 1 token · UE 信号
+        # 被 count features 稀释 (EXP-011 实证 scale gap 4~5 量级).
+        # enable_ue_split: 把 fid_61 单独成 UE token (复用 user_dense
+        # slot) · 其他 dense feats 走 dense_bypass 路径 (T25 已 work).
+        # 自动启用 enable_dense_bypass=True (其他 dense 必须有 path)。
+        # Plan B 复用 slot · T-divisibility 不变。
+        # ue_offset / ue_dim: train.py 由 user_dense_schema 计算 fid_61
+        # 在 user_dense_feats tensor 中的 (offset, length)。
+        # Default False = bit-identical baseline.
+        enable_ue_split: bool = False,
+        ue_offset: int = 0,
+        ue_dim: int = 256,
     ) -> None:
         super().__init__()
 
@@ -2594,34 +2610,67 @@ class PCVRHyFormer(nn.Module):
                 "enable_global_token=True requires user_dense_dim > 0 "
                 "(Plan B reuses the user_dense token slot)."
             )
+        # T37 / ADR-014 · UE split: when enabled · user_dense slot becomes
+        # UE token (only fid_61 256-dim) · 其他 dense 走 dense_bypass。
+        # 与 enable_global_token 互斥 (都复用 user_dense slot)。
+        self.enable_ue_split = bool(enable_ue_split)
+        if self.enable_ue_split and self.enable_global_token:
+            raise ValueError(
+                "enable_ue_split and enable_global_token both reuse the "
+                "user_dense slot · cannot be combined")
+        if self.enable_ue_split and not self.has_user_dense:
+            raise ValueError(
+                "enable_ue_split=True requires user_dense_dim > 0")
+        if self.enable_ue_split:
+            if ue_dim <= 0 or ue_dim > user_dense_dim:
+                raise ValueError(
+                    f"enable_ue_split: ue_dim {ue_dim} must be in "
+                    f"(0, user_dense_dim={user_dense_dim}]")
+            if ue_offset < 0 or ue_offset + ue_dim > user_dense_dim:
+                raise ValueError(
+                    f"enable_ue_split: ue_offset {ue_offset} + ue_dim "
+                    f"{ue_dim} > user_dense_dim {user_dense_dim}")
+            self.ue_offset = int(ue_offset)
+            self.ue_dim = int(ue_dim)
+        else:
+            self.ue_offset = 0
+            self.ue_dim = 0
+
         if self.has_user_dense:
             if self.enable_global_token:
                 # Concat input: [user_dense, user_int_pool, item_int_pool,
                 #                seq_pool_a, ..., seq_pool_d]
-                # user_int_pool / item_int_pool are mean-pool of NS tokens
-                # (already in d_model), seq_pool is mean-pool of raw seq
-                # token embeddings (also d_model per domain).
                 global_in_dim = (
                     user_dense_dim
-                    + d_model  # user_int_pool
-                    + d_model  # item_int_pool
-                    + self.num_sequences * d_model  # per-domain seq pool
+                    + d_model
+                    + d_model
+                    + self.num_sequences * d_model
                 )
                 self.global_token_proj = nn.Sequential(
                     nn.Linear(global_in_dim, d_model),
                     nn.LayerNorm(d_model),
                 )
-                # Keep user_dense_proj as None to make the absence explicit
                 self.user_dense_proj = None
+                self.ue_proj = None
+            elif self.enable_ue_split:
+                # T37 · UE token = fid_61 only (ue_dim subset of user_dense)
+                self.ue_proj = nn.Sequential(
+                    nn.Linear(self.ue_dim, d_model),
+                    nn.LayerNorm(d_model),
+                )
+                self.user_dense_proj = None
+                self.global_token_proj = None
             else:
                 self.user_dense_proj = nn.Sequential(
                     nn.Linear(user_dense_dim, d_model),
                     nn.LayerNorm(d_model),
                 )
                 self.global_token_proj = None
+                self.ue_proj = None
         else:
             self.user_dense_proj = None
             self.global_token_proj = None
+            self.ue_proj = None
 
         # Item dense feature projection (if available)
         self.has_item_dense = item_dense_dim > 0
@@ -2644,10 +2693,21 @@ class PCVRHyFormer(nn.Module):
         # concatenated directly to the output of output_proj before the
         # classifier, giving the dense features a full-strength signal path
         # independent of the HyFormer block dilution.
-        self.has_dense_bypass = enable_dense_bypass and self.has_user_dense
+        # T37 / ADR-014 · enable_ue_split forces dense_bypass for "other"
+        # dense features (everything except the UE slice). Without bypass,
+        # the other dense feats would have no path into the model since
+        # user_dense_proj is replaced by ue_proj (UE-only).
+        self.has_dense_bypass = (
+            (enable_dense_bypass or self.enable_ue_split)
+            and self.has_user_dense
+        )
         if self.has_dense_bypass:
+            # Bypass input dim: when ue_split, only the "other" dense feats
+            # (user_dense_dim - ue_dim). Otherwise full user_dense_dim.
+            bypass_in_dim = (user_dense_dim - self.ue_dim
+                             if self.enable_ue_split else user_dense_dim)
             self.user_dense_bypass_proj = nn.Sequential(
-                nn.Linear(user_dense_dim, d_model),
+                nn.Linear(bypass_in_dim, d_model),
                 nn.LayerNorm(d_model),
                 nn.SiLU(),
             )
@@ -3245,6 +3305,15 @@ class PCVRHyFormer(nn.Module):
                     seq_tokens_list, seq_masks_list,
                 )
                 ns_parts.append(global_token)
+            elif self.enable_ue_split:
+                # T37 / ADR-014 · UE token = fid_61 only (slice
+                # user_dense_feats[ue_offset:ue_offset+ue_dim]).
+                # 其他 dense feats 不进 ns · 走 dense_bypass (T25 路径).
+                ue_feats = inputs.user_dense_feats[
+                    :, self.ue_offset:self.ue_offset + self.ue_dim
+                ]
+                ns_parts.append(
+                    F.silu(self.ue_proj(ue_feats)).unsqueeze(1))
             else:
                 ns_parts.append(
                     F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
@@ -3293,8 +3362,20 @@ class PCVRHyFormer(nn.Module):
 
         Only called when ``has_dense_bypass`` is True. Produces a
         (B, 2*D) tensor that feeds directly into the classifier.
+
+        T37 / ADR-014 · When ``enable_ue_split`` is True, the bypass input
+        is the "other" dense feats (everything except the UE slice
+        user_dense_feats[ue_offset:ue_offset+ue_dim]). The UE slice goes
+        to the NS token path via ue_proj.
         """
-        bypass = self.user_dense_bypass_proj(inputs.user_dense_feats)  # (B, D)
+        if self.enable_ue_split:
+            # 其他 dense = concat(left, right) excluding [ue_offset, ue_offset+ue_dim)
+            left = inputs.user_dense_feats[:, :self.ue_offset]
+            right = inputs.user_dense_feats[:, self.ue_offset + self.ue_dim:]
+            other_dense = torch.cat([left, right], dim=-1)  # (B, user_dense_dim - ue_dim)
+            bypass = self.user_dense_bypass_proj(other_dense)  # (B, D)
+        else:
+            bypass = self.user_dense_bypass_proj(inputs.user_dense_feats)  # (B, D)
         return torch.cat([output, bypass], dim=-1)  # (B, 2D)
 
     def _apply_din_interest_bypass(
