@@ -95,10 +95,20 @@
 - 7/7 新方向 (M37/M38/M39/M40/M41/Multi-Emb/Global Token) dev 都不超 M22 · vocabtier 路径**接近局部最优**
 - **path B (UE 分离 + int pairwise cross)** 是当前唯一未尝试的破局方向 · ADR-014 待起草
 
-**5/16 下午 14:00 计划 (CEST 09:00 audit 修订)** (4 free slot):
-- 1 slot: **path B first** (M22 + UE 分离 + DCN cross stack · 依赖 ADR-014 ~14:00 完成)
-- 1 slot: **M44** = M22 + temporal_weight 2.5 + Multi-Emb K=2 stack + EDA_BLOB 搭车 (Tier 1 EDA)
-- 2 slot: 留空 / 信号驱动 / 5/16 晚 LB 后决
+**5/16 下午 14:00 计划 (CEST 09:30 audit · path B 暂缓)** (4 free slot):
+- **4 slot 全留空** (path B / M44 都 suspended · 见 ADR-014 §Suspension Note)
+- 等晚 2 evaluation (M23 + M38 v2) LB 出 (~CEST 22:30)
+- 5/17 早根据数据决方向
+
+**Path B 暂缓原因** (用户 5/16 09:30 决断):
+- "UE 分离" 解读不确定 · 3 种 plausible interpretation · community 无二次澄清
+- 7/7 历史新方向 dev 弱负 · 在解读不确定时投入资源高风险
+- 重启条件: M23 LB 出后看 cross 路径是否 work · 或社区追问 Seed 帖细节
+
+**M44 撤销原因**:
+- M22 + temporal_weight 2.5 + Multi-Emb K=2 stack
+- M41 弱信号 (LB +0.000254) + Multi-Emb 弱负 (M38 v2 dev −0.000173)
+- Stack 期望 ~+0.0001 · 落 noise band 内 · ROI 极低
 
 **关键 deprecated 方向** (不再投资源):
 - ❌ 5-cluster ns_groups (M33 LB 反向放大 27× · 路径关闭)

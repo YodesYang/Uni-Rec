@@ -1,13 +1,44 @@
 # ADR-014 · Path B Step 1 · UE 分离 (User Embedding Outlier Isolation) [T37]
 
-> **Status**: **Proposed** (2026-05-16 CEST 09:00 起草)
-> **Date**: 2026-05-16
-> **Related Tasks**: T37 (新)
+> **Status**: **🛑 Suspended-Pending-Community-Clarification** (2026-05-16 CEST 09:30 暂缓 · 用户审视触发)
+> **Suspension Reason**: "UE 分离" 解读不确定 · 无 community 二次澄清 · 设计可能错方向
+> **Date**: 2026-05-16 Proposed → 2026-05-16 Suspended (~30 min review)
+> **Related Tasks**: T37 (新 · Suspended)
 > **Related Experiments**: EXP-049 (EDA-correlation · user_int_feats_15 outlier 实证) · EXP-055 (5/15~5/16 retrospective · path B 提议)
 > **External References**:
 > - 社区情报 Seed (LB 0.85+) 主楼 5/5 第 (1) 条原话: "user dense feats 将 ue 分离出来 · 其他跟 int pair 加权"
 > - 沉淀位置: `docs/99-raw/community-snapshots/xhs-decem-0512/README.md` line 196
 > - EXP-049 §2 user-side outlier 实证: `user_int_feats_15` MI=0.003603 · V=256 · 比 user 第 2 名高 3.7× · 比 item-side 弱 fid 还高 3.7×
+
+---
+
+## 🛑 Suspension Note (2026-05-16 CEST 09:30)
+
+**用户决断**: ADR-014 解读不确定 · 暂缓启动。
+
+**暂缓原因**:
+1. **"UE 分离" 解读 3 种可能**:
+   - A · UE = user_int_feats_15 high-MI fid 单独成 token (本 ADR 当前设计)
+   - B · UE = user_dense_feats (已分离 · 不需做)
+   - C · UE = user_int top N fid 全部分离 (broader 解读)
+2. **community 没二次澄清**: Seed 主楼帖 5/5 仅截图 1/?? 页 · 后续没追问
+3. **5/14~5/16 7/7 新方向 dev 弱负** · 本 ADR 也大概率 dev 弱负 · 在解读不确定时投入资源高风险
+
+**重启条件** (任一满足):
+1. 用户反问社区 (微信群 / 小红书 Seed 帖评论) 求 "UE 分离具体是什么" · 得到二次澄清
+2. M23 (T34 DCN cross gap=0) LB 出 (5/16 晚) 后 · 如果 cross 路径 work · 再考虑 UE 分离 alone 单变量验证
+3. 5/22 后 final 阶段 · 如果 path A (RankUp 路径) 全 saturated · 需要 desperate 探索 · 再考虑
+
+**5/16 下午行动 (修订)**:
+- 4 free slot 全留空 (不起 path B / 不起 M44)
+- 等晚 2 evaluation (M23 + M38 v2) LB 出
+- 5/17 早根据数据决方向
+
+---
+
+## (以下是 09:00 起草的原 ADR 内容 · 暂保留作为 reactivation 基础)
+
+---
 
 ---
 
