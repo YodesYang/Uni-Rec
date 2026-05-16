@@ -1,15 +1,38 @@
 # ADR-014 · Path B Step 1 · UE 分离 (User Embedding Outlier Isolation) [T37]
 
-> **Status**: 🟢 **Reactivated** (2026-05-16 CEST 11:00 修订 · UE 解读由 user_int_feats_15 改为 **user_dense_feats_61 256-dim 预归一化 embedding**)
-> **Suspension History**: Proposed 09:00 → Suspended 09:30 → Reactivated 11:00
-> **Date**: 2026-05-16 (3 status changes in 2 hours)
-> **Related Tasks**: T37 (新)
-> **Related Experiments**: EXP-049 (EDA-correlation · user_int side outlier 但**非 UE 真实指代**) · EXP-011 (dense log1p 修复 · **fid 61/87 = 预归一化 embedding 实证**) · EXP-055 (5/15~5/16 retrospective · path B 提议) · EXP-056 (Tier 0 EDA · 元宵节假设证伪) · EXP-057 (M45-48 daypart engineering)
+> **Status**: ✅ **Accepted** (2026-05-16 CEST 21:30 实证 · M49 LB 0.848162 · Δ+0.000570 vs M22 SOTA · 项目首个超 SOTA · path B 弱真信号)
+> **Status History**: Proposed 09:00 → Suspended 09:30 → Reactivated 11:00 → **Accepted 21:30** (M49 LB 实证)
+> **Date**: 2026-05-16 (4 status changes in 12 hours)
+> **Related Tasks**: T37 (实施完成 · commit `e5b0bf4`)
+> **Related Experiments**: EXP-049 (EDA-correlation · user_int side outlier 但**非 UE 真实指代**) · EXP-011 (dense log1p 修复 · **fid 61/87 = 预归一化 embedding 实证**) · EXP-055 (5/15~5/16 retrospective · path B 提议) · EXP-056 (Tier 0 EDA · 元宵节假设证伪) · EXP-057 (M45-48 daypart engineering) · **EXP-059 (M49 LB 0.848162 · path B 实证)** · **EXP-061 (M51-M54 path B stack overnight 启动)**
 > **External References**:
 > - 社区情报 Seed (LB 0.85+) 主楼 5/5 第 (1) 条原话: "user dense feats 将 ue 分离出来 · 其他跟 int pair 加权"
 > - 沉淀位置: `docs/99-raw/community-snapshots/xhs-decem-0512/README.md` line 196
 > - **EXP-011 实证**: `user_dense_feats_61 (256-dim · 预归一化 embedding)` · `fid_87 (320-dim · 预归一化 embedding)` · `fid_62~66 (原始计数统计量 10^3~10^5 量级)` · `fid_89/90/91 (10-dim · 预归一化 embedding)`
 > - `src/ns_groups.json` line 8: "All user dense features (fid 61/62/63/64/65/66/87/89/90/91, total_dim=918) are concatenated and projected to a single NS token"
+
+---
+
+## ✅ Acceptance (2026-05-16 CEST 21:30)
+
+**M49 evaluation 实证**:
+
+| Metric | M22 (anchor) | M49 (UE split) | Δ |
+|---|---|---|---|
+| dev AUC | 0.868619 | **0.870741** | **+0.002122** ✅ |
+| LB AUC | 0.847592 | **0.848162** | **+0.000570** ✅ |
+| dev→LB 衰减 | 100% retain | 27% retain | **73% 衰减** ⚠️ |
+
+**判决**:
+- ✅ 超出 same-seed rerun band ±0.0003 (LB Δ +0.000570 > +0.0003)
+- ⚠️ 未破 0.8484 严格阈值 (3× rerun band) · 信号强度不足以排除 cross-seed luck
+- ✅ ADR-014 设计假设 (UE = fid_61 256-dim) **机制正确**
+- ✅ M49 = 项目 16 天 60+ jobs 后**首次** dev↔LB 双侧超 rerun band 真信号
+
+**经验**:
+- "弱真信号 + 单变量不够冲 0.85" · 必须叠加第二真信号
+- dev→LB 衰减 73% 远高于期望 (~30%) · UE split 在 OOV 远未来场景下信号衰减严重
+- 5/16 后续战略转向 **path B 体系下 stack 探索** (EXP-061 M51-M54 4-job batch)
 
 ---
 
@@ -36,9 +59,7 @@ agent 5/16 10:55 深度思考时严格 grep `src/ns_groups.json` line 8 + EXP-01
 2. 其他 user_dense (count + fid_87/89/90/91) 通过 **dense_bypass** (T25 已 work 机制) 直接到 classifier
 3. 与 user_int / item_int 的 cross 通过 **DCN cross** (M23 已实测 LB 强负 · 不要叠加 · 可能 Seed 用了不同 cross 实现)
 
-**重启条件 (5/16 11:00 修订)** · 改激活而非暂缓:
-- 5/17~5/19 起 path B prep (修订版 UE 分离 fid_61) · ADR-014 状态 Reactivated
-- 5/16 下午仍按 M45-48 daypart engineering 不变 (orthogonal work)
+**~~重启条件~~** ✅ 已 reactivated 5/16 11:00 · ✅ 已 Accepted 5/16 21:30 (M49 LB 实证)
 
 ---
 
@@ -305,6 +326,75 @@ parser.add_argument('--ue_split_raw_fid', type=int, default=15,
 2. **UE token 位置**: 第 1 个 token 还是末尾? 默认第 1 个 (类似 dense_user 的 "标识 token" 角色)。下游 (ICQ / target_inject) 用 mean pool · 位置不敏感 · 但**Item NS slice 的 offset 公式仍是 `num_user_ns + has_user_dense`** · 不需改下游。
 3. **是否需要 `--ue_split_dropout`**: 给 UE token 加 dropout 防过拟合? 暂不加 · 与 dense_user (无 dropout) 保持一致。
 4. **5/16 下午 first job 是否同时启用 DCN**: 推荐 stack (与 ADR-014 §S2 表格一致) · 风险点见 §Negative。
+
+---
+
+## §10 · Path B Future Direction Matrix (5/16 21:30 实证后路线 · M51-M54 已落档 EXP-061)
+
+### 10.1 已闭环数据点
+
+| Job | Config | dev | LB | 判读 |
+|---|---|---|---|---|
+| M22 (anchor) | vocabtier · no UE split | 0.868619 | 0.847592 | (anchor) |
+| **M49** ⭐ | + UE split (T37) | **0.870741** | **0.848162** | **path B 单变量真信号** |
+| M50 ⚠️ | + UE split + weekend filter | 0.861974 | (5/17 早 ⭐⭐ 候选) | 双 stack 损害 net |
+| M45 ❌ | + weekend filter alone | 0.858907 | (不评) | daypart filter 路径死 |
+
+### 10.2 5/16 晚 overnight stack 探索 (EXP-061 · 4 jobs)
+
+| Job | Config | 类型 | 期望 dev | 期望 LB | 真信号概率 |
+|---|---|---|---|---|---|
+| **M51** | M49 + temporal_weight 2.5 | path B + M41 stack (两已验证真信号 stack) | 0.871~0.873 | 0.848~0.850 | 40% (高) |
+| **M52** | M49 + per-domain time bucket (T38) | path B + EXP-058 §Error C 修复 | 0.870~0.872 | 0.847~0.849 | 25% (中) |
+| **M53** | M49 + NLIR | path B + Linear gating stack | 0.870~0.872 | 0.847~0.849 | 25% (中) |
+| **M54** | M22 + per-domain time bucket alone | M28 修复单变量 | 0.868~0.869 | 0.846~0.848 | 30% (中) |
+
+**期望产出**: 1~2 个真信号 (40% × 1 + 25% × 2 + 30% × 1 = 1.2 真信号期望值)
+
+### 10.3 5/17 早 4 quota 决策
+
+按 dev 选 4 个最强候选评估:
+- Slot 1: M37 (NLIR vocabtier alone · 老候选 · architecture-level)
+- Slot 2: M38 v2 (Multi-Emb K=2 · 老候选 · RankUp 闭环)
+- Slot 3: M51/M52/M53 dev 最高的 (今晚训完选最强)
+- Slot 4: M50 (UE split + weekend filter 双 stack 反例验证) · 或备用 M30/M54
+
+### 10.4 5/17+ 后续 path B 探索 (取决于 5/17 早 LB)
+
+**场景 A · M51 LB ≥ 0.849** (path B + M41 stack 强真信号):
+- 5/17 早 quota 评 M51 + M52 + M53 (评 3 个新 stack 各自 LB)
+- 5/18~5/19 path B + M51 + 第二真信号 三 stack (e.g. M51 + per-domain bucket)
+- 期望破 0.85 概率提升到 25~35%
+
+**场景 B · M51 LB ∈ [0.848, 0.849]** (微正 · 持平 M49):
+- M51 stack work 但增益不显著
+- 5/17 早 quota 评 M51 + M52 + M53 中 dev 最高 1~2 个
+- 5/18 探索 M22 cross-seed (5/22 前破例 · 因 M51 ≥ 0.8484 触发例外)
+
+**场景 C · M51 LB < 0.848** (持平/微负 M49):
+- M51 stack 不 work · path B 体系下 stack 困难
+- 5/17 早 quota 评 M52/M53 (不评 M51)
+- 5/18 切回 path B 单变量 grid (ue_dim=128/64)
+
+**场景 D · 全部新候选 LB ≤ 0.847** (整批失败):
+- path B 体系下 stack 整体死透
+- 5/18 切回 single-variable architecture exploration
+- 考虑 DECEM 情报未消化 Tokenization 修改
+
+### 10.5 Iron Laws (path B 实证后新增)
+
+1. **path B 单变量已 work · 但单变量不够冲 0.85** (M49 LB +0.000570 · 距 0.85 还差 +0.0018)
+2. **必须找第二真信号** · 优先 stack 已知真信号 (M41 temporal_weight) · 风险中
+3. **dev→LB 衰减率 27%** · UE split 在 OOV 远未来场景下信号衰减严重 · 选 stack 候选时优先衰减率低的方法
+4. **任何 stack 候选必须基于 M49 base** · 不再回 M22 base (M22 base + 单变量 stack 6/6 失败 1 work · 历史失败率 83% · 不应继续浪费)
+5. **5/22 前 cross-seed 仍锁** (M49 LB 0.848162 < 0.8484 严格阈值 · 不触发例外)
+
+### 10.6 实施成本汇总
+
+- **M51**: 0 新代码 · 仅 run.sh
+- **M52/M54**: T38 per-domain bucket (~50 LOC dataset.py + 20 LOC train.py + 10 LOC infer.py + smoke ~80 LOC) · 2.5h
+- **M53**: 0 新代码 · 仅 run.sh
+- 总: ~3h 实施 + 4 jobs train (overnight 5h)
 
 ---
 
