@@ -538,6 +538,59 @@ def main() -> None:
         dataset.item_int_schema,
     )
 
+    # T34 DCN cross fids · resolve raw schema fid → list index in
+    # feature_specs (matches train.py:794-821 logic). 兼容两种 train_config
+    # storage 格式:
+    #   - raw csv str (e.g. '1,49')  ← train.py vars(args) 写入的格式 (常见)
+    #   - list of int                 ← 早期 model_args 直接写入 (rare)
+    #   - already-mapped indices      ← 极少 · 当 raw fids 与 list indices 巧合相等
+    # 通过 user_int_schema.entries 重建 raw_fid → list_index 映射 · 严格
+    # 区分 "raw fid (在 schema 中)" vs "list index (在 feature_specs 中)"。
+    def _resolve_dcn_fids(
+        raw_value: Any,
+        schema_entries: List[Tuple[int, int, int]],
+        side: str,
+    ) -> Optional[List[int]]:
+        if raw_value is None:
+            return None
+        # Parse raw value → list of raw fids
+        if isinstance(raw_value, str):
+            try:
+                raw_fids = [int(x.strip()) for x in raw_value.split(',') if x.strip()]
+            except ValueError as e:
+                raise ValueError(
+                    f"dcn_cross_{side}_fids '{raw_value}' parse error: {e}"
+                ) from e
+        elif isinstance(raw_value, list):
+            raw_fids = [int(x) for x in raw_value]
+        else:
+            raise ValueError(
+                f"dcn_cross_{side}_fids type {type(raw_value).__name__} "
+                f"unexpected · expected str or list"
+            )
+        # Build raw_fid → list_index map from schema entries
+        # entries: List[Tuple[fid, offset, length]]
+        fid_to_idx = {entry[0]: i for i, entry in enumerate(schema_entries)}
+        # Resolve · raise if any raw fid not in schema
+        unknown = [f for f in raw_fids if f not in fid_to_idx]
+        if unknown:
+            raise ValueError(
+                f"dcn_cross_{side}_fids contains unknown fids "
+                f"{unknown} (available: {sorted(fid_to_idx.keys())})"
+            )
+        return [fid_to_idx[f] for f in raw_fids]
+
+    dcn_user_fid_indices = _resolve_dcn_fids(
+        cfg.get("dcn_cross_user_fids"),
+        dataset.user_int_schema.entries,
+        "user",
+    )
+    dcn_item_fid_indices = _resolve_dcn_fids(
+        cfg.get("dcn_cross_item_fids"),
+        dataset.item_int_schema.entries,
+        "item",
+    )
+
     model_args = {
         "user_int_feature_specs": _build_feature_specs(
             dataset.user_int_schema, dataset.user_int_vocab_sizes),
@@ -584,13 +637,10 @@ def main() -> None:
         "enable_nlir_gating": bool(cfg.get("enable_nlir_gating", False)),
         "enable_fafe": bool(cfg.get("enable_fafe", False)),
         "enable_dcn_cross": bool(cfg.get("enable_dcn_cross", False)),
-        # T34: cfg stores LIST INDICES (already mapped from raw schema fids
-        # by train.py before saving train_config.json). infer.py forwards
-        # them as-is — no re-mapping needed because the model's
-        # user_int_feature_specs ordering is identical between train and
-        # infer (both derive from schema.json::user_int).
-        "dcn_cross_user_fids": cfg.get("dcn_cross_user_fids"),
-        "dcn_cross_item_fids": cfg.get("dcn_cross_item_fids"),
+        # T34 · DCN cross list indices (resolved from raw fids by
+        # _resolve_dcn_fids above · no longer trust cfg raw value).
+        "dcn_cross_user_fids": dcn_user_fid_indices,
+        "dcn_cross_item_fids": dcn_item_fid_indices,
         "dcn_cross_layers": int(cfg.get("dcn_cross_layers", 2)),
         "enable_global_token": bool(cfg.get("enable_global_token", False)),
     }

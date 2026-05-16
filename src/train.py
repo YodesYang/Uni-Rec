@@ -934,7 +934,16 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         max_train_steps=args.max_train_steps,
-        train_config=vars(args),
+        # 5/16 fix: train_config 存 raw csv str 会让 evaluation 时 infer.py
+        # 处理失败 (eval_log.txt M23 evaluation '<=' int vs str error)。
+        # infer.py 端已修复解析 raw str (resolve_dcn_fids · 兼容已有 ckpt)。
+        # 同时这里 override · 让新 ckpt 的 train_config.json 直接存 list
+        # of int · 与 model_args 保持一致 · 避免 raw str 再传给下游。
+        train_config={
+            **vars(args),
+            "dcn_cross_user_fids": dcn_user_fid_indices,
+            "dcn_cross_item_fids": dcn_item_fid_indices,
+        },
         logloss_rebound_patience=args.logloss_rebound_patience,
         logloss_rebound_delta=args.logloss_rebound_delta,
         holdout_loader=holdout_loader,
