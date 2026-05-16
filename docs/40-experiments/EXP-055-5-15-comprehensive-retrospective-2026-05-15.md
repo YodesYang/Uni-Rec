@@ -627,6 +627,94 @@ M33 vs M22 LB 反向放大 27× · M33-rerun vs M22-rerun LB 期望: **0.844710 
 
 > **2026-05-15 CEST 23:30 · 元宵节认知触发**: 中国互联网数据集 (e.g. 腾讯 / 阿里 / 字节) 训练数据上 **农历节日是流量峰 · CVR 显著高于平日**。任何"train 某日占比异常 (e.g. 60%+)" 必须先 grep **该日是否农历节日** · 不能凭 sampling artifact 假设。**铁律**: ① 拿到中国数据集 · 第一时间用 `lunar_calendar` 工具 grep train/test 日期对应农历日 · 标记节日; ② 节日峰 (e.g. 元宵节 03-03) sample 不是 recency · 不能用 `temporal_weight_alpha` 简单 reweight; ③ 节后翌日 (e.g. 03-04) 是真正的 "回归常态" daypart · 与节日峰 distribution 完全不同; ④ 时间特征 (`enable_time_of_day_features`) 含 day-of-week 时 · 必须验证 train weekday 分布 vs test weekday 分布 · 不一致则用 `--enable_hour_only_features` 移除 dow 偏差; ⑤ 历史影响: 5/10 EXP-035 line 109 把 "63% 视为 recency" 错判 · 修订 `temporal_weight_alpha` ROI 回归 +0.001~+0.003。
 
+---
+
+## 16. CEST 07:35 5/16 补遗 · 4 jobs dev 全回流 · 4/4 dev 全负面 · 重大战略修订
+
+### 16.1 4 jobs dev 数据 (E4 best)
+
+| Job | 假设 | E4 dev | E4 LogLoss | vs M22 (0.868576) | 是否破 dev band? |
+|---|---|---|---|---|---|
+| **M22** ⭐ anchor | (baseline) | 0.868576 | 0.22290 | (anchor) | — |
+| **M38 v2** | M22 + Multi-Emb K=2 | 0.868403 | 0.22373 | **−0.000173** | ❌ in ±0.0003 band (无信号) |
+| **M39 v2** | M22 + Global Token | 0.867963 | 0.22330 | **−0.000613** | ❌ out 2× band (显著负) |
+| **M40** | M22 替换 hour_only | 0.866881 | 0.22409 | **−0.001695** | ❌❌❌ out 5× band (强负) |
+| **M41** | M22 + temporal_weight 2.5 | 0.868069 | 0.22303 | **−0.000507** | ❌ out 2× band (显著负) |
+
+### 16.2 重大判读 · 4/4 dev 全负面
+
+**统计显著性**: 如每个方向独立 50% 概率 dev 持平/微正 · 4/4 全负的概率 = (0.5)^4 = **6.25%** · 不太可能是 noise 巧合。
+
+**结合 5/14 ~ 5/15 早 stack 第 2 步 3 个全失败** (M28 vocabtier+Trick1 / M34 vocabtier+Trick6 / M37 vocabtier+NLIR):
+- 共 5/14 ~ 5/16 凌晨 7 个新方向单变量 / stack 实验
+- 7/7 dev 端 ≤ M22 (vocabtier baseline)
+- **结论**: M22 vocabtier 在 dev 层面已找到当前路径局部最优 · 任何单变量 perturb / stack 第 2 步都让 dev 跌
+
+### 16.3 元宵节认知方向被 dev 数据证伪
+
+**5/15 23:30 元宵节认知预测**:
+- M40 (hour_only) 期望 +0.0005~+0.002 LB · 实际 dev **−0.001695** ❌
+- M41 (temporal_weight 2.5) 期望 +0.001~+0.003 LB · 实际 dev **−0.000507** ❌
+
+**真实机制 (修订)**:
+- **M22 dow_sin/cos 不是误导信号 · 是真实有用信号** · 移除后 dev 大跌
+- valid 5% 尾部混合 03-03/03-04 多 weekday · dow 特征对 dev 预测有效
+- **元宵节假设是 "理论 plausible 但实际 ROI 0" 的方向**
+
+**修正 5/15 23:30 元宵节估算**:
+- "Top 20 概率 20~30%" → **修订到 5~10%** (dev 数据已证伪 daypart 路径)
+- "S1 + S2 daypart 路径" → **关闭**
+- "S3 (is_holiday + days_since_lunar_holiday 50 行新代码)" → **悬挂** (机制类似 hour_only · 大概率同样 dev 端不 work · 不优先做)
+
+### 16.4 5/16 早 4 quota 修订 (基于 4 dev 全负面)
+
+| 优先级 | quota | ckpt | 期望 LB | 战略价值 |
+|---|---|---|---|---|
+| 1 ⭐⭐⭐ | **M38 v2** (Multi-Emb K=2) | ~0.847 | RankUp Multi-Emb LB 实测 · ADR-012 闭环 |
+| 2 ⭐⭐⭐ | **M39 v2** (Global Token) | ~0.847 | RankUp Global Token LB 实测 · ADR-013 闭环 |
+| 3 ⭐⭐ | **M41** (temporal_weight 2.5) | ~0.846~0.848 | dev 弱负 · LB 端 daypart match 可能反向 · 0 代码 0 风险 |
+| 4 ⭐ | **M30** (Trick 6 alone) | ~0.846 | 给 M34 stack 失败归因 · ROI 低但唯一 stack 归因机会 |
+
+**不评 M40** · dev 强负 (−0.001695, 5× band) · LB 大概率也强负 · 价值低于 M30/M41。
+
+### 16.5 战略 pivot · 必须切大改动 (路径 B)
+
+**5/16 下午起的硬要求**:
+1. **如果 5/16 早 4 LB 全部 ≤ 0.847** (~85% 概率 · 基于 dev 4/4 负面): **立即起路径 B 的 ADR 草稿**
+2. **路径 B = UE 分离 + int pairwise cross** (Seed 主楼 0.85+ 团队 5/5 第 (3) 条情报)
+3. 5/16 下午 + 5/17 = ADR 起草 + 80~150 行新代码 + smoke + commit
+4. 5/17 晚 / 5/18 早起 first path B training job
+
+### 16.6 但等下 · 也有合理保留怀疑 (avoid premature path B 切换)
+
+**反对立即切 path B**:
+- **dev 不是 LB 单调代理** (M33 反向放大 27× 已知) · 4/4 dev 负面**不一定** → 4/4 LB 负面
+- M38 / M39 / M41 LB 端可能因 covariate shift 友好机制 (e.g. M41 reweight 03-04 → LB 全是 03-04 → LB 涨)
+- 必须等 5/16 早 4 LB 数据 · 不能凭 dev 单点决策
+
+**修订**: **5/16 早 4 LB 决定**:
+- 如任一 LB > 0.8484 (破 SOTA 阈值): 该方向真信号 · 5/16 下午做 cross-seed 校准
+- 如任一 LB ∈ [0.847, 0.8484]: 弱信号 · 5/16 下午做 cross-seed 巩固
+- **如全部 LB ≤ 0.847** (大概率 85%): 立即 path B pivot
+
+### 16.7 真实 Top 20 概率 (再修订)
+
+- 22:55 (5/15 晚) 估: **10~15%** (路径 A saturated · 路径 B 是唯一未消化)
+- 23:30 (5/15 晚) 估: **20~30%** (元宵节认知方向)
+- **07:35 (5/16 早) 估**: **5~10%** (元宵节方向证伪 · 仅剩路径 B 一条线)
+
+**核心 takeaway**: **dev 数据决定性地否定了 5/15 晚的元宵节方向乐观估计**。剩 9 天 · 必须切大改动 (路径 B) 或接受 Top 20 失败的现实。
+
+### 16.8 4 dev 数据点的另一深层含义 · M22 vocabtier 不只是 +0.001 SOTA · 是当前数据集的 "near-optimal vocabtier-baseline"
+
+7 个新方向 7/7 dev 不超 M22 · 暗示:
+- M22 vocabtier 配置在当前数据集 dev 层面已**接近局部最优**
+- 任何单变量 perturb (Multi-Emb / Global Token / hour_only / temporal_weight / NLIR / ns_groups) 都打破这个局部最优
+- 唯一能突破的是**根本架构改变** (e.g. UE 分离 = 把 NS Tokenizer 完全重新组织 · 不是单变量 ablation 而是 architecture-level)
+
+→ **路径 B 的 ROI 仍然存在** · 因为它不是 "M22 + X" stack · 是 "M22 → architecture-level redesign"。
+
+
 
 
 
