@@ -1,42 +1,48 @@
 # ADR-014 · Path B Step 1 · UE 分离 (User Embedding Outlier Isolation) [T37]
 
-> **Status**: **🛑 Suspended-Pending-Community-Clarification** (2026-05-16 CEST 09:30 暂缓 · 用户审视触发)
-> **Suspension Reason**: "UE 分离" 解读不确定 · 无 community 二次澄清 · 设计可能错方向
-> **Date**: 2026-05-16 Proposed → 2026-05-16 Suspended (~30 min review)
-> **Related Tasks**: T37 (新 · Suspended)
-> **Related Experiments**: EXP-049 (EDA-correlation · user_int_feats_15 outlier 实证) · EXP-055 (5/15~5/16 retrospective · path B 提议)
+> **Status**: 🟢 **Reactivated** (2026-05-16 CEST 11:00 修订 · UE 解读由 user_int_feats_15 改为 **user_dense_feats_61 256-dim 预归一化 embedding**)
+> **Suspension History**: Proposed 09:00 → Suspended 09:30 → Reactivated 11:00
+> **Date**: 2026-05-16 (3 status changes in 2 hours)
+> **Related Tasks**: T37 (新)
+> **Related Experiments**: EXP-049 (EDA-correlation · user_int side outlier 但**非 UE 真实指代**) · EXP-011 (dense log1p 修复 · **fid 61/87 = 预归一化 embedding 实证**) · EXP-055 (5/15~5/16 retrospective · path B 提议) · EXP-056 (Tier 0 EDA · 元宵节假设证伪) · EXP-057 (M45-48 daypart engineering)
 > **External References**:
 > - 社区情报 Seed (LB 0.85+) 主楼 5/5 第 (1) 条原话: "user dense feats 将 ue 分离出来 · 其他跟 int pair 加权"
 > - 沉淀位置: `docs/99-raw/community-snapshots/xhs-decem-0512/README.md` line 196
-> - EXP-049 §2 user-side outlier 实证: `user_int_feats_15` MI=0.003603 · V=256 · 比 user 第 2 名高 3.7× · 比 item-side 弱 fid 还高 3.7×
+> - **EXP-011 实证**: `user_dense_feats_61 (256-dim · 预归一化 embedding)` · `fid_87 (320-dim · 预归一化 embedding)` · `fid_62~66 (原始计数统计量 10^3~10^5 量级)` · `fid_89/90/91 (10-dim · 预归一化 embedding)`
+> - `src/ns_groups.json` line 8: "All user dense features (fid 61/62/63/64/65/66/87/89/90/91, total_dim=918) are concatenated and projected to a single NS token"
 
 ---
 
-## 🛑 Suspension Note (2026-05-16 CEST 09:30)
+## 🛑 Suspension Note (2026-05-16 CEST 09:30 → ⚠️ 11:00 修订)
 
 **用户决断**: ADR-014 解读不确定 · 暂缓启动。
 
-**暂缓原因**:
-1. **"UE 分离" 解读 3 种可能**:
-   - A · UE = user_int_feats_15 high-MI fid 单独成 token (本 ADR 当前设计)
-   - B · UE = user_dense_feats (已分离 · 不需做)
-   - C · UE = user_int top N fid 全部分离 (broader 解读)
-2. **community 没二次澄清**: Seed 主楼帖 5/5 仅截图 1/?? 页 · 后续没追问
-3. **5/14~5/16 7/7 新方向 dev 弱负** · 本 ADR 也大概率 dev 弱负 · 在解读不确定时投入资源高风险
+**🔥 5/16 11:00 真相重大修订**:
+agent 5/16 10:55 深度思考时严格 grep `src/ns_groups.json` line 8 + EXP-011 找到 user_dense 真实结构:
+- **fid_61: 256-dim 预归一化 embedding** ⭐ = **UE 真实候选** (production user pre-trained embedding)
+- fid_87: 320-dim 预归一化 embedding
+- fid_62~66: 原始计数统计量 (count features)
+- fid_89/90/91: 10-dim 小 embedding
 
-**重启条件** (任一满足):
-1. 用户反问社区 (微信群 / 小红书 Seed 帖评论) 求 "UE 分离具体是什么" · 得到二次澄清
-2. M23 (T34 DCN cross gap=0) LB 出 (5/16 晚) 后 · 如果 cross 路径 work · 再考虑 UE 分离 alone 单变量验证
-3. 5/22 后 final 阶段 · 如果 path A (RankUp 路径) 全 saturated · 需要 desperate 探索 · 再考虑
+**修订 "UE 分离" 解读**:
+- 之前 (5/16 09:00): UE = user_int_feats_15 (V=256 categorical) ❌ **错** (与 Seed 主楼字面不符)
+- 修订 (5/16 11:00): **UE = user_dense_feats_61 (256-dim float embedding)** ✅ 与 Seed "user dense feats 将 ue 分离出来" **字面一致** + 与 EXP-011 "fid 61 = 预归一化 embedding" 实证一致
 
-**5/16 下午行动 (修订)**:
-- 4 free slot 全留空 (不起 path B / 不起 M44)
-- 等晚 2 evaluation (M23 + M38 v2) LB 出
-- 5/17 早根据数据决方向
+**Seed 主楼原话再读**:
+> "user dense feats **将 ue 分离出来** · 其他跟 int pair 加权"
+
+**修订 mechanism**:
+1. 把 fid_61 (256-dim UE) 从 988-dim user_dense 中**分离** · 独立成 1 token
+2. 其他 user_dense (count + fid_87/89/90/91) 通过 **dense_bypass** (T25 已 work 机制) 直接到 classifier
+3. 与 user_int / item_int 的 cross 通过 **DCN cross** (M23 已实测 LB 强负 · 不要叠加 · 可能 Seed 用了不同 cross 实现)
+
+**重启条件 (5/16 11:00 修订)** · 改激活而非暂缓:
+- 5/17~5/19 起 path B prep (修订版 UE 分离 fid_61) · ADR-014 状态 Reactivated
+- 5/16 下午仍按 M45-48 daypart engineering 不变 (orthogonal work)
 
 ---
 
-## (以下是 09:00 起草的原 ADR 内容 · 暂保留作为 reactivation 基础)
+## (以下是 09:00 起草的原 ADR 内容 · ⚠️ Decision §设计已过时 · 必须按 fid_61 修订)
 
 ---
 
