@@ -56,6 +56,8 @@
   - ⭐⭐⭐ **M23** (T34 DCN gap=0 · dev 0.868311 · LB 待评) · 决 cross 路径 work 不 work · 期望 LB +0.001~+0.003
   - ⭐⭐ **M38 v2** (Multi-Emb K=2) · RankUp 闭环 · 期望 LB ~0.847
 
+**5/16 10:00 incident**: M23 evaluation 第 1 次失败 (`'<=' int vs str` · src/infer.py 没解析 dcn_cross_user_fids raw csv str) · quota refund · 修复 commit `0a16a98` (`_resolve_dcn_fids` helper) · M23 retry 待用户重新提交。
+
 ---
 
 ## Publish-Ready Ckpt 待评 LB (按 dev 排序)
