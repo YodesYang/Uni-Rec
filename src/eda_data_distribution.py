@@ -526,6 +526,100 @@ def main() -> None:
         json.dump(out, f, ensure_ascii=False, indent=2)
     logger.info("[done] wrote %s (%d bytes)", out_path, out_path.stat().st_size)
 
+    # Pretty top-N to stdout for terminal review (platform UI Logs visible)
+    print('\n========== A2 · TRAIN SEQ ITEM FREQUENCY (per fid · top 10) ==========')
+    a2_distinct = out.get('a2_train_seq_item_distinct_per_fid', {})
+    a2_freq = out.get('a2_train_seq_item_freq', {})
+    for key, distinct in a2_distinct.items():
+        top10 = a2_freq.get(key, [])[:10]
+        print(f"  {key:25s} distinct={distinct:>10d}  top10={top10}")
+
+    print('\n========== F3 · USER_ID DISTINCT TRAIN ==========')
+    f3_distinct = out.get('f3_train_user_id_distinct', 0)
+    f3_set = out.get('f3_train_user_id_set', [])
+    print(f"  f3_train_user_id_distinct = {f3_distinct:,}")
+    print(f"  f3_train_user_id_set length = {len(f3_set):,}")
+    print(f"  f3_train_user_id_set top 5 = {f3_set[:5]}")
+    print(f"  f3_train_user_id_set tail 5 = {f3_set[-5:] if len(f3_set) >= 5 else f3_set}")
+
+    print('\n========== G2 · TOP CVR SIGNALS BY (fid, value) · top 30 ==========')
+    g2_global_cvr = out.get('g2_global_cvr', 0.0)
+    g2_global_count = out.get('g2_global_count', 0)
+    g2_top = out.get('g2_top_fid_values_by_signal', [])[:30]
+    print(f"  g2_global_cvr = {g2_global_cvr:.6f} ({g2_global_count:,} samples)")
+    print(f"  total_pairs = {out.get('g2_total_fid_value_pairs', 0)} · "
+          f"above_min_count = {out.get('g2_pairs_above_min_count', 0)}")
+    for r in g2_top:
+        sec = r.get('section', '?')
+        fid = r.get('fid', '?')
+        val = r.get('value', '?')
+        cnt = r.get('count', 0)
+        cvr = r.get('cvr', 0.0)
+        gap = r.get('cvr_gap_vs_global', 0.0)
+        sig = r.get('signal', 0.0)
+        print(f"  [{sec:4s}] fid={fid:<4} val={str(val)[:8]:8s} "
+              f"cnt={cnt:>8} cvr={cvr:.4f} gap={gap:+.4f} signal={sig:>10.2f}")
+
+    # Platform log recovery: emit base64+gzip blob as the very last stdout
+    # so tools/decode_eda_blob.py can recover the full report when running
+    # on the platform (UI Logs only shows tail 1000 lines · file is NOT
+    # downloadable). Mirror the proven pattern from eda_correlation.py.
+    #
+    # ⚠️ Size-bounded subset: full `out` dict is too large (raw 18.9MB ·
+    # gzip ~3MB · base64 ~4MB · ~33k blob lines · platform UI tail 1000
+    # lines truncates blob). Build compact `out_blob` containing only the
+    # essential data points we actually use downstream, capped to keep
+    # blob ≤ 100 KB raw JSON (≈ 30 KB gzipped · ≈ 40 KB base64 · ≈ 350
+    # blob lines · safely under platform UI tail limit).
+    #
+    # What we keep:
+    # - A2: per-fid top 500 high-freq item ids (vs default top 50k) ·
+    #   plus distinct count (full)
+    # - F3: distinct count (full) · 100 sample user_ids (vs default 500k set)
+    # - G2: full top_n list (already small ≤ 200 entries)
+    # - meta: full
+    out_blob = {
+        "meta": out.get("meta", {}),
+        "a2_train_seq_item_distinct_per_fid": a2_distinct,
+        "a2_train_seq_item_freq_top500": {
+            key: a2_freq.get(key, [])[:500] for key in a2_distinct
+        },
+        "f3_train_user_id_distinct": f3_distinct,
+        "f3_train_user_id_set_sample100": (
+            f3_set[:50] + (f3_set[-50:] if len(f3_set) > 100 else [])
+        ),
+        "g2_global_cvr": g2_global_cvr,
+        "g2_global_count": g2_global_count,
+        "g2_total_fid_value_pairs": out.get("g2_total_fid_value_pairs", 0),
+        "g2_pairs_above_min_count": out.get("g2_pairs_above_min_count", 0),
+        "g2_top_fid_values_by_signal": out.get(
+            "g2_top_fid_values_by_signal", []
+        ),
+        "g2_user_int_plan_fids": out.get("g2_user_int_plan_fids", []),
+        "g2_item_int_plan_fids": out.get("g2_item_int_plan_fids", []),
+    }
+    import base64
+    import gzip
+    payload = json.dumps(
+        out_blob, sort_keys=True, ensure_ascii=False
+    ).encode('utf-8')
+    gz = gzip.compress(payload, compresslevel=9)
+    b64 = base64.b64encode(gz).decode('ascii')
+    chunk_size = 120
+    chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)]
+    sys.stdout.flush()
+    print()
+    print('<<<EDA_BLOB_START>>>')
+    for ch in chunks:
+        print(ch)
+    print('<<<EDA_BLOB_END>>>')
+    sys.stdout.flush()
+    logger.info(
+        "[blob] emitted %d chars / %d chunks / raw %d bytes "
+        "(size-bounded subset)",
+        len(b64), len(chunks), len(payload),
+    )
+
 
 if __name__ == "__main__":
     main()
