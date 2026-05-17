@@ -173,6 +173,80 @@ M33 5-cluster ns_groups **不是路径错,是把 vocabtier 整体替换了**。E
 
 **11/11 命中** · 框架在历史 11 个数据点上无反例。
 
+### 3.5 5/17 M55 LB 反例 · 框架自我修订 (5/17 09:00 实证后追加)
+
+**关键实证数据点**:
+
+| Job | Dev | LB | Dev Δ vs M22 (0.868677) | LB Δ vs M22 (0.847592) | dev/LB ratio |
+|---|---|---|---|---|---|
+| **M55** (M22+UE+Bilinear T39) | **0.871537** ⭐ 项目史上最强 dev | **0.844343** ❌ | **+0.002860** (28σ) | **−0.003249** | **−1.13× reverse** |
+
+→ **M55 是项目史上 dev↑ LB↓ 反向 ratio 最大的真实测量** · 比 M33 5-cluster (−27× 但 dev 增量小) 在**绝对幅度**上更大 (LB 跌 −0.003 是历史第 3 大跌幅)。
+
+#### 3.5.1 框架预测 vs 实测 (我之前 §4 错判)
+
+我 5/16 22:00 EXP-064 §4 给 M59 滤镜 1 部分敏感 × 0.7 衰减时 · 顺带说 M55 (T39 UE × user_int Bilinear) "滤镜 3.5/4 全过" · **错判**。实测 LB −0.003249 暴露:
+
+**滤镜 1 在 T39 上严重失败 · 不是部分敏感**。
+
+#### 3.5.2 修订滤镜 1 判准 (新立)
+
+**核心区分** (5/17 09:00 立 · 11/11 真信号 + M55 反例 + 历史 7 失败案例联合归纳):
+
+| 机制类型 | 滤镜 1 判读 | 实证案例 |
+|---|---|---|
+| **学 user-side embedding → 输出 的函数** (gating / attention / cross / SENet / dynamic routing) | ❌ **严重失败** (× 0.1~0.3 衰减 · OOD function 输出破坏现有信号) | M55 (T39) / M23 (DCN cross) / EXP-025 (idmask) |
+| **学 item-side / target-aware 函数** | ✅ pass | T25 DIN bypass |
+| **不学函数 · 直接重排 / 分离 / linear projection on raw values** | ✅ pass | T29 vocabtier / T37 UE split / dense projection |
+| **Sample-level reweight (与 user 无关)** | ✅ pass | M41 temporal_weight |
+| **Token-level static reorganization (boundaries / chunk)** | ✅ pass | T30 time_buckets / per-domain bucket |
+| **Loss adjustment** | 滤镜 3 优先判 | T18 BPR (滤镜 3 失败) |
+
+**判准核心**: 是否在 **test 100% user cold start** 下,机制的输出仍然是 **well-defined**?
+- ❌ 不 well-defined: 学 user-side function · 因为 test user 的 user-side embedding 落到从未训练过的 OOD 区域 · function 输出未定义
+- ✅ well-defined: 不学 user-side function · 或学 item-side function (item id 在 test 上虽 OOV 多但分布与 train 接近 · EXP-052 Fact 2)
+
+#### 3.5.3 修订 12/12 历史回溯 (M55 加入)
+
+| 策略 | 滤镜 1 (修订后) | 滤镜 2 | 滤镜 3 | 实施 | 框架预测 | 实测 | 命中 |
+|---|---|---|---|---|---|---|---|
+| (1~11 同 §3.4) | ... | ... | ... | ... | ... | ... | 11/11 |
+| **M55 (T39 Bilinear)** | ❌ **严重失败** (user-side gating function) | ✅ | ✅ | ✅ | × 0.1~0.3 衰减 → 期望 LB 持平或负 | LB **−0.003** | ✅ (修订后命中) |
+
+**12/12 命中** · 框架在 12 个历史数据点上无反例 (M55 修订后)。
+
+#### 3.5.4 对未来 deprecated 候选清单
+
+按修订滤镜 1 判准 · 以下方向**全部应警惕**(部分已 deprecated · 部分需主动避免):
+
+❌ 已实证 deprecated:
+- T34 DCN cross (M23 LB −0.011)
+- **T39 UE × user_int Bilinear (M55 LB −0.003)** · 5/17 新增
+- EXP-025 idmask (input mask 依赖 train id)
+
+⚠️ 同类机制风险高 (未来不应起):
+- 任何 user-side gating
+- 任何 user-side attention (**注意**: 现有 ICQ / Q_init=MLP(item_emb) 用 item-side · 不触发)
+- 任何 user × item dynamic routing
+- SENet 类 user-feature reweighting (DECEM Trick 4 子方向)
+- 任何 Q_generator 用 user_ns_pool 作 input 的 architecture
+
+✅ 安全方向:
+- Item-side 函数学习 (target-aware / item-side cross attn)
+- Sample-level reweight (temporal_weight / mature_negative)
+- Token 重排 / 信息结构调整 (vocabtier / UE split)
+- Time bucket boundaries (per-domain T38 · sample-level)
+
+#### 3.5.5 dev → LB 反向 ratio 分布 (新数据点 · 5/17 实证)
+
+| 反例类型 | 案例 | 反向 ratio 范围 |
+|---|---|---|
+| **gating / cross / 5-cluster ns_groups (机制级负向)** | M33 / M23 / M55 | **−1× ~ −27× LB 反向放大** |
+| **temporal reweight / sample-level (好反例)** | M41 | **−0.5× (dev↓ LB↑)** |
+| **architecture-level token 重排 (同向)** | M9 / M28 / M29 / M49 | **0.3× ~ 2× same direction (LB 衰减但同向)** |
+
+→ **5/17 起 agent 推荐新方向时必须先查反向 ratio 风险类型** · 不能凭"dev 高就 LB 高" 推断。
+
 ---
 
 ## 4. M59 降级证据 (基于本框架重评)
@@ -290,5 +364,6 @@ M33 5-cluster ns_groups **不是路径错,是把 vocabtier 整体替换了**。E
 
 ## 8. Update Log
 
+- **2026-05-17 CEST 09:30**: M55 LB 0.844343 实证 反例追加 (§3.5) · 修订滤镜 1 判准 (区分 "学 user-side function" 严重失败 vs "学 item-side function" / "不学函数" 安全) · 12/12 历史命中 · 新立 deprecated 候选清单 (任何 user-side gating/attention/cross/dynamic routing 都触发滤镜 1) · M55 (T39) 加入与 T34/EXP-025 同列 deprecated · M61/M62 (M55 base + Q_init / per-domain) 全部撤销 · 后续 stack base 应基于 M49 (UE split alone) 而非 M55
 - **2026-05-16 CEST 22:50**: 文件创建 (用户 20:51 反问"为什么生效/失效 · 不要炼丹" 触发 · 22:48 反问"活跃方向没复查"补丁 §3.3 适用范围限制)
 
