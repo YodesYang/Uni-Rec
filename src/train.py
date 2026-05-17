@@ -663,6 +663,21 @@ def parse_args() -> argparse.Namespace:
                              'norm_ts is linearly scaled to [0,1] over the training split. '
                              '0 = disabled (default); 2~4 = moderate upweighting of '
                              'recent samples; useful for reducing train/test temporal gap.')
+    parser.add_argument('--hour_weight_min', type=int, default=-1,
+                        help='5/17 EXP-069 · Hour-aware sample reweight (Beijing time = '
+                             'UTC + 8h). When >= 0, train rows with beijing_hour ∈ '
+                             '[hour_weight_min, hour_weight_max] get sample_weight × '
+                             '--hour_weight_multiplier. Test daypart = 北京 09~14 → set '
+                             '--hour_weight_min 9 --hour_weight_max 14 --hour_weight_multiplier 5.0. '
+                             'Composes multiplicatively with --temporal_weight_alpha (M41) '
+                             'so combined "alpha=2.5 + hour_weight×5" upweights 03-04 ' 
+                             '09~14 daypart vs the rest of training data. Default -1 = disabled.')
+    parser.add_argument('--hour_weight_max', type=int, default=-1,
+                        help='5/17 EXP-069 · Upper bound (inclusive) for --hour_weight_min. '
+                             'Default -1 = disabled.')
+    parser.add_argument('--hour_weight_multiplier', type=float, default=-1.0,
+                        help='5/17 EXP-069 · Multiplier (e.g. 5.0) applied to in-window '
+                             'samples. Default -1.0 = disabled.')
     parser.add_argument('--enable_hour_only_features', action='store_true', default=False,
                         help='Append hour-of-day sin/cos (2 dims) to user_dense. '
                              'Captures diurnal periodicity WITHOUT day-of-week, which '
@@ -812,6 +827,13 @@ def main() -> None:
         ),
         enable_time_of_day_features=args.enable_time_of_day_features,
         temporal_weight_alpha=args.temporal_weight_alpha,
+        # 5/17 EXP-069 · hour-aware reweight (None disables · only train)
+        hour_weight_min=(args.hour_weight_min
+                         if args.hour_weight_min >= 0 else None),
+        hour_weight_max=(args.hour_weight_max
+                         if args.hour_weight_max >= 0 else None),
+        hour_weight_multiplier=(args.hour_weight_multiplier
+                                if args.hour_weight_multiplier > 0 else None),
         enable_hour_only_features=args.enable_hour_only_features,
         # M45 / EXP-056 · weekend-CVR-low filter (0 = disabled · backward compat)
         user_train_timestamp_min=(args.user_train_timestamp_min

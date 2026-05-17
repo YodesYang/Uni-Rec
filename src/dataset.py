@@ -550,6 +550,16 @@ class PCVRParquetDataset(IterableDataset):
         temporal_weight_alpha: float = 0.0,
         temporal_weight_ts_min: Optional[int] = None,
         temporal_weight_ts_max: Optional[int] = None,
+        # 5/17 EXP-069 · Hour-aware sample reweight (Beijing time = UTC + 8h).
+        # When all 3 set, train rows with beijing_hour ∈ [min, max] get weight
+        # × multiplier. Test daypart = 北京 09~14 → set min=9, max=14, mul=5.0
+        # to upweight test-daypart-aligned samples 5× (vs M41 which is daily
+        # exponential reweight). Composes multiplicatively with M41
+        # temporal_weight_alpha (alpha + hour can stack: M41 selects 03-04 ·
+        # hour_weight selects 03-04 09~14 daypart within 03-04).
+        hour_weight_min: Optional[int] = None,
+        hour_weight_max: Optional[int] = None,
+        hour_weight_multiplier: Optional[float] = None,
         enable_hour_only_features: bool = False,
         id_mask_prob: float = 0.0,
         id_mask_seq_domains: Optional[List[str]] = None,
@@ -758,6 +768,13 @@ class PCVRParquetDataset(IterableDataset):
         self.temporal_weight_alpha = float(temporal_weight_alpha)
         self.temporal_weight_ts_min = temporal_weight_ts_min
         self.temporal_weight_ts_max = temporal_weight_ts_max
+        # 5/17 EXP-069 · hour-aware reweight state
+        self.hour_weight_min = hour_weight_min
+        self.hour_weight_max = hour_weight_max
+        self.hour_weight_multiplier = (
+            float(hour_weight_multiplier)
+            if hour_weight_multiplier is not None else None
+        )
         self.enable_hour_only_features = enable_hour_only_features
         # P1 Item-ID Random Mask (community 0.85+ hint 2026-05-04): gate the
         # mask on shuffle=True so only the *training* DataLoader ever
@@ -1997,6 +2014,26 @@ class PCVRParquetDataset(IterableDataset):
                     sample_weight = tw
                 else:
                     sample_weight = sample_weight * tw
+        # 5/17 EXP-069 · Hour-aware reweight (Beijing time = UTC + 8h).
+        # Composes multiplicatively with M41 temporal_weight_alpha if both
+        # enabled. Upweights samples in test daypart hours (e.g. 北京 09~14).
+        if (self.is_training
+                and self.hour_weight_multiplier is not None
+                and self.hour_weight_min is not None
+                and self.hour_weight_max is not None):
+            beijing_hour = ((timestamps + 8 * 3600) // 3600) % 24
+            in_hour_window = (
+                (beijing_hour >= self.hour_weight_min)
+                & (beijing_hour <= self.hour_weight_max)
+            )
+            hw = np.ones(B, dtype=np.float32)
+            hw[in_hour_window] = self.hour_weight_multiplier
+            # Normalize so mean weight ≈ 1 (keeps effective LR stable)
+            hw /= hw.mean().clip(min=1e-6)
+            if sample_weight is None:
+                sample_weight = hw
+            else:
+                sample_weight = sample_weight * hw
         user_ids = batch.column(self._col_idx['user_id']).to_pylist()
 
         # ---- user_int: write into pre-allocated buffer ----
@@ -2885,6 +2922,10 @@ def get_pcvr_data(
     dense_log1p_fids: frozenset[int] | None = None,
     enable_time_of_day_features: bool = False,
     temporal_weight_alpha: float = 0.0,
+    # 5/17 EXP-069 · hour-aware reweight (default disabled · None passes through)
+    hour_weight_min: Optional[int] = None,
+    hour_weight_max: Optional[int] = None,
+    hour_weight_multiplier: Optional[float] = None,
     enable_hour_only_features: bool = False,
     holdout_ratio: float = 0.0,
     valid_gap_ratio: float = 0.0,
@@ -3522,6 +3563,10 @@ def get_pcvr_data(
         temporal_weight_alpha=temporal_weight_alpha,
         temporal_weight_ts_min=int(train_ts_range[0]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
         temporal_weight_ts_max=int(train_ts_range[1]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
+        # 5/17 EXP-069 · hour-aware reweight (None disables · only train)
+        hour_weight_min=hour_weight_min,
+        hour_weight_max=hour_weight_max,
+        hour_weight_multiplier=hour_weight_multiplier,
         enable_hour_only_features=enable_hour_only_features,
         id_mask_prob=id_mask_prob,
         id_mask_seq_domains=id_mask_seq_domains,
