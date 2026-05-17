@@ -5,16 +5,20 @@ Goal: collect train-side data needed for cross-reference with test-side EDA
 
 - A2 · seq item id frequency per (domain, fid) for high-vocab fids (vocab > 1M)
        · top-K item ids by frequency (default 50000 per fid)
-       · purpose: compute test↔train seq item id overlap rate · decides
-         whether seq encoder pathway has signal in 100% user cold-start
+       · purpose: enable downstream offline analysis (tools/analyze_a2_bucket
+         _purity.py) computing the **hash-bucket-level signal/noise** for the
+         seq encoder pathway · NOT raw item id overlap (model uses
+         seq_hash_vocab=500000 modulo · raw overlap rate is mechanistically
+         meaningless in 100% user cold-start scenario)
 - F3 · user_id distinct set (capped at 500k)
        · purpose: verify "100% user cold start" assumption · compute
-         test↔train user_id overlap rate
-- G2 · CVR conditional cluster structure
-       · hash bucket on (low-vocab user_int + low-vocab item_int) · compute
-         per-bucket CVR mean/variance/count · top buckets by signal volume
-       · purpose: detect strong CVR cluster signals that current MLP may
-         not capture · decide MoE / hard routing potential
+         test↔train user_id overlap rate (sanity check · model does not use
+         user_id directly · low actionability)
+- G2 v2 (5/17 13:00) · per (fid, value) → CVR for low-vocab int fids
+       · expands EXP-049's "fid → label MI" to fine-grained (fid, value)
+         granularity · interpretable cluster identification
+       · purpose: detect strong CVR cluster signals at single-fid level
+         (multi-fid interactions covered by EXP-049 user×user CV)
 
 Run as a platform training-style job (uses platform parquet path):
     python src/eda_data_distribution.py \\
@@ -28,11 +32,17 @@ Output: <output_dir>/eda_data_distribution.json containing:
 - a2_train_seq_item_distinct_per_fid: Dict[domain_fid, int]
 - f3_train_user_id_set: List[str] (capped at f3_user_id_cap)
 - f3_train_user_id_distinct: int (true distinct count)
-- g2_cvr_clusters: List[Dict] · top clusters by (count, |cvr_gap|)
+- g2_top_fid_values_by_signal: List[Dict] · top (fid, value) pairs by
+  (count × |cvr_gap|), each row interpretable as "section: fid: value: cvr"
 - meta: scan stats (total_rows, total_files, wall_time_sec)
 
-Memory bound: ~1-2GB (200k user_ids + 4 × 250k seq item ids + 100k clusters).
-Wall time: ~30 min on full train (1044 RGs).
+Memory bound: ~1-2GB (200k user_ids + 4 × 250k seq item ids + ~10k fid_value
+pairs). Wall time: ~30 min on full train (1044 RGs).
+
+Downstream offline scripts:
+- tools/analyze_a2_bucket_purity.py: cross-reference A2 train + A2 test
+  blobs · compute hash-bucket-level signal/noise breakdown · output
+  per-(domain, fid) "pure_signal_rate" + "bucket_collision_noise_rate".
 """
 from __future__ import annotations
 
@@ -206,28 +216,85 @@ class _F3Accumulator:
 
 
 class _G2Accumulator:
-    """G2 · CVR by hash-bucket cluster on (low-vocab user_int + item_int).
+    """G2 v2 (5/17 13:00) · per (fid, value) → CVR for low-vocab int fids.
 
-    Cluster key = tuple of values for the chosen low-vocab fids · hashed
-    to bound key space. We track per-cluster (count, label_sum, sum_sq).
-    Final output: top clusters by (count × |cvr_gap_vs_mean|).
+    Replaces the original hash-bucket cluster approach (5/17 09:30 v1) which
+    produced uninterpretable cluster ids. v2 instead expands EXP-049's "fid →
+    label MI" to fine-grained "(fid, value) → CVR" granularity:
+
+    - For each low-vocab fid (vocab ≤ max_vocab) in user_int + item_int
+    - For each unique value seen in that fid
+    - Track (count, label_sum) and compute cvr · cvr_gap_vs_global · signal
+
+    Output: top N (fid, value) pairs by signal volume (count × |cvr_gap|).
+    Each row is interpretable: e.g. "user_int_feats_50 = 1 has CVR 0.18 vs
+    global 0.05 · count 1.2M · signal 0.157" → strong actionable cluster.
+
+    Compared to original v1 hash-bucket approach:
+    - Pros: cluster id = (fid, value) tuple is human-readable
+    - Cons: only single-fid; misses multi-fid interactions (but EXP-049 user×
+      user CV correlation already covers user-side; item-side covered by EDA
+      heuristics)
     """
 
     def __init__(
         self,
         user_int_plan: List[Tuple[int, str, int]],
         item_int_plan: List[Tuple[int, str, int]],
-        top_n: int = 100,
+        top_n: int = 200,
         min_count: int = 100,
     ) -> None:
         self.user_int_plan = user_int_plan
         self.item_int_plan = item_int_plan
         self.top_n = top_n
         self.min_count = min_count
-        # cluster_key → [count, label_sum]
-        self.clusters: Dict[int, List[int]] = defaultdict(lambda: [0, 0])
+        # ('user_int', fid, value) → [count, label_sum]
+        self.fid_value_stats: Dict[
+            Tuple[str, int, int], List[int]
+        ] = defaultdict(lambda: [0, 0])
         self.global_count = 0
         self.global_label_sum = 0
+
+    def _update_section(
+        self,
+        table: "pq.Table",
+        plan: List[Tuple[int, str, int]],
+        section: str,
+        binary_labels: np.ndarray,
+    ) -> None:
+        """Update fid_value_stats for one section (user_int or item_int)."""
+        n = table.num_rows
+        for fid, col_name, _vocab in plan:
+            if col_name not in table.schema.names:
+                continue
+            col = table.column(col_name)
+            if hasattr(col, "combine_chunks"):
+                col = col.combine_chunks()
+            try:
+                vals_arr = col.to_numpy().astype(np.int64)
+            except (ValueError, AttributeError):
+                continue
+            if vals_arr.ndim == 1:
+                fid_vals = vals_arr
+            else:
+                # Multi-valued: take first nonzero (matches Q7 logic)
+                fid_vals = np.zeros(n, dtype=np.int64)
+                for i in range(n):
+                    row = vals_arr[i] if i < len(vals_arr) else None
+                    if row is not None and len(row) > 0:
+                        nz = row[row != 0]
+                        if len(nz) > 0:
+                            fid_vals[i] = nz[0]
+            # Bulk update with numpy unique to avoid per-row dict ops
+            uniq, inv_idx = np.unique(fid_vals, return_inverse=True)
+            for u_idx, u_val in enumerate(uniq):
+                mask = inv_idx == u_idx
+                cnt = int(mask.sum())
+                ls = int(binary_labels[mask].sum())
+                key = (section, int(fid), int(u_val))
+                entry = self.fid_value_stats[key]
+                entry[0] += cnt
+                entry[1] += ls
 
     def update(self, table: "pq.Table") -> None:
         if "label_type" not in table.schema.names:
@@ -236,93 +303,49 @@ class _G2Accumulator:
         if n == 0:
             return
         labels = table.column("label_type").to_numpy().astype(np.int64)
-        # Binary collapse: label_type == 2 → 1 else 0 (matches dataset.py)
         binary_labels = (labels == 2).astype(np.int64)
 
-        # Build cluster key from low-vocab fid values
-        # We use modulo hash on packed tuple for memory efficiency
-        # Use uint64 + explicit overflow control to avoid Python int promotion
-        key_arr = np.zeros(n, dtype=np.uint64)
-        seed_mul = np.uint64(1)
-        prime_mul = np.uint64(0x9E3779B97F4A7C15)  # Knuth golden ratio mix
-        mask62 = np.uint64((1 << 62) - 1)
-        for fid, col_name, vocab in self.user_int_plan + self.item_int_plan:
-            if col_name not in table.schema.names:
-                continue
-            col = table.column(col_name)
-            if hasattr(col, "combine_chunks"):
-                col = col.combine_chunks()
-            # int feats are typically scalar (length=1) or short multi-hot
-            # take first-nonzero (matches infer.py Q7 logic)
-            try:
-                vals_arr = col.to_numpy().astype(np.int64)
-                if vals_arr.ndim == 1:
-                    fid_vals = vals_arr.astype(np.uint64)
-                else:
-                    fid_vals = np.zeros(n, dtype=np.uint64)
-                    for i in range(n):
-                        row = vals_arr[i] if i < len(vals_arr) else None
-                        if row is not None and len(row) > 0:
-                            nz = row[row != 0]
-                            if len(nz) > 0:
-                                fid_vals[i] = np.uint64(nz[0])
-            except (ValueError, AttributeError):
-                # multi-valued column; skip (rare for low-vocab fids)
-                continue
-            # Mix into key with seed_mul for fid distinguishability
-            # All ops are uint64 → wrap on overflow (no Python int promotion)
-            key_arr = (key_arr * prime_mul + fid_vals * seed_mul) & mask62
-            seed_mul = (seed_mul * np.uint64(31) + np.uint64(17)) & np.uint64(
-                0xFFFFFFFF)
-
-        # Cap cluster key space at 2^20 = 1M unique buckets
-        key_arr = (key_arr & np.uint64((1 << 20) - 1)).astype(np.int64)
-
-        # Bulk update accumulator
         self.global_count += n
         self.global_label_sum += int(binary_labels.sum())
-        # Use numpy unique to batch-update
-        uniq_keys, inv_idx = np.unique(key_arr, return_inverse=True)
-        for k_idx, k in enumerate(uniq_keys):
-            mask = inv_idx == k_idx
-            cnt = int(mask.sum())
-            ls = int(binary_labels[mask].sum())
-            entry = self.clusters[int(k)]
-            entry[0] += cnt
-            entry[1] += ls
+
+        self._update_section(
+            table, self.user_int_plan, "user_int", binary_labels)
+        self._update_section(
+            table, self.item_int_plan, "item_int", binary_labels)
 
     def finalize(self) -> Dict[str, Any]:
         global_cvr = (self.global_label_sum / self.global_count
                       if self.global_count else 0.0)
-        # Compute per-cluster CVR + signal volume (count × |cvr_gap|)
-        scored: List[Tuple[int, float, int, int, float]] = []
-        for k, (cnt, ls) in self.clusters.items():
+        # For each (section, fid, value): compute CVR + gap + signal
+        scored: List[Tuple[str, int, int, float, int, int, float]] = []
+        for (section, fid, val), (cnt, ls) in self.fid_value_stats.items():
             if cnt < self.min_count:
                 continue
             cvr = ls / cnt
             gap = cvr - global_cvr
             signal = cnt * abs(gap)
-            scored.append((k, cvr, cnt, ls, signal))
-        # Sort by signal desc · pick top_n
-        scored.sort(key=lambda x: -x[4])
+            scored.append((section, fid, val, cvr, cnt, ls, signal))
+        scored.sort(key=lambda x: -x[6])
         top = scored[: self.top_n]
 
         return {
             "g2_global_cvr": float(global_cvr),
             "g2_global_count": int(self.global_count),
             "g2_global_label_sum": int(self.global_label_sum),
-            "g2_total_clusters": len(self.clusters),
-            "g2_clusters_above_min_count": len(scored),
-            "g2_top_clusters_by_signal": [
+            "g2_total_fid_value_pairs": len(self.fid_value_stats),
+            "g2_pairs_above_min_count": len(scored),
+            "g2_top_fid_values_by_signal": [
                 {
-                    "cluster_key": int(k),
+                    "section": section,
+                    "fid": int(fid),
+                    "value": int(val),
                     "cvr": float(cvr),
                     "count": int(cnt),
                     "label_sum": int(ls),
                     "signal": float(sig),
                     "cvr_gap_vs_global": float(cvr - global_cvr),
                 }
-                for k, cvr, cnt, ls, sig in top
+                for section, fid, val, cvr, cnt, ls, sig in top
             ],
             "g2_user_int_plan_fids": [fid for fid, _, _ in self.user_int_plan],
             "g2_item_int_plan_fids": [fid for fid, _, _ in self.item_int_plan],
@@ -465,10 +488,10 @@ def main() -> None:
             elapsed = time.time() - t0
             logger.info(
                 "[scan] %d/%d files · %d rows · %.1fs · "
-                "a2_keys=%s · f3_uids=%d · g2_clusters=%d",
+                "a2_keys=%s · f3_uids=%d · g2_pairs=%d",
                 files_scanned, len(files), total_rows, elapsed,
                 {f"{d}_{fid}": len(c) for (d, fid), c in a2.counter.items()},
-                len(f3.user_id_set), len(g2.clusters),
+                len(f3.user_id_set), len(g2.fid_value_stats),
             )
         gc.collect()
 
