@@ -210,8 +210,11 @@ def _scan_per_domain_time_diffs(
 
     Args:
         train_rgs: List of (parquet_file, rg_idx, n_rows) tuples for training.
-        schema_path: Optional path to schema.json (forwarded to schema parser
-            in caller). If None, the same default discovery applies.
+        schema_path: Path to schema.json. Required to resolve real column
+            names ``f"{prefix}_{ts_fid}"`` for each seq domain. When None,
+            falls back to the legacy hardcoded ``f"{d}_timestamp"`` pattern
+            (which **does not match the platform schema** and was the cause
+            of the 5/16 silent ``n_samples=0`` bug · EXP-064 §3.3).
         sample_rgs: Number of Row Groups to scan (default 8 ≈ 6.4M time_diff
             samples per domain at typical RG size).
         max_rows_per_rg: Cap rows per RG to bound scan time.
@@ -226,6 +229,40 @@ def _scan_per_domain_time_diffs(
     sample = train_rgs[:max(1, sample_rgs)]
     pf_cache: Dict[str, "pq.ParquetFile"] = {}
     seq_domains = ['seq_a', 'seq_b', 'seq_c', 'seq_d']
+
+    # T38 fix v2 (5/17 EXP-066) · Resolve real timestamp column names from
+    # schema.json. Platform parquet uses ``{prefix}_{ts_fid}`` (e.g.
+    # ``domain_a_seq_39``), NOT the hardcoded ``{d}_timestamp`` (which is the
+    # internal logical alias and does not exist in any parquet file).
+    # Legacy fallback: if schema_path is None, retain old behavior (broken on
+    # platform) so downstream still gets a Dict (with empty arrays).
+    domain_to_ts_col: Dict[str, str] = {}
+    if schema_path is not None:
+        try:
+            with open(schema_path, 'r', encoding='utf-8') as f:
+                schema_raw = json.load(f)
+            seq_cfg = schema_raw.get('seq', {}) or {}
+            for d in seq_domains:
+                cfg = seq_cfg.get(d)
+                if not cfg:
+                    continue
+                prefix = cfg.get('prefix')
+                ts_fid = cfg.get('ts_fid')
+                if prefix is None or ts_fid is None:
+                    continue
+                domain_to_ts_col[d] = f"{prefix}_{ts_fid}"
+            logging.info(
+                "[T38] resolved timestamp columns from schema: "
+                f"{domain_to_ts_col}")
+        except (OSError, json.JSONDecodeError, KeyError) as e:
+            logging.warning(
+                f"[T38] schema parse failed ({e!r}); falling back to legacy "
+                f"hardcoded column names · per-domain fit will likely return "
+                "empty (n_samples=0).")
+            domain_to_ts_col = {d: f"{d}_timestamp" for d in seq_domains}
+    else:
+        domain_to_ts_col = {d: f"{d}_timestamp" for d in seq_domains}
+
     diffs: Dict[str, List[np.ndarray]] = {d: [] for d in seq_domains}
     for parquet_path, rg_idx, _n_rows in sample:
         pf = pf_cache.get(parquet_path)
@@ -235,7 +272,9 @@ def _scan_per_domain_time_diffs(
         # Read only the columns we need.
         cols_to_read = ['timestamp']
         for d in seq_domains:
-            cols_to_read.append(f'{d}_timestamp')
+            ts_col = domain_to_ts_col.get(d)
+            if ts_col:
+                cols_to_read.append(ts_col)
         avail = set(pf.schema_arrow.names)
         cols_to_read = [c for c in cols_to_read if c in avail]
         if 'timestamp' not in cols_to_read:
@@ -247,10 +286,17 @@ def _scan_per_domain_time_diffs(
             table = table.slice(0, max_rows_per_rg)
         ts = table.column('timestamp').to_numpy().astype(np.int64)
         for d in seq_domains:
-            ts_col_name = f'{d}_timestamp'
-            if ts_col_name not in cols_to_read:
+            ts_col_name = domain_to_ts_col.get(d)
+            if ts_col_name is None or ts_col_name not in cols_to_read:
                 continue
             seq_ts_col = table.column(ts_col_name)
+            # T38 fix v2 (5/17): Arrow column may be ChunkedArray (no
+            # .offsets) or ListArray (has .offsets). Combine to a single
+            # ListArray to access offsets/values uniformly. ChunkedArray
+            # arises when parquet RG contains multiple Arrow chunks (e.g.
+            # demo data) · ListArray when single chunk.
+            if hasattr(seq_ts_col, 'combine_chunks'):
+                seq_ts_col = seq_ts_col.combine_chunks()
             seq_offs = seq_ts_col.offsets.to_numpy()
             seq_vals = seq_ts_col.values.to_numpy().astype(np.int64)
             for i in range(table.num_rows):

@@ -224,6 +224,122 @@ def test_8_argparse_real_simulation() -> bool:
     return True
 
 
+def test_9_column_name_resolution_from_schema() -> bool:
+    """Case 9 (T38 fix v2 · 5/17): _scan_per_domain_time_diffs 用 schema.json
+    解析 platform 真实列名 ``{prefix}_{ts_fid}`` (e.g. ``domain_a_seq_39``)
+    而非硬编码 ``{d}_timestamp``。
+
+    5/16 silent bug 根因: 平台 parquet 列名 = ``domain_a_seq_39`` 等 ·
+    但 _scan_per_domain_time_diffs 期待 ``seq_a_timestamp`` 等 ·
+    line 240 过滤后只剩 ``timestamp`` · 4 个 seq domain 全跳过 ·
+    返回 4 个空数组 → fit_log_scale_boundaries fallback default ladder ·
+    实际等价没改 bucket。
+    """
+    # demo schema 已含 4 个 seq domain · prefix=domain_X_seq · ts_fid=39/67/27/26
+    schema_path = str(PROJ / "data" / "demo" / "schema.json")
+    assert Path(schema_path).exists(), f"demo schema missing: {schema_path}"
+
+    # 直接 simulate _scan 内部 schema 解析逻辑 (因 _scan 实际需要 parquet 数据
+    # 才能完整 run · 这里只验证 column name 字典).
+    import json as json_mod
+    with open(schema_path, 'r', encoding='utf-8') as f:
+        schema_raw = json_mod.load(f)
+    seq_cfg = schema_raw.get('seq', {})
+    domain_to_ts_col = {}
+    for d in ['seq_a', 'seq_b', 'seq_c', 'seq_d']:
+        cfg = seq_cfg.get(d, {})
+        prefix = cfg.get('prefix')
+        ts_fid = cfg.get('ts_fid')
+        if prefix and ts_fid:
+            domain_to_ts_col[d] = f"{prefix}_{ts_fid}"
+
+    # 期望 4 domain 都解析到 platform 真实列名
+    assert domain_to_ts_col == {
+        'seq_a': 'domain_a_seq_39',
+        'seq_b': 'domain_b_seq_67',
+        'seq_c': 'domain_c_seq_27',
+        'seq_d': 'domain_d_seq_26',
+    }, f"unexpected mapping: {domain_to_ts_col}"
+
+    print(
+        f"  test_9: schema → ts_col mapping OK · "
+        f"{list(domain_to_ts_col.values())}")
+    return True
+
+
+def test_10_scan_with_real_demo_parquet() -> bool:
+    """Case 10 (T38 fix v2 · 5/17 · Plan B): _scan_per_domain_time_diffs 在
+    真实 demo parquet 上 schema 解析 + 扫描 · n_samples > 0 (修复前 = 0)。
+
+    用 demo_rg100 (1000 rows / 10 RG · 各 ~100 rows) · 8 RG sample 应能扫
+    到非空 time_diff data (假设至少 1 个 row 的 seq 有 valid timestamp).
+    """
+    from src.dataset import _scan_per_domain_time_diffs
+    import pyarrow.parquet as pq_
+
+    schema_path = str(PROJ / "data" / "demo" / "schema.json")
+    parquet_path = str(PROJ / "data" / "demo" / "demo_1000_rg100.parquet")
+    assert Path(parquet_path).exists(), (
+        f"demo parquet missing: {parquet_path}")
+
+    # 构造 train_rgs: 用 pq.ParquetFile 拿真实 RG 数量
+    pf = pq_.ParquetFile(parquet_path)
+    n_rgs = pf.num_row_groups
+    train_rgs = [
+        (parquet_path, i, pf.metadata.row_group(i).num_rows)
+        for i in range(n_rgs)
+    ]
+
+    # 调用 _scan · 应能解析列名 + 扫到 valid time_diff
+    result = _scan_per_domain_time_diffs(
+        train_rgs, schema_path, sample_rgs=8, max_rows_per_rg=200)
+
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {'seq_a', 'seq_b', 'seq_c', 'seq_d'}
+
+    # 至少有一个 domain 应该 scan 到非空 (因 demo schema 4 domain 都有 ts_fid)
+    nonempty_domains = [d for d, arr in result.items() if arr.size > 0]
+    assert len(nonempty_domains) >= 1, (
+        f"BUG NOT FIXED · all domains returned 0 samples · result sizes = "
+        f"{ {d: arr.size for d, arr in result.items()} }")
+
+    sizes = {d: int(arr.size) for d, arr in result.items()}
+    print(
+        f"  test_10: _scan on demo parquet · n_samples per domain = "
+        f"{sizes} · {len(nonempty_domains)}/4 nonempty OK")
+    return True
+
+
+def test_11_scan_legacy_fallback_no_schema() -> bool:
+    """Case 11 (T38 fix v2 · 5/17): _scan 在 schema_path=None 时 fallback 到
+    legacy 硬编码列名 · 在 demo parquet 上预期 n_samples=0 (因 legacy 列名
+    与平台/demo schema 不匹配)。这验证 silent failure mode 仍可控 (返回空
+    Dict 而非 raise) · 同时间接验证修复的 schema 路径是真正的不同行为。
+    """
+    from src.dataset import _scan_per_domain_time_diffs
+    import pyarrow.parquet as pq_
+
+    parquet_path = str(PROJ / "data" / "demo" / "demo_1000_rg100.parquet")
+    pf = pq_.ParquetFile(parquet_path)
+    train_rgs = [
+        (parquet_path, i, pf.metadata.row_group(i).num_rows)
+        for i in range(pf.num_row_groups)
+    ]
+
+    # schema_path=None → legacy fallback `{d}_timestamp` · 列名错 · 全空
+    result = _scan_per_domain_time_diffs(
+        train_rgs, schema_path=None, sample_rgs=8, max_rows_per_rg=200)
+    assert isinstance(result, dict)
+    sizes = {d: int(arr.size) for d, arr in result.items()}
+    assert all(arr.size == 0 for arr in result.values()), (
+        f"legacy fallback expected 0 samples (column name mismatch), "
+        f"got sizes = {sizes}")
+    print(
+        f"  test_11: legacy fallback (schema_path=None) → all-empty OK "
+        f"(sizes={sizes})")
+    return True
+
+
 if __name__ == "__main__":
     tests = [
         ("test_1_per_domain_true_empty_tbb_returns_none",
@@ -242,13 +358,20 @@ if __name__ == "__main__":
          test_7_t_divisibility_unchanged),
         ("test_8_argparse_real_simulation",
          test_8_argparse_real_simulation),
+        ("test_9_column_name_resolution_from_schema",
+         test_9_column_name_resolution_from_schema),
+        ("test_10_scan_with_real_demo_parquet",
+         test_10_scan_with_real_demo_parquet),
+        ("test_11_scan_legacy_fallback_no_schema",
+         test_11_scan_legacy_fallback_no_schema),
     ]
     results = []
     for name, fn in tests:
         try:
             ok = fn()
             results.append((name, ok, None))
-        except (AssertionError, ValueError, TypeError, AttributeError) as e:
+        except (AssertionError, ValueError, TypeError, AttributeError,
+                OSError, ImportError) as e:
             results.append((name, False, repr(e)))
 
     print()
