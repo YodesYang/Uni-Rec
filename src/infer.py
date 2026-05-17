@@ -197,6 +197,8 @@ class _TestEdaState:
         reservoir_size: int = 20000,
         per_fid_value_cap: int = 5000,
         id_counter_cap: int = 200000,
+        seq_item_fid_plan: Optional[Dict[str, List[Tuple[int, int]]]] = None,
+        seq_item_id_top_k: int = 50000,
     ) -> None:
         # Plans: (fid, offset, length) for each user/item int feat
         self.user_int_plan = list(user_int_entries)
@@ -206,6 +208,17 @@ class _TestEdaState:
         self.reservoir_size = reservoir_size
         self.per_fid_value_cap = per_fid_value_cap
         self.id_counter_cap = id_counter_cap
+
+        # A2 (5/17 EXP-067) · Per (domain, fid) item-id frequency for the
+        # high-vocab fids only. Used downstream (offline cross-reference with
+        # train-side EDA) to compute test↔train seq item id overlap rate ·
+        # which determines whether the seq encoder pathway has any signal in
+        # the 100% user cold-start scenario. seq_item_fid_plan maps each
+        # domain to a list of (slot, fid) tuples where slot is the index
+        # along batch[domain] axis 1 (= sideinfo_fids order). Only set up
+        # for fids with vocab > seq_item_id_min_vocab (1M).
+        self.seq_item_fid_plan = dict(seq_item_fid_plan or {})
+        self.seq_item_id_top_k = int(seq_item_id_top_k)
 
         # Accumulators (main-process-local, no worker copies)
         from collections import defaultdict
@@ -227,15 +240,46 @@ class _TestEdaState:
         self.abs_ts_reservoir: Dict[str, Any] = _make_reservoir()
         self.user_int_value_reservoir: Dict[int, Dict[str, Any]] = defaultdict(_make_reservoir)
         self.item_int_value_reservoir: Dict[int, Dict[str, Any]] = defaultdict(_make_reservoir)
+        # A2 · seq item id counter · keyed by (domain, fid) → Counter
+        # (item_id_value → freq). Capped at seq_item_id_top_k unique values
+        # per (domain, fid) to bound memory.
+        self.seq_item_id_counter: Dict[Tuple[str, int], Dict[int, int]] = (
+            defaultdict(lambda: defaultdict(int)))
 
     @classmethod
-    def from_dataset(cls, dataset: PCVRParquetDataset) -> "_TestEdaState":
-        """Build accumulator using dataset's read-only attrs (no shared state)."""
+    def from_dataset(
+        cls,
+        dataset: PCVRParquetDataset,
+        seq_item_id_min_vocab: int = 1_000_000,
+    ) -> "_TestEdaState":
+        """Build accumulator using dataset's read-only attrs (no shared state).
+
+        A2 (5/17 EXP-067): Auto-discover high-vocab fids in each seq domain
+        (vocab > seq_item_id_min_vocab · default 1M) which are most likely
+        item_id-like fields. Used downstream to compute test↔train seq item
+        id overlap rate (decides whether seq encoder pathway has signal in
+        100% user cold-start scenario).
+        """
+        # Build seq_item_fid_plan: domain → [(slot_idx, fid), ...] for
+        # high-vocab fids only. slot_idx is the index along batch[domain]
+        # axis 1 (= sideinfo_fids order, see dataset.py line 952-955).
+        seq_item_fid_plan: Dict[str, List[Tuple[int, int]]] = {}
+        for domain in dataset.seq_domains:
+            sideinfo = dataset.sideinfo_fids.get(domain, [])
+            vocab_map = dataset.seq_vocab_sizes.get(domain, {})
+            plan_list: List[Tuple[int, int]] = []
+            for slot_idx, fid in enumerate(sideinfo):
+                vs = int(vocab_map.get(fid, 0))
+                if vs > seq_item_id_min_vocab:
+                    plan_list.append((slot_idx, fid))
+            if plan_list:
+                seq_item_fid_plan[domain] = plan_list
         return cls(
             user_int_entries=dataset.user_int_schema.entries,
             item_int_entries=dataset.item_int_schema.entries,
             seq_domains=list(dataset.seq_domains),
             seq_maxlen={d: dataset._seq_maxlen.get(d, 0) for d in dataset.seq_domains},
+            seq_item_fid_plan=seq_item_fid_plan,
         )
 
     def _reservoir_extend(self, entry: Dict[str, Any], new_values, max_size: int) -> None:
@@ -312,6 +356,40 @@ class _TestEdaState:
             self._reservoir_extend(
                 self.seq_length_reservoir[domain], lengths, self.reservoir_size,
             )
+
+        # A2 (5/17 EXP-067): per-(domain, fid) item id frequency for
+        # high-vocab fids only. batch[domain] is (B, n_feats, max_len)
+        # where the n_feats axis follows sideinfo_fids order from
+        # dataset.sideinfo_fids[domain]. Non-zero values are item ids
+        # (zero = padding). Cap unique values per (domain, fid) at
+        # seq_item_id_top_k via streaming top-K logic (here we just
+        # accumulate; final top_k slice happens in finalize()).
+        for domain, plan_list in self.seq_item_fid_plan.items():
+            seq_tensor = batch.get(domain)
+            if seq_tensor is None:
+                continue
+            seq_arr = seq_tensor.cpu().numpy()  # (B, n_feats, max_len)
+            for slot_idx, fid in plan_list:
+                if slot_idx >= seq_arr.shape[1]:
+                    continue
+                slot_vals = seq_arr[:, slot_idx, :].ravel()
+                slot_vals = slot_vals[slot_vals > 0]  # drop padding
+                if slot_vals.size == 0:
+                    continue
+                key = (domain, fid)
+                counter = self.seq_item_id_counter[key]
+                # Memory bound: stop accumulating new keys once we hit
+                # 5x the top_k cap (top_k slice picks the highest-freq
+                # subset · we need some headroom to track non-top items).
+                hard_cap = self.seq_item_id_top_k * 5
+                for v in slot_vals:
+                    v_int = int(v)
+                    if v_int in counter:
+                        counter[v_int] += 1
+                    elif len(counter) < hard_cap:
+                        counter[v_int] = 1
+                    # else: silently drop (the cap is much larger than
+                    # top_k so the top-K result is unaffected by drops)
 
         # Q6: impression absolute timestamps → train↔test temporal gap
         ts_pos = timestamps[timestamps > 0]
@@ -413,16 +491,45 @@ class _TestEdaState:
         else:
             user_id_freq_hist = {}
 
+        # A2 (5/17 EXP-067) · seq item id top-K frequency per (domain, fid)
+        # Only emit fids with non-empty counters. Each entry = top_k items
+        # by frequency · format = list of [item_id, freq] for compactness.
+        seq_item_id_summary: Dict[str, Any] = {}
+        seq_item_id_distinct: Dict[str, int] = {}
+        for (domain, fid), counter in self.seq_item_id_counter.items():
+            if not counter:
+                continue
+            sorted_items = sorted(
+                counter.items(), key=lambda kv: -kv[1])[:self.seq_item_id_top_k]
+            key = f"{domain}_fid_{fid}"
+            seq_item_id_summary[key] = [
+                [int(item_id), int(freq)] for item_id, freq in sorted_items
+            ]
+            seq_item_id_distinct[key] = len(counter)
+
+        # User_id distinct set (capped) · for F3 train↔test user_id overlap
+        # cross-reference. We emit ALL captured user_ids (up to id_counter_cap)
+        # to enable exact set intersection downstream.
+        user_id_set = sorted(self.user_id_counter.keys())[:self.id_counter_cap]
+
         return {
             'total_samples': self.total_samples,
             'user_id_distinct': len(self.user_id_counter),
             'user_id_freq_hist_top20': user_id_freq_hist,
+            'user_id_set_capped': user_id_set,  # F3 cross-reference
             'user_int_missing': user_int_missing_summary,
             'item_int_missing': item_int_missing_summary,
             'seq_length': seq_length_summary,
             'abs_timestamp': abs_ts_summary,
             'user_int_value': user_int_value_summary,
             'item_int_value': item_int_value_summary,
+            # A2 cross-reference fields
+            'seq_item_id_top_k': seq_item_id_summary,
+            'seq_item_id_distinct_per_fid': seq_item_id_distinct,
+            'seq_item_fid_plan': {
+                d: [[int(s), int(f)] for s, f in plan]
+                for d, plan in self.seq_item_fid_plan.items()
+            },
         }
 
 
