@@ -2,7 +2,7 @@
 
 > **每次 agent 推荐 platform 操作前必须 grep 此文件**。任何资源状态陈述 (slot / quota / in-flight) 凭此文件 · 不凭印象。
 >
-> **Last updated**: 2026-05-16 CEST 16:58 (M51-M54 4 jobs 启动成功 · T38 NameError 已修复 · in-flight overnight)
+> **Last updated**: 2026-05-17 CEST 18:35 (5/17 晚 4 jobs in-flight: M73/M74/M75/M50-rerun · M76 等 M50 重跑完接力)
 
 ---
 
@@ -24,22 +24,36 @@
 
 > 来源: team-memory line 175 ("训练 slot 与 evaluation quota 是两个完全独立的资源池")
 
-| Slot | Status | Job | 起 (CEST) | 完成预估 (CEST) | dev (E4 best) |
-|---|---|---|---|---|---|
-| 1 | 🟡 **in-flight** | **M51** (M22 + UE split + temporal_weight 2.5 · path B + M41 stack) | ~16:55 5/16 (T38 fix 后重启) | ~22:00 5/16 | TBD |
-| 2 | 🟡 **in-flight** | **M52** (M22 + UE split + per-domain time bucket · 修复 M28) | ~16:55 5/16 | ~22:00 5/16 | TBD |
-| 3 | 🟡 **in-flight** | **M53** (M22 + UE split + NLIR · path B + Linear gating stack) | ~16:55 5/16 | ~22:00 5/16 | TBD |
-| 4 | 🟡 **in-flight** | **M54** (M22 + per-domain bucket alone · M28 修复单变量) | ~16:55 5/16 | ~22:00 5/16 | TBD |
+### Current In-Flight (5/17 CEST 18:35 起)
 
-**Last completed jobs** (按时间倒序):
-- **M50** (UE split + weekend filter 双 stack): completed CEST ~15:53 5/16 · dev 0.861974 · 双 stack 损害 net (−0.0066 vs M22) · LB 待评 (5/17 早 ⭐⭐ 候选)
-- **M49** ⭐⭐⭐ (UE split T37 ADR-014): completed CEST ~14:00 5/16 · dev **0.870741** / LB **0.848162** ⭐ NEW SOTA (+0.000570 vs M22)
-- **M45** (weekend filter): completed CEST ~14:15 5/16 · dev 0.858907 · daypart filter 路径死 (−0.0097)
-- **M48** (03-04 only): completed CEST ~12:30 5/16 · dev 0.802487 · data 不足灾难 (−0.066)
-- **M41** (temporal_weight 2.5): completed CEST ~04:30 5/16 · dev 0.868069 / LB 0.847846 ⭐
-- **M40** (hour_only): completed CEST ~04:30 5/16 · dev 0.866881 / LB 0.846931
-- **M39 v2** (Global Token): completed CEST ~01:30 5/16 · dev 0.867963 · LB 待评 ✅ publish-ready
-- **M38 v2** (Multi-Emb K=2): completed CEST ~00:30 5/16 · dev 0.868403 · LB 待评 ✅ publish-ready
+| Slot | Status | Job | 起 (CEST) | 完成预估 (CEST) | 配置 |
+|---|---|---|---|---|---|
+| 1 | 🟡 **in-flight** | **M73** (path B × seed=2) | ~17:00 5/17 | ~22:00 5/17 | path B cross-seed 第 3 数据点 |
+| 2 | 🟡 **in-flight** | **M74** (path B × seed=5) | ~17:00 5/17 | ~22:00 5/17 | path B cross-seed 第 4 数据点 |
+| 3 | 🟡 **in-flight** | **M75** (path B + per-domain T38 v2) | ~17:00 5/17 | ~22:00 5/17 | T38 v2 fix + UE stack |
+| 4 | 🟡 **in-flight** | **M50 重跑** (path B + weekend filter) | ~17:30 5/17 | ~22:30 5/17 | M50 ckpt 5/17 15:53 已过期 · 重训保 LB 评估 |
+
+**Pending (M50 重跑完接力)**:
+- ⏸️ **M76** (path B + DCN cross · T34 ready) · 期望启 ~CEST 22:30 · 完成 ~03:30 5/18 · ckpt 24h 过期 5/19 03:30 OK
+
+**Note**: M73/M74/M75 用户已 self-verify Args 5 keys all OK (CEST 18:35 用户确认)。
+
+### Last Completed Jobs (按时间倒序 · 5/17 14:15~21:26)
+
+5/17 早起 4 jobs 全部完成:
+
+| Job | Config | dev (E4 best) | E3 dev | LB | Notes |
+|---|---|---|---|---|---|
+| **M68** | path B + Q_init + DIN bypass (3 stack) | 0.870376 | 0.869659 | **0.846468** ❌ | Stack net −0.001694 LB · Q_init in path B 失败 |
+| **M65** | path A + per-domain T38 v2 + DIN bypass | 0.868973 | 0.868623 | 待评 | T38 v2 fix 平台首验 ✅ · 弱真信号 |
+| **M68 v2** | M68 same config rerun | 0.870355 | 0.869836 | 待评 | M68 dev rerun band ±0.0001 内 |
+| **M71** | path B + DIN × s11 (cross-seed) | 0.870344 | 0.869952 | **0.846641** ⚠️ | path B cross-seed 第 2 数据点 · 下沿 |
+
+### Training Summary 关键 ckpt (`keep_topk_ckpt=4` · top4 全保留)
+
+5/17 早 4 jobs 各 4 ckpt (E1/E2/E3/E4) 都保留 · ckpt selection 战略 ready (但首测未做)。
+
+5/16 晚 4 jobs (M51/M52/M53/M54): training_summary 没在 docs 详细记录 · 但 ckpt 5/18 04:22 24h 过期红线 · 需 5/18 早 quota refresh 后立即 evaluate (4 quota 全用 + 部分 ckpt selection)。
 
 ---
 
@@ -47,126 +61,135 @@
 
 > 来源: team-memory line 9
 
+### 5/17 (today)
+
+| Used | Remaining | Used by |
+|---|---|---|
+| **3** | **1** | M55 LB 0.844343 + M71 LB 0.846641 + M68 LB 0.846468 |
+
+**M50 LB · 今晚剩 1 quota** (待 M50 重跑完成 ~22:30 后立即 evaluate · 用户已决)。
+
+**🟢 失败 evaluation 不消耗 quota** (5/17 用户告知铁律): M68 第 1 次 evaluation state_dict mismatch 失败 (q_init_item key bug · commit `cfd15f7` 修复) · 重提成功。
+
+### 5/18 (next day) · 4 quota refresh @ CEST 06:00
+
+**5/18 早 4 quota 候选** (优先级修订 · 5/17 18:35):
+
+| 优先级 | 候选 | 触发条件 | 期望 LB |
+|---|---|---|---|
+| ⭐⭐⭐ | **M53 LB** (5/16 晚 path B + NLIR · ckpt 5/18 04:22 过期 风险!) | publish-ready · 必须明早评 | 0.846~0.848 |
+| ⭐⭐⭐ | **M51 LB** (5/16 晚 path B + temporal_weight · ckpt 5/18 04:22 过期 风险!) | publish-ready · 必须明早评 | 0.846~0.848 |
+| ⭐⭐⭐ | **M75 LB** (今晚 path B + per-domain T38 v2 stack) | training_summary 出 + dev verify | 0.847~0.849 |
+| ⭐⭐ | **M65 LB** (path A + T38 v2) | training_summary 已出 dev 0.868973 | 0.846~0.847 |
+| ⭐⭐ | **M68 v2 LB** (M68 rerun · LB rerun band confirm) | dev 已出 | 0.846~0.847 |
+| ⭐⭐ | **M68 E3 ckpt LB** (ckpt selection 战略首测 · E3 dev 0.869659) | E3 ckpt verify | 0.846~0.848 |
+| ⭐ | **M73/M74 LB** (path B cross-seed s2/s5) | dev 出 | 0.845~0.848 |
+| ⭐ | **M76 LB** (path B + DCN) | training 完成 ~03:30 5/18 | 0.847~0.848 |
+
+**5/18 早 4 quota 推荐**: M53 + M51 (ckpt 24h 过期) + M75 (T38 v2 + UE 真测) + M68 E3 ckpt (ckpt selection 首测) **或** M76 (T34 DCN 首测)。
+
+### 历史 quota 使用
+
 | Day | Used | Remaining | Used by |
 |---|---|---|---|
-| **5/16 (today)** | **4** | **0** | M40 LB 0.846931 + M41 LB 0.847846 + M23 retry LB 0.836631 + **M49 LB 0.848162 ⭐ 新 SOTA** |
+| 5/17 (today) | 3 | 1 | M55 0.844343 + M71 0.846641 + M68 0.846468 |
+| 5/16 (closed) | 4 | 0 | M40 LB 0.846931 + M41 LB 0.847846 + M23 retry LB 0.836631 + **M49 LB 0.848162 ⭐ SOTA** |
 | 5/15 (closed) | 4 | 0 | M28 LB 0.846514 + M29 LB 0.845312 + M22-rerun LB 0.847324 + M33 LB 0.844710 |
-| 5/14 (closed) | 1 | (overflow to 5/15 ❌) | M22 LB 0.847592 (前 SOTA · 现 #2) |
+| 5/14 (closed) | 1 | (overflow ❌) | M22 LB 0.847592 (前 SOTA · 现 #2) |
 
-**Next reset**: CEST 06:00 5/17 = 北京 12:00 5/17
-
-**M49 evaluation 状态 (CEST 14:50)**: 用户提交 · 等 LB 结果 (~CEST 15:30 平台 inference + ~CEST 19:00 leaderboard 上榜延迟)
-
-**5/17 早 4 quota 预案 (CEST 16:25 修订 · 2 老 + 2 新策略)**:
-- Slot 1 ⭐⭐⭐ **M37** (NLIR vocabtier) · 类 M49 architecture-level · EXP-058 §Error E 反推可能误判
-- Slot 2 ⭐⭐⭐ **M38 v2** (Multi-Emb K=2) · RankUp 闭环
-- Slot 3 ⭐⭐⭐ **M51 / M52 / M53 dev 最高的** · 今晚训完 dev 出 · 选最强
-- Slot 4 ⭐⭐ **M50** (UE split + weekend filter 双 stack 反例验证) · 或备用 M30
-
-**5/17 早 决断红线**:
-- 不破 cross-seed 铁律 (M49 LB 0.848162 < 0.8484 严格阈值 · 不触发例外)
-- 不评 M45/M48 (dev 灾难)
-- 不评 M39 v2 (Global Token 与 UE split slot 冲突 · 大概率持平)
-- M34 ckpt **已永久丢失** (5/14 训 · 24h 过期 · 用户 5/16 16:25 确认)
-
-**今晚 4 slot overnight 训练计划**:
-- M51 = M22 + UE split + temporal_weight 2.5 (path B + M41 stack)
-- M52 = M22 + UE split + per-domain time bucket (path B + EXP-058 §Error C 修复)
-- M53 = M22 + UE split + NLIR (path B + Linear gating stack)
-- M54 = M22 + per-domain time bucket alone (M28 修复单变量 · 不依赖 path B)
-- 起 ~CEST 20:30 5/16 · 完成 ~CEST 01:30 5/17 · 5/17 早 quota refresh 时 dev 已出
+**Next reset**: CEST 06:00 5/18 = 北京 12:00 5/18
 
 ---
 
-## Publish-Ready Ckpt 待评 LB (按 dev 排序 · 5/16 16:25 publish 状态全 audit)
+## Publish-Ready Ckpt 状态 (5/17 CEST 18:35 audit)
 
-> 来源: 5/16 CEST 16:25 用户确认 publish 状态
-
-| Job | Dev | Publish | 24h 过期 (CEST) | 期望 LB | 5/17 早评 Priority |
-|---|---|---|---|---|---|
-| **M30** (Trick 6) | 0.868438 | ✅ | safe | ~0.847 | ⭐⭐⭐ |
-| **M38 v2** (Multi-Emb K=2) | 0.868403 | ✅ (5/16 早 publish) | safe | ~0.847 | ⭐⭐⭐ |
-| **M37** (NLIR) | 0.868311 | ✅ | safe | ~0.847 | ⭐⭐⭐ |
-| **M27 v2** (T31+user_15) | 0.868166 | ✅ | safe | ~0.846 | ⭐⭐ |
-| **M39 v2** (Global Token) | 0.867963 | ✅ (5/16 早 publish) | safe | ~0.844 | ⭐ |
-| **M17** (seq_d=768) | 0.867794 | ✅ | safe | ~0.845 | ⭐ |
-| **M50** (UE split + weekend) | 0.861974 | publish 待 verify | 5/17 15:53 | 0.840~0.848 | ⭐⭐ 反例验证 |
-| ~~M34 (vocabtier+Trick 6)~~ | ~~0.868422~~ | ❌ **已丢失 (24h 过期)** | (gone) | — | ❌ deprecated |
-| ~~M45/M48~~ | < 0.86 | dev 灾难 | — | — | ❌ 不评 |
+| Job | Dev | Publish | 24h 过期 (CEST) | LB |
+|---|---|---|---|---|
+| **M22** (vocabtier × s42) | 0.868576 | ✅ historical | safe | **0.847592** ⭐ #2 |
+| **M22-rerun** | 0.868582 | ✅ | safe | 0.847324 |
+| **M49** ⭐⭐⭐ (UE split path B) | 0.870741 | ✅ | safe | **0.848162** ⭐ SOTA |
+| **M51** (path B + temporal_weight) | TBD | ⚠️ user 已决今晚 publish | **5/18 04:22 ⚠️** | 待评 |
+| **M52** (path B + per-domain · M52' silent skip) | TBD | TBD | 5/18 04:22 ⚠️ | 待评 |
+| **M53** (path B + NLIR) | TBD | ⚠️ user 已决今晚 publish | **5/18 04:22 ⚠️** | 待评 |
+| **M54** (per-domain alone · M54 silent skip) | TBD | TBD | 5/18 04:22 ⚠️ | 待评 |
+| **M50 (5/16 训)** | 0.861974 | ❌ **已过期** (5/17 15:53) | gone | LB 永远评不到 |
+| **M50 重跑** (今晚 ~22:30 完) | TBD | TBD | 5/18 22:30 OK | 今晚剩 1 quota 评 |
+| **M68 / M65 / M68 v2 / M71** (今早) | (见 above) | 待 publish | 5/18 19:00~21:30 | 5/18+ 评 |
+| **M30** (Trick 6) | 0.868438 | ✅ | safe | 待评 (LB 决 Q_init 路径) |
+| **M37** (NLIR) | 0.868311 | ✅ | safe | 待评 |
+| **M38 v2** (Multi-Emb K=2) | 0.868403 | ✅ | safe | 待评 |
+| **M39 v2** (Global Token) | 0.867963 | ✅ | safe | 待评 |
+| **M27 v2** (T31+user_15) | 0.868166 | ✅ | safe | 待评 |
+| **M17** (seq_d=768) | 0.867794 | ✅ | safe | 待评 |
+| ~~M34~~ / ~~M45~~ / ~~M48~~ | — | ❌ 已丢失 / dev 灾难 | gone | 不评 |
 
 ---
 
-## Strategic Status (5/16 CEST 08:43)
+## Strategic Status (5/17 CEST 18:35 修订 · 5/20 ddl 战略约束下)
 
-**LB SOTA**: **M49 (UE split T37 ADR-014) = 0.848162** ⭐ NEW (5/16)
+**LB SOTA**: **M49 (UE split path B · seed=42) = 0.848162** ⭐ (5/16)
 **前 SOTA**: M22 (vocabtier × s42) = 0.847592 (5/14)
-**M49 vs M22 Δ**: +0.000570 (超 same-seed rerun band ±0.0003 · 未破 0.8484 严格阈值)
-**LB rerun band**: ±0.0003 (M22 / M22-rerun)
-**LB cross-seed band**: ±0.005 (EXP-028)
-**破 SOTA 阈值 (same-seed rerun)**: ≥ 0.8484
+**距 0.852 (用户硬 deadline)**: 还差 +0.003838
 **距 0.85 (Top 20)**: 还差 +0.0018
 
-**🔴 5/22 前 seed 策略 (用户 5/16 CEST 08:48 战略决断)**:
-- **默认锁 `seed=42`** (实证 LB 上沿 · EXP-028 + M22 路径双重确认)
-- **不做 cross-seed 实验** (M22 × s11/s2 / 任何方向 × s3/s7 都不起)
-- **唯一例外**: 强真信号 (LB ≥ 0.8484) 出现时才做 cross-seed (但 9 天内几乎不可能出现)
-- **5/22~5/24 final 阶段** 才做 final config × s11/s2 上沿搜索
+**用户硬 deadline (5/17 CEST 16:14 立)**: **0.852 by 5/20** (推前 5/22 → 5/20)
 
-**今日新发现**:
-- ⭐ M41 LB +0.000254 = 项目首个 dev↓ LB↑ 反例 (但弱信号 · band 内 · 不 cross-seed)
-- ⚠️ M40 LB −0.000661 = dow 半证伪 (移除 dow 在 LB 上不全错也不全对)
-- 7/7 新方向 (M37/M38/M39/M40/M41/Multi-Emb/Global Token) dev 都不超 M22 · vocabtier 路径**接近局部最优**
-- **path B (UE 分离 + int pairwise cross)** 是当前唯一未尝试的破局方向 · ADR-014 待起草
+**5/17~5/20 战略 (team-memory line 195 新铁律)**:
+- ✅ **cross-seed 主线开放** (5/22 lock 已 ARCHIVED)
+- ✅ **path B cross-seed 优先** (M22 已 5 数据点 · path B 仅 2 + 今晚 +2 = 4 接近饱和)
+- ✅ **stack accumulation** (T38 v2 + UE / DCN + UE 今晚)
+- ✅ **ckpt selection 战略激活** (M68 E3 ckpt 首测 待 5/18 早)
 
-**5/16 下午 14:00 计划 (CEST 09:30 audit · path B 暂缓)** (4 free slot):
-- **4 slot 全留空** (path B / M44 都 suspended · 见 ADR-014 §Suspension Note)
-- 等晚 2 evaluation (M23 + M38 v2) LB 出 (~CEST 22:30)
-- 5/17 早根据数据决方向
+**5/20 前到 0.852 概率**: ~20~30% (M68 stack 失败后下调 · 仍可行)
 
-**Path B 暂缓原因** (用户 5/16 09:30 决断):
-- "UE 分离" 解读不确定 · 3 种 plausible interpretation · community 无二次澄清
-- 7/7 历史新方向 dev 弱负 · 在解读不确定时投入资源高风险
-- 重启条件: M23 LB 出后看 cross 路径是否 work · 或社区追问 Seed 帖细节
+**5/17 全天 LB 数据点 (今天新)**:
+- M55 LB **0.844343** (Bilinear gating · 闭环失败)
+- M71 LB **0.846641** (path B × s11 cross-seed · 第 2 数据点)
+- M68 LB **0.846468** (path B + Q_init stack · 净损害 −0.001694)
+- → **path B cross-seed 跨度小** (s42 0.848 / s11 0.846 · 0.0015) · stack 加性失败 (Q_init 在 path B 上失败)
 
-**M44 撤销原因**:
-- M22 + temporal_weight 2.5 + Multi-Emb K=2 stack
-- M41 弱信号 (LB +0.000254) + Multi-Emb 弱负 (M38 v2 dev −0.000173)
-- Stack 期望 ~+0.0001 · 落 noise band 内 · ROI 极低
+**今晚 4 jobs 设计逻辑** (EXP-068 落档):
+- 2 cross-seed (M73 s2 / M74 s5) → path B 路径 4 数据点 · 触饱和阈值
+- 1 stack (M75 T38 v2 + UE) → T38 v2 fix 真测 + path B
+- 1 救活 (M50 重跑) → 防 ckpt 过期 + LB 评估
+- M76 (DCN + UE) 接力 M50 重跑
 
-**关键 deprecated 方向** (不再投资源):
-- ❌ 5-cluster ns_groups (M33 LB 反向放大 27× · 路径关闭)
-- ❌ idmask (EXP-025 LB 反向 14×)
-- ❌ NLIR / FaFE / per-token FFN (5/15 ~ 5/9 各种证伪)
+**关键 deprecated 方向 (不再投资源)**:
+- ❌ Q_init in path B (M68 LB 净损害 −0.001694 · stack 失败)
+- ❌ Bilinear gating (M55 LB −0.004 · user-side gating 路径死)
+- ❌ daypart filter (M45/M48 dev 灾难 · M50 双 stack 净损害)
+- ❌ DCN cross alone (M23 LB −0.011 · path A DCN 死透 · 但 path B + DCN 是 M76 重新探索)
+- ❌ 5-cluster ns_groups / idmask / NLIR alone / FaFE / per-token FFN
 - ⚠️ Multi-Emb K=2 / Global Token (M38v2/M39v2 dev 弱负 · 待 LB 闭环 · 不优先 stack)
 
 ---
 
-## 历史 Lessons (5 次资源混乱事故 · 5/9 ~ 5/16)
+## 历史 Lessons (5+ 次资源混乱事故 · 5/9 ~ 5/17)
 
-1. **5/9 22:10**: agent 凭印象 "evaluation 截止 CEST 14:00" (实际 quota 重置 = 北京 12:00) → 用户反问纠正
-2. **5/10 08:40**: num_epochs=3 凭印象 (EXP-019 明文 E4 best) → 改 default 4
-3. **5/10 16:21**: agent 把 training slot 当 evaluation quota (4/day) → 用户主动澄清 · 立 line 175 铁律
-4. **5/14 12:39**: agent 又把 training slot 当 quota · 提"等凌晨"伪时序 → 用户反问 "为什么要等凌晨" · line 175 铁律重申
-5. **5/16 08:35**: agent 凭印象说 "5/16 下午 2 free slot" · 实际 4 free → 用户反问 "彻底解决问题"
+1. 5/9 22:10: agent 凭印象 "evaluation 截止 CEST 14:00" → 用户纠正
+2. 5/10 08:40: num_epochs=3 凭印象 → 改 default 4
+3. 5/10 16:21: agent 把 training slot 当 evaluation quota → line 175 铁律
+4. 5/14 12:39: agent 又把 slot 当 quota · "等凌晨" 伪时序 → 用户反问
+5. 5/16 08:35: agent 凭印象 "2 free slot" 实际 4 free → 用户反问 "彻底解决问题"
+6. **5/17 16:42**: agent 凭印象 "5/16 晚 4 jobs (M60/M55/M54'/M52')" 实际 5/17 早起 4 jobs (M68/M65/M68 v2/M71) · 用户贴 log 后才修正 (4 jobs 全带 DIN bypass · 5/16 晚 EXP-065 4 jobs 实际不在今天 log 里)
 
-**Root cause** (用户 5/16 提问触发):
-- 静态规则 (4/day quota / 4 slots) 已立铁律
-- **动态状态 (当前 free slot 数 / 剩余 quota) 没有 single source of truth**
-- agent 凭对话历史拼凑 mental model · stateless 重启时容易污染
-
-**Fix (5/16 实施)**:
-- 创建本文件作 single source of truth
-- 删除 active.md "Work in flight" 段 (stale info 源)
-- team-memory 顶部加 "agent 推荐前 4 步硬流程"
+**Root cause** (累计):
+- 静态规则铁律已立 (4/day quota / 4 slots)
+- **动态状态 (当前 free slot 数 / 剩余 quota / 哪些 jobs 在跑)** 由本文件单一 source of truth 维护
+- agent 任何时候陈述资源状态前**必须 grep 本文件** · 不凭印象
 
 ---
 
 ## Update Log
 
-- **2026-05-16 CEST 16:58**: M51-M54 4 jobs 启动成功 (T38 NameError fix commit `2638e1b` 后) · 全部 in-flight 预计 ~CEST 22:00 完成 dev · 5/17 早 quota refresh 时数据齐全 · 4 jobs Args verify 全通过 (M51 path B+M41 / M52 path B+per-domain / M53 path B+NLIR / M54 per-domain alone)
-- **2026-05-16 CEST 16:25**: publish 状态全 audit (用户确认 M37/M38v2/M39v2/M30/M27v2/M17/M40/M41 都已 publish · M34 已丢失 · M45/M48/M50 publish 状态待 verify) · 5/17 早 quota matrix 修订为 "2 老 (M37 + M38v2) + 2 新 (M51-M54 dev 最高 + M50/M30)" · 4 free slot 启 M51-M54 stack overnight train (CEST ~20:30 起 ~01:30 5/17 完成) · 见 EXP-061
-- **2026-05-16 CEST 16:00**: M50 dev 0.861974 (双 stack 损害 net −0.0066) · 用户反问 "train/valid 是否一致" 触发 src/dataset.py source-of-truth audit · 确认 M22/M49/M50 valid set 完全相同 · dev 严格可对比 · M50 LB 加入 5/17 早 quota 候选 (优先级 ⭐⭐) · 5/17 矩阵终版定稿 · 见 EXP-060
-- **2026-05-16 CEST 21:15**: 🎉 **M49 LB 0.848162** = 项目首个超 SOTA · UE split (T37 ADR-014) 弱真信号 · Δ+0.000570 vs M22 · 超 rerun band 但未破 0.8484 严格阈值 · dev→LB 衰减 73% · 5/17 早 4 quota 优先评 M50 / M37 / M38v2 · 不破 cross-seed 铁律 · 见 EXP-059
-- **2026-05-16 CEST 14:50**: M49 evaluation 已提交 · today quota 用满 4/4 · 等 LB 结果 (~CEST 19:00 上榜) · 期望区间 0.847~0.850 (path B 首测 · 决 5/17 4 quota 方向)
-- **2026-05-16 CEST 14:43**: M23 retry LB 0.836631 (−0.011 强负 · path A DCN cross 死透闭环) + M45/M48/M49 dev 回流 · M49 dev 0.870741 (+0.002122 项目首个超 M22 真信号 · UE split ADR-014 实证) · 5/16 today quota 修订为 used=3 / remaining=1 · 晚 1 quota 必评 M49 LB
-- **2026-05-16 CEST 08:43**: 文件创建 (用户反问 "彻底解决问题" 触发) · 状态镜像 5/16 早 4 jobs 完成 + 早 2 evaluation 完成
+- **2026-05-17 CEST 18:35**: 用户启动 M73/M74/M75 + M50 重跑 (M76 接力 M50 重跑) · M50 ckpt 5/17 15:53 已过期 · 重训挽救 LB 评估机会 · 4 slots 全占 · today quota used 3/4 (M55+M71+M68 LB) · 今晚剩 1 quota = M50 LB · 5/20 ddl 战略下 cross-seed heavy + stack accumulation + ckpt selection 三轨并进
+- **2026-05-17 CEST 16:14**: 用户立新硬 deadline = 0.852 by 5/20 (推前 5/22 → 5/20) · 5/22 cross-seed lock ARCHIVED · 立新铁律 team-memory line 195 (cross-seed 主线开放) · commit `541ef12`
+- **2026-05-17 CEST 14:15~15:38**: 用户启 M68 / M65 / M68 v2 / M71 4 jobs 5/17 早 (overnight train) · 全部 19:00~21:30 完成 dev
+- **2026-05-17 CEST 15:30~16:30**: M55/M71/M68 LB 回流 · M55 LB 0.844343 (Bilinear 死) / M71 LB 0.846641 (path B s11) / M68 LB 0.846468 (path B + Q_init stack 净损害)
+- **2026-05-17 CEST 13:50~14:30**: EDA-67 v2 evaluation submitted (G2/A2/F3 train-side) · 22:26 完成 · 18.9MB blob 写到平台 storage · 用户决今晚不下载 · 5/18 后再分析
+- **2026-05-17 CEST 13:44**: M68 第 1 次 evaluation state_dict mismatch 失败 (q_init_item key bug) · commit `cfd15f7` 修复 + 用户重提成功 · **失败 evaluation 不消耗 quota 铁律告知** (team-memory line 109)
+- **2026-05-16 CEST 21:15**: 🎉 **M49 LB 0.848162** = 项目首个超 SOTA · UE split (T37 ADR-014) 弱真信号 · Δ+0.000570 vs M22
+- **2026-05-16 CEST 16:58**: M51-M54 4 jobs 启动 (T38 NameError fix commit `2638e1b` 后) · 全部 in-flight 预计 ~CEST 22:00 完成 dev
+- **2026-05-16 CEST 16:25**: publish 状态全 audit · 5/17 早 quota matrix 修订
+- **2026-05-16 CEST 14:43**: M23 retry LB 0.836631 + M45/M48/M49 dev 回流 · M49 dev 0.870741 (项目首个超 M22 真信号)
+- **2026-05-16 CEST 08:43**: 文件创建 (用户反问 "彻底解决问题" 触发) · single source of truth
