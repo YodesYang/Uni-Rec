@@ -757,7 +757,14 @@ def main() -> None:
         "onetrans_top_k": int(cfg.get("onetrans_top_k", 50)),
         "seq_hash_vocab": int(cfg.get("seq_hash_vocab", 0)),
         "item_conditioned_query": bool(cfg.get("item_conditioned_query", False)),
-        "q_init_item": bool(cfg.get("q_init_item", False)),
+        # 5/17 fix: train_config.json 实际 key 是 `enable_q_init_item`
+        # (来自 train.py vars(args)) · 老旧别名 `q_init_item` fallback 兼容
+        # (T32 commit 6979fd7 设计期望 key=q_init_item · 但 vars(args) 实际
+        # 写入 enable_q_init_item)。bug 实证: M68 evaluation state_dict
+        # mismatch (q_init_item_proj keys not loaded · model 不创建模块)。
+        "q_init_item": bool(
+            cfg.get("enable_q_init_item",
+                    cfg.get("q_init_item", False))),
         "multi_emb_k": int(cfg.get("multi_emb_k", 1)),
         "target_item_seq_injection": str(cfg.get("target_item_seq_injection", "off")),
         "target_inject_alpha_init": float(cfg.get("target_inject_alpha_init", 0.0)),
