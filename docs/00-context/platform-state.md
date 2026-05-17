@@ -2,7 +2,7 @@
 
 > **每次 agent 推荐 platform 操作前必须 grep 此文件**。任何资源状态陈述 (slot / quota / in-flight) 凭此文件 · 不凭印象。
 >
-> **Last updated**: 2026-05-17 CEST 18:35 (5/17 晚 4 jobs in-flight: M73/M74/M75/M50-rerun · M76 等 M50 重跑完接力)
+> **Last updated**: 2026-05-17 CEST 19:51 (M51 / M53 ckpt 已 publish · 5/18 04:22 过期风险解除)
 
 ---
 
@@ -108,10 +108,10 @@
 | **M22** (vocabtier × s42) | 0.868576 | ✅ historical | safe | **0.847592** ⭐ #2 |
 | **M22-rerun** | 0.868582 | ✅ | safe | 0.847324 |
 | **M49** ⭐⭐⭐ (UE split path B) | 0.870741 | ✅ | safe | **0.848162** ⭐ SOTA |
-| **M51** (path B + temporal_weight) | TBD | ⚠️ user 已决今晚 publish | **5/18 04:22 ⚠️** | 待评 |
-| **M52** (path B + per-domain · M52' silent skip) | TBD | TBD | 5/18 04:22 ⚠️ | 待评 |
-| **M53** (path B + NLIR) | TBD | ⚠️ user 已决今晚 publish | **5/18 04:22 ⚠️** | 待评 |
-| **M54** (per-domain alone · M54 silent skip) | TBD | TBD | 5/18 04:22 ⚠️ | 待评 |
+| **M51** (path B + temporal_weight) | TBD | ✅ **published 5/17 19:51** | safe (publish 锁) | 待评 |
+| **M52** (path B + per-domain · M52' silent skip) | TBD | ⚠️ TBD | 5/18 04:22 ⚠️ | 不评 (silent skip) |
+| **M53** (path B + NLIR) | TBD | ✅ **published 5/17 19:51** | safe (publish 锁) | 待评 |
+| **M54** (per-domain alone · M54 silent skip) | TBD | ⚠️ TBD | 5/18 04:22 ⚠️ | 不评 (silent skip) |
 | **M50 (5/16 训)** | 0.861974 | ❌ **已过期** (5/17 15:53) | gone | LB 永远评不到 |
 | **M50 重跑** (今晚 ~22:30 完) | TBD | TBD | 5/18 22:30 OK | 今晚剩 1 quota 评 |
 | **M68 / M65 / M68 v2 / M71** (今早) | (见 above) | 待 publish | 5/18 19:00~21:30 | 5/18+ 评 |
@@ -182,6 +182,7 @@
 
 ## Update Log
 
+- **2026-05-17 CEST 19:51**: 用户 publish M51 / M53 ckpt · 5/18 04:22 24h 过期风险解除 · 5/18 早 quota 可正常评 (无 ckpt 时间窗约束) · M52 / M54 未 publish (silent skip 失败 job · 不值得评)
 - **2026-05-17 CEST 18:35**: 用户启动 M73/M74/M75 + M50 重跑 (M76 接力 M50 重跑) · M50 ckpt 5/17 15:53 已过期 · 重训挽救 LB 评估机会 · 4 slots 全占 · today quota used 3/4 (M55+M71+M68 LB) · 今晚剩 1 quota = M50 LB · 5/20 ddl 战略下 cross-seed heavy + stack accumulation + ckpt selection 三轨并进
 - **2026-05-17 CEST 16:14**: 用户立新硬 deadline = 0.852 by 5/20 (推前 5/22 → 5/20) · 5/22 cross-seed lock ARCHIVED · 立新铁律 team-memory line 195 (cross-seed 主线开放) · commit `541ef12`
 - **2026-05-17 CEST 14:15~15:38**: 用户启 M68 / M65 / M68 v2 / M71 4 jobs 5/17 早 (overnight train) · 全部 19:00~21:30 完成 dev
