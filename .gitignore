@@ -11,6 +11,11 @@ venv/
 data/
 runs/
 
+# --- Generated platform entry templates ---
+# The platform entrypoint is uploaded as run.sh. New local run_*.sh templates
+# are transient helpers and should not be committed.
+src/run_*.sh
+
 # --- Source PDF (oversized, image-only; markdown 解析版本已落到 docs/00-context/) ---
 docs/99-raw/platform-pdf/*.pdf
 

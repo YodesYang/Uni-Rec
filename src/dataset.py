@@ -204,6 +204,8 @@ def _scan_per_domain_time_diffs(
     max_rows_per_rg: int = 50000,
     max_samples_per_rg_domain: int = 100000,
     max_samples_per_domain: int = 5000000,
+    timestamp_min: Optional[int] = None,
+    timestamp_max: Optional[int] = None,
 ) -> Dict[str, np.ndarray]:
     """T38 · Scan a sample of train RGs to gather per-domain time_diff data.
 
@@ -223,6 +225,8 @@ def _scan_per_domain_time_diffs(
         max_rows_per_rg: Cap rows per RG to bound scan time.
         max_samples_per_rg_domain: Reservoir cap per Row Group and domain.
         max_samples_per_domain: Total reservoir cap per domain.
+        timestamp_min: Optional inclusive row-level lower bound.
+        timestamp_max: Optional exclusive row-level upper bound.
 
     Returns:
         Dict[domain, 1D np.ndarray of int64 time_diff seconds]. Domains
@@ -300,6 +304,17 @@ def _scan_per_domain_time_diffs(
         if table.num_rows > max_rows_per_rg:
             table = table.slice(0, max_rows_per_rg)
         ts = table.column('timestamp').to_numpy().astype(np.int64)
+        if timestamp_min is not None or timestamp_max is not None:
+            keep_mask = np.ones(ts.shape[0], dtype=np.bool_)
+            if timestamp_min is not None:
+                keep_mask &= ts >= int(timestamp_min)
+            if timestamp_max is not None:
+                keep_mask &= ts < int(timestamp_max)
+            if not keep_mask.any():
+                continue
+            if not keep_mask.all():
+                table = table.filter(pa.array(keep_mask))
+                ts = table.column('timestamp').to_numpy().astype(np.int64)
         for d in seq_domains:
             ts_col_name = domain_to_ts_col.get(d)
             if ts_col_name is None or ts_col_name not in cols_to_read:
@@ -3132,6 +3147,9 @@ def get_pcvr_data(
     limit_valid_rgs: int = 0,
     enable_row_time_cutoff: bool = False,
     enable_row_valid_gap: bool = False,
+    fixed_valid_timestamp_min: Optional[int] = None,
+    fixed_valid_timestamp_max: Optional[int] = None,
+    fixed_train_timestamp_max: Optional[int] = None,
     enable_count_features: bool = False,
     enable_seq_stats_features: bool = False,
     enable_history_cvr_features: bool = False,
@@ -3219,6 +3237,13 @@ def get_pcvr_data(
     with ``holdout_ratio > 0`` (would require extending ``_row_ts_cutoff`` to
     emit two cut points; out of scope for this iteration).
 
+    ``fixed_valid_timestamp_min/max`` enables a hand-picked row-level
+    validation window. Row Groups that touch the window are loaded, then
+    filtered exactly at row level. This is intended for pseudo-public
+    backtests such as "train before 2026-03-03 09:49:51, validate on
+    2026-03-03 09:49:51~14:49:07" and is mutually exclusive with the
+    ratio-based row cutoffs.
+
     Returns:
         A tuple ``(train_loader, valid_loader, holdout_loader, train_dataset)``.
         ``holdout_loader`` is ``None`` unless ``holdout_ratio > 0``. The
@@ -3239,6 +3264,41 @@ def get_pcvr_data(
     if not 0.0 <= id_mask_prob <= 1.0:
         raise ValueError(
             f"id_mask_prob must be in [0, 1]; got {id_mask_prob}")
+    fixed_valid_enabled = (
+        fixed_valid_timestamp_min is not None
+        or fixed_valid_timestamp_max is not None
+        or fixed_train_timestamp_max is not None
+    )
+    if fixed_valid_enabled:
+        if fixed_valid_timestamp_min is None or fixed_valid_timestamp_max is None:
+            raise ValueError(
+                "fixed validation window requires both "
+                "fixed_valid_timestamp_min and fixed_valid_timestamp_max")
+        if int(fixed_valid_timestamp_max) <= int(fixed_valid_timestamp_min):
+            raise ValueError(
+                "fixed_valid_timestamp_max must be greater than "
+                "fixed_valid_timestamp_min")
+        fixed_train_max = (
+            int(fixed_train_timestamp_max)
+            if fixed_train_timestamp_max is not None
+            else int(fixed_valid_timestamp_min)
+        )
+        if fixed_train_max > int(fixed_valid_timestamp_min):
+            raise ValueError(
+                "fixed_train_timestamp_max must be <= "
+                "fixed_valid_timestamp_min to avoid train/valid leakage")
+        if valid_split_strategy != 'time':
+            raise ValueError(
+                "fixed validation window requires valid_split_strategy='time' "
+                "so Row Group timestamp ranges are available.")
+        if enable_row_time_cutoff or enable_row_valid_gap:
+            raise ValueError(
+                "fixed validation window is mutually exclusive with "
+                "enable_row_time_cutoff and enable_row_valid_gap")
+        if holdout_ratio > 0.0 or valid_gap_ratio > 0.0:
+            raise ValueError(
+                "fixed validation window is mutually exclusive with "
+                "holdout_ratio and valid_gap_ratio")
     if valid_gap_ratio > 0.0 and valid_split_strategy != 'time':
         raise ValueError(
             "valid_gap_ratio > 0 requires valid_split_strategy='time' "
@@ -3574,6 +3634,44 @@ def get_pcvr_data(
         train_timestamp_min = int(user_train_timestamp_min)
     cutoff_train_rows = None
     cutoff_valid_rows = None
+
+    if fixed_valid_enabled:
+        train_timestamp_max = (
+            int(fixed_train_timestamp_max)
+            if fixed_train_timestamp_max is not None
+            else int(fixed_valid_timestamp_min)
+        )
+        valid_timestamp_min = int(fixed_valid_timestamp_min)
+        valid_timestamp_max = int(fixed_valid_timestamp_max)
+        train_rgs = [
+            rg for rg, ts in zip(rg_info, rg_ts_ranges)
+            if ts is not None
+            and ts[0] < train_timestamp_max
+            and (train_timestamp_min is None or ts[1] >= train_timestamp_min)
+        ]
+        valid_rgs = [
+            rg for rg, ts in zip(rg_info, rg_ts_ranges)
+            if ts is not None
+            and ts[1] >= valid_timestamp_min
+            and ts[0] < valid_timestamp_max
+        ]
+        if not train_rgs or not valid_rgs:
+            raise ValueError(
+                "Fixed validation window produced an empty train or valid "
+                "Row Group view; check timestamp bounds.")
+        train_rows = sum(r[2] for r in train_rgs)
+        valid_rows = sum(r[2] for r in valid_rgs)
+        logging.info(
+            "[fixed_valid_window] enabled: "
+            f"train_timestamp_min={train_timestamp_min}, "
+            f"train_timestamp_max={train_timestamp_max}, "
+            f"valid_timestamp_min={valid_timestamp_min}, "
+            f"valid_timestamp_max={valid_timestamp_max}")
+        logging.info(
+            "[fixed_valid_window] Row Groups touching row-level windows: "
+            f"{len(train_rgs)} train ({train_rows} pre-filter rows), "
+            f"{len(valid_rgs)} valid ({valid_rows} pre-filter rows)")
+
     if enable_row_time_cutoff:
         candidate_start_idx = train_start_idx
         candidate_end_idx = valid_end_idx
@@ -3779,7 +3877,12 @@ def get_pcvr_data(
     # have time_diff scales spanning 11x (seq_d p99=56d vs seq_c p99=629d).
     if enable_per_domain_buckets and bucket_boundaries is None:
         per_domain_diffs = _scan_per_domain_time_diffs(
-            train_rgs, schema_path, sample_rgs=per_domain_bucket_sample_rgs)
+            train_rgs,
+            schema_path,
+            sample_rgs=per_domain_bucket_sample_rgs,
+            timestamp_min=train_timestamp_min,
+            timestamp_max=train_timestamp_max,
+        )
         fitted_boundaries: Dict[str, np.ndarray] = {}
         for domain, diffs in per_domain_diffs.items():
             fitted = fit_log_scale_boundaries(diffs)

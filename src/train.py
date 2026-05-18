@@ -204,6 +204,18 @@ def parse_args() -> argparse.Namespace:
                              '--valid_split_strategy time + --valid_gap_ratio '
                              '> 0. Mutually exclusive with '
                              '--enable_row_time_cutoff and --holdout_ratio.')
+    parser.add_argument('--fixed_valid_timestamp_min', type=int, default=0,
+                        help='EDA-71 clean-window backtest: fixed inclusive '
+                             'validation timestamp lower bound. Requires '
+                             '--valid_split_strategy time and '
+                             '--fixed_valid_timestamp_max. Default 0 = disabled.')
+    parser.add_argument('--fixed_valid_timestamp_max', type=int, default=0,
+                        help='EDA-71 clean-window backtest: fixed exclusive '
+                             'validation timestamp upper bound. Default 0 = disabled.')
+    parser.add_argument('--fixed_train_timestamp_max', type=int, default=0,
+                        help='EDA-71 clean-window backtest: fixed exclusive '
+                             'training timestamp upper bound. Defaults to '
+                             '--fixed_valid_timestamp_min when omitted.')
     parser.add_argument('--enable_count_features', action='store_true', default=False,
                         help='P0-A switch: append user/item non-zero feature counts '
                              'to user dense features (default off)')
@@ -835,6 +847,18 @@ def main() -> None:
         limit_valid_rgs=args.limit_valid_rgs,
         enable_row_time_cutoff=args.enable_row_time_cutoff,
         enable_row_valid_gap=args.enable_row_valid_gap,
+        fixed_valid_timestamp_min=(
+            args.fixed_valid_timestamp_min
+            if args.fixed_valid_timestamp_min > 0 else None
+        ),
+        fixed_valid_timestamp_max=(
+            args.fixed_valid_timestamp_max
+            if args.fixed_valid_timestamp_max > 0 else None
+        ),
+        fixed_train_timestamp_max=(
+            args.fixed_train_timestamp_max
+            if args.fixed_train_timestamp_max > 0 else None
+        ),
         enable_count_features=args.enable_count_features,
         enable_seq_stats_features=args.enable_seq_stats_features,
         enable_history_cvr_features=args.enable_history_cvr_features,
