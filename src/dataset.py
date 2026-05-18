@@ -17,6 +17,7 @@ import random
 import json
 import gc
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import numpy as np
 import pyarrow as pa
@@ -201,6 +202,8 @@ def _scan_per_domain_time_diffs(
     schema_path: Optional[str],
     sample_rgs: int = 8,
     max_rows_per_rg: int = 50000,
+    max_samples_per_rg_domain: int = 100000,
+    max_samples_per_domain: int = 5000000,
 ) -> Dict[str, np.ndarray]:
     """T38 · Scan a sample of train RGs to gather per-domain time_diff data.
 
@@ -218,6 +221,8 @@ def _scan_per_domain_time_diffs(
         sample_rgs: Number of Row Groups to scan (default 8 ≈ 6.4M time_diff
             samples per domain at typical RG size).
         max_rows_per_rg: Cap rows per RG to bound scan time.
+        max_samples_per_rg_domain: Reservoir cap per Row Group and domain.
+        max_samples_per_domain: Total reservoir cap per domain.
 
     Returns:
         Dict[domain, 1D np.ndarray of int64 time_diff seconds]. Domains
@@ -226,9 +231,16 @@ def _scan_per_domain_time_diffs(
     import pyarrow.parquet as pq  # local import: scan-only helper.
     if not train_rgs:
         raise ValueError("_scan_per_domain_time_diffs: train_rgs is empty")
-    sample = train_rgs[:max(1, sample_rgs)]
+    n_sample = max(1, min(int(sample_rgs), len(train_rgs)))
+    if n_sample >= len(train_rgs):
+        sample = train_rgs
+    else:
+        sample_idx = np.linspace(
+            0, len(train_rgs) - 1, num=n_sample, dtype=np.int64)
+        sample = [train_rgs[int(i)] for i in sample_idx]
     pf_cache: Dict[str, "pq.ParquetFile"] = {}
     seq_domains = ['seq_a', 'seq_b', 'seq_c', 'seq_d']
+    rng = np.random.default_rng(20260518)
 
     # T38 fix v2 (5/17 EXP-066) · Resolve real timestamp column names from
     # schema.json. Platform parquet uses ``{prefix}_{ts_fid}`` (e.g.
@@ -264,7 +276,10 @@ def _scan_per_domain_time_diffs(
         domain_to_ts_col = {d: f"{d}_timestamp" for d in seq_domains}
 
     diffs: Dict[str, List[np.ndarray]] = {d: [] for d in seq_domains}
+    diff_counts: Dict[str, int] = {d: 0 for d in seq_domains}
     for parquet_path, rg_idx, _n_rows in sample:
+        if all(diff_counts[d] >= max_samples_per_domain for d in seq_domains):
+            break
         pf = pf_cache.get(parquet_path)
         if pf is None:
             pf = pq.ParquetFile(parquet_path)
@@ -289,6 +304,8 @@ def _scan_per_domain_time_diffs(
             ts_col_name = domain_to_ts_col.get(d)
             if ts_col_name is None or ts_col_name not in cols_to_read:
                 continue
+            if diff_counts[d] >= max_samples_per_domain:
+                continue
             seq_ts_col = table.column(ts_col_name)
             # T38 fix v2 (5/17): Arrow column may be ChunkedArray (no
             # .offsets) or ListArray (has .offsets). Combine to a single
@@ -299,6 +316,7 @@ def _scan_per_domain_time_diffs(
                 seq_ts_col = seq_ts_col.combine_chunks()
             seq_offs = seq_ts_col.offsets.to_numpy()
             seq_vals = seq_ts_col.values.to_numpy().astype(np.int64)
+            rg_parts: List[np.ndarray] = []
             for i in range(table.num_rows):
                 s = int(seq_offs[i])
                 e = int(seq_offs[i + 1])
@@ -307,7 +325,22 @@ def _scan_per_domain_time_diffs(
                 td = ts[i] - seq_vals[s:e]
                 td = td[td > 0]
                 if td.size > 0:
-                    diffs[d].append(td)
+                    rg_parts.append(td)
+            if not rg_parts:
+                continue
+            rg_td = np.concatenate(rg_parts)
+            if rg_td.size > max_samples_per_rg_domain:
+                take = rng.choice(
+                    rg_td.size, size=max_samples_per_rg_domain, replace=False)
+                rg_td = rg_td[take]
+            remaining = max_samples_per_domain - diff_counts[d]
+            if remaining <= 0:
+                continue
+            if rg_td.size > remaining:
+                take = rng.choice(rg_td.size, size=remaining, replace=False)
+                rg_td = rg_td[take]
+            diffs[d].append(rg_td)
+            diff_counts[d] += int(rg_td.size)
     out: Dict[str, np.ndarray] = {}
     for d in seq_domains:
         if diffs[d]:
@@ -372,6 +405,12 @@ TIME_OF_DAY_FEATURE_FID = 900004  # impression hour/dow/weekend (5 dims)
 TIME_OF_DAY_FEATURE_DIM = 5       # hour_sin, hour_cos, dow_sin, dow_cos, is_weekend
 HOUR_ONLY_FEATURE_FID = 900005
 HOUR_ONLY_FEATURE_DIM = 2        # hour_sin, hour_cos only (no DOW/weekend)
+BEIJING_TIME_FEATURE_FID = 900007
+BEIJING_TIME_FEATURE_DIM = 10    # bj hour/dow/weekend + test-window indicators
+BEIJING_TIME_V2_FEATURE_FID = 900008
+BEIJING_TIME_V2_FEATURE_DIM = 14  # bj date distance + daypart distribution flags
+BEIJING_TARGET_DATE = "2026-03-04"
+BEIJING_FESTIVAL_DATE = "2026-03-03"
 
 # T31 · is-missing bitmap synthetic feature. One float per selected user_int /
 # item_int fid carrying 1.0 when the raw parquet cell was null / <=0, else 0.0.
@@ -547,6 +586,8 @@ class PCVRParquetDataset(IterableDataset):
         negative_maturity_end_ts: Optional[int] = None,
         dense_log1p_fids: frozenset[int] | None = None,
         enable_time_of_day_features: bool = False,
+        enable_beijing_time_features: bool = False,
+        enable_beijing_time_v2_features: bool = False,
         temporal_weight_alpha: float = 0.0,
         temporal_weight_ts_min: Optional[int] = None,
         temporal_weight_ts_max: Optional[int] = None,
@@ -560,6 +601,14 @@ class PCVRParquetDataset(IterableDataset):
         hour_weight_min: Optional[int] = None,
         hour_weight_max: Optional[int] = None,
         hour_weight_multiplier: Optional[float] = None,
+        # 5/18 M83 · Exact Beijing day+hour sample reweight. Unlike
+        # hour_weight_* this can target the observed same-day overlap window
+        # and uses a global normalizer fitted before training.
+        target_day_hour_weight_date: str = "",
+        target_day_hour_weight_min: Optional[int] = None,
+        target_day_hour_weight_max: Optional[int] = None,
+        target_day_hour_weight_multiplier: Optional[float] = None,
+        target_day_hour_weight_norm: Optional[float] = None,
         enable_hour_only_features: bool = False,
         id_mask_prob: float = 0.0,
         id_mask_seq_domains: Optional[List[str]] = None,
@@ -635,6 +684,19 @@ class PCVRParquetDataset(IterableDataset):
                 circular encoding), and ``is_weekend`` (1 if Sat/Sun else 0).
                 These capture diurnal and weekly periodicity in user purchase
                 intent that is absent from the existing sequence features.
+            enable_beijing_time_features: if True, append 10 synthetic dense
+                features derived from Beijing local time (UTC+8): first/second
+                harmonic hour encodings, day-of-week encoding, weekend/workday
+                flags, test-window hour 09-14 flag, and early-morning hour
+                06-08 flag. This is separate from
+                ``enable_time_of_day_features`` so experiments can either
+                replace or append the older UTC time features.
+            enable_beijing_time_v2_features: if True, append 14 additional
+                Beijing-local distribution features: distance to the observed
+                test date, festival / post-festival date flags, distance to the
+                09-14 test window, coarse daypart one-hot features, and a
+                target-day test-window indicator. This is feature-only; it does
+                not reweight or filter samples.
             id_mask_prob: token-level random mask probability applied on the
                 training path only. Counteracts the "dev AUC up / LB AUC
                 down" symptom that a community 0.85+ player attributed to
@@ -765,6 +827,20 @@ class PCVRParquetDataset(IterableDataset):
             else dense_log1p_fids
         )
         self.enable_time_of_day_features = enable_time_of_day_features
+        self.enable_beijing_time_features = enable_beijing_time_features
+        self.enable_beijing_time_v2_features = enable_beijing_time_v2_features
+        self._beijing_time_v2_target_day = int(
+            datetime.strptime(BEIJING_TARGET_DATE, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+            // 86400
+        )
+        self._beijing_time_v2_festival_day = int(
+            datetime.strptime(BEIJING_FESTIVAL_DATE, "%Y-%m-%d")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+            // 86400
+        )
         self.temporal_weight_alpha = float(temporal_weight_alpha)
         self.temporal_weight_ts_min = temporal_weight_ts_min
         self.temporal_weight_ts_max = temporal_weight_ts_max
@@ -774,6 +850,25 @@ class PCVRParquetDataset(IterableDataset):
         self.hour_weight_multiplier = (
             float(hour_weight_multiplier)
             if hour_weight_multiplier is not None else None
+        )
+        self.target_day_hour_weight_day: Optional[int] = None
+        if target_day_hour_weight_date:
+            self.target_day_hour_weight_day = int(
+                datetime.strptime(target_day_hour_weight_date, "%Y-%m-%d")
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+                // 86400
+            )
+        self.target_day_hour_weight_min = target_day_hour_weight_min
+        self.target_day_hour_weight_max = target_day_hour_weight_max
+        self.target_day_hour_weight_multiplier = (
+            float(target_day_hour_weight_multiplier)
+            if target_day_hour_weight_multiplier is not None else None
+        )
+        self.target_day_hour_weight_norm = (
+            float(target_day_hour_weight_norm)
+            if target_day_hour_weight_norm is not None
+            else None
         )
         self.enable_hour_only_features = enable_hour_only_features
         # P1 Item-ID Random Mask (community 0.85+ hint 2026-05-04): gate the
@@ -984,6 +1079,8 @@ class PCVRParquetDataset(IterableDataset):
             f"count_features={enable_count_features}, "
             f"seq_stats_features={enable_seq_stats_features}, "
             f"time_of_day_features={enable_time_of_day_features}, "
+            f"beijing_time_features={enable_beijing_time_features}, "
+            f"beijing_time_v2_features={enable_beijing_time_v2_features}, "
             f"history_cvr_features={enable_history_cvr_features}, "
             f"history_cvr_time_mode={history_cvr_time_mode}, "
             f"mature_negative_weighting={enable_mature_negative_weighting}, "
@@ -1023,6 +1120,11 @@ class PCVRParquetDataset(IterableDataset):
             self.user_dense_schema.add(SEQ_STATS_FEATURE_FID, 2 * len(raw['seq']))
         if self.enable_time_of_day_features:
             self.user_dense_schema.add(TIME_OF_DAY_FEATURE_FID, TIME_OF_DAY_FEATURE_DIM)
+        if self.enable_beijing_time_features:
+            self.user_dense_schema.add(BEIJING_TIME_FEATURE_FID, BEIJING_TIME_FEATURE_DIM)
+        if self.enable_beijing_time_v2_features:
+            self.user_dense_schema.add(
+                BEIJING_TIME_V2_FEATURE_FID, BEIJING_TIME_V2_FEATURE_DIM)
         if self.enable_hour_only_features:
             self.user_dense_schema.add(HOUR_ONLY_FEATURE_FID, HOUR_ONLY_FEATURE_DIM)
         self._history_item_offsets: List[Tuple[int, int]] = []
@@ -2034,6 +2136,30 @@ class PCVRParquetDataset(IterableDataset):
                 sample_weight = hw
             else:
                 sample_weight = sample_weight * hw
+        # 5/18 M83 · Exact same-day overlap reweight. This targets a Beijing
+        # date + hour range (e.g. 2026-03-04 08~09) and divides by a global
+        # train-set normalizer instead of the current batch mean.
+        if (self.is_training
+                and self.target_day_hour_weight_day is not None
+                and self.target_day_hour_weight_min is not None
+                and self.target_day_hour_weight_max is not None
+                and self.target_day_hour_weight_multiplier is not None):
+            bj_ts = timestamps + 8 * 3600
+            bj_day = bj_ts // 86400
+            bj_hour = (bj_ts // 3600) % 24
+            in_target_window = (
+                (bj_day == self.target_day_hour_weight_day)
+                & (bj_hour >= self.target_day_hour_weight_min)
+                & (bj_hour <= self.target_day_hour_weight_max)
+            )
+            dhw = np.ones(B, dtype=np.float32)
+            dhw[in_target_window] = self.target_day_hour_weight_multiplier
+            norm = self.target_day_hour_weight_norm or float(dhw.mean())
+            dhw /= max(float(norm), 1e-6)
+            if sample_weight is None:
+                sample_weight = dhw
+            else:
+                sample_weight = sample_weight * dhw
         user_ids = batch.column(self._col_idx['user_id']).to_pylist()
 
         # ---- user_int: write into pre-allocated buffer ----
@@ -2349,6 +2475,62 @@ class PCVRParquetDataset(IterableDataset):
             dense_offset += TIME_OF_DAY_FEATURE_DIM
             result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
 
+        if self.enable_beijing_time_features:
+            # Beijing-local DOW/weekend is not equivalent to UTC near midnight.
+            bj_ts = timestamps.astype(np.float64) + 8.0 * 3600.0
+            bj_hours = ((bj_ts // 3600) % 24).astype(np.float32)
+            bj_day_idx = ((bj_ts // 86400).astype(np.int64) + 3) % 7
+            bj_dow = bj_day_idx.astype(np.float32)
+            bj_weekend = (bj_dow >= 5).astype(np.float32)
+            bj = user_dense[:, dense_offset:dense_offset + BEIJING_TIME_FEATURE_DIM]
+            bj[:, 0] = np.sin(2.0 * np.pi * bj_hours / 24.0)
+            bj[:, 1] = np.cos(2.0 * np.pi * bj_hours / 24.0)
+            bj[:, 2] = np.sin(2.0 * np.pi * bj_hours / 12.0)
+            bj[:, 3] = np.cos(2.0 * np.pi * bj_hours / 12.0)
+            bj[:, 4] = np.sin(2.0 * np.pi * bj_dow / 7.0)
+            bj[:, 5] = np.cos(2.0 * np.pi * bj_dow / 7.0)
+            bj[:, 6] = bj_weekend
+            bj[:, 7] = 1.0 - bj_weekend
+            bj[:, 8] = ((bj_hours >= 9) & (bj_hours <= 14)).astype(np.float32)
+            bj[:, 9] = ((bj_hours >= 6) & (bj_hours < 9)).astype(np.float32)
+            dense_offset += BEIJING_TIME_FEATURE_DIM
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
+        if self.enable_beijing_time_v2_features:
+            bj_ts = timestamps.astype(np.float64) + 8.0 * 3600.0
+            bj_hours = ((bj_ts // 3600) % 24).astype(np.float32)
+            bj_day = (bj_ts // 86400).astype(np.int64)
+            days_to_target = (
+                self._beijing_time_v2_target_day - bj_day
+            ).astype(np.float32)
+            clipped_days = np.clip(days_to_target, -7.0, 7.0)
+            hour_to_window = np.zeros_like(bj_hours, dtype=np.float32)
+            before_window = bj_hours < 9
+            after_window = bj_hours > 14
+            hour_to_window[before_window] = 9.0 - bj_hours[before_window]
+            hour_to_window[after_window] = bj_hours[after_window] - 14.0
+            hour_center_delta = ((bj_hours - 11.5 + 12.0) % 24.0) - 12.0
+
+            v2 = user_dense[
+                :, dense_offset:dense_offset + BEIJING_TIME_V2_FEATURE_DIM
+            ]
+            v2[:, 0] = clipped_days / 7.0
+            v2[:, 1] = np.abs(clipped_days) / 7.0
+            v2[:, 2] = (bj_day == self._beijing_time_v2_festival_day).astype(np.float32)
+            v2[:, 3] = (bj_day == self._beijing_time_v2_target_day).astype(np.float32)
+            v2[:, 4] = (bj_day < self._beijing_time_v2_festival_day).astype(np.float32)
+            v2[:, 5] = (bj_day > self._beijing_time_v2_target_day).astype(np.float32)
+            v2[:, 6] = np.clip(hour_to_window, 0.0, 12.0) / 12.0
+            v2[:, 7] = hour_center_delta / 12.0
+            v2[:, 8] = (bj_hours < 6).astype(np.float32)
+            v2[:, 9] = ((bj_hours >= 6) & (bj_hours < 9)).astype(np.float32)
+            v2[:, 10] = ((bj_hours >= 9) & (bj_hours <= 14)).astype(np.float32)
+            v2[:, 11] = ((bj_hours > 14) & (bj_hours <= 20)).astype(np.float32)
+            v2[:, 12] = (bj_hours > 20).astype(np.float32)
+            v2[:, 13] = v2[:, 3] * v2[:, 10]
+            dense_offset += BEIJING_TIME_V2_FEATURE_DIM
+            result['user_dense_feats'] = torch.from_numpy(user_dense.copy())
+
         if self.enable_hour_only_features:
             # Hour-of-day only (2 features): captures diurnal periodicity
             # without day-of-week bias. DOW is excluded because training data
@@ -2614,6 +2796,50 @@ def _row_groups_ts_range(
     if not ranges:
         return None
     return min(r[0] for r in ranges), max(r[1] for r in ranges)
+
+
+def _beijing_date_hour_weight_fraction(
+    row_groups: List[Tuple[str, int, int]],
+    date: str,
+    hour_min: int,
+    hour_max: int,
+    timestamp_min: Optional[int] = None,
+    timestamp_max: Optional[int] = None,
+) -> Tuple[int, int, float]:
+    target_day = int(
+        datetime.strptime(date, "%Y-%m-%d")
+        .replace(tzinfo=timezone.utc)
+        .timestamp()
+        // 86400
+    )
+    total = 0
+    matched = 0
+    pf_cache: Dict[str, "pq.ParquetFile"] = {}
+    for file_path, rg_idx, _ in row_groups:
+        pf = pf_cache.get(file_path)
+        if pf is None:
+            pf = pq.ParquetFile(file_path)
+            pf_cache[file_path] = pf
+        ts = pf.read_row_group(rg_idx, columns=['timestamp']).column(
+            'timestamp').to_numpy().astype(np.int64)
+        if timestamp_min is not None:
+            ts = ts[ts >= int(timestamp_min)]
+        if timestamp_max is not None:
+            ts = ts[ts < int(timestamp_max)]
+        if ts.size == 0:
+            continue
+        bj_ts = ts + 8 * 3600
+        bj_day = bj_ts // 86400
+        bj_hour = (bj_ts // 3600) % 24
+        mask = (
+            (bj_day == target_day)
+            & (bj_hour >= int(hour_min))
+            & (bj_hour <= int(hour_max))
+        )
+        total += int(ts.size)
+        matched += int(mask.sum())
+    frac = matched / total if total else 0.0
+    return total, matched, frac
 
 
 def _parse_history_cvr_item_fids(
@@ -2926,6 +3152,13 @@ def get_pcvr_data(
     hour_weight_min: Optional[int] = None,
     hour_weight_max: Optional[int] = None,
     hour_weight_multiplier: Optional[float] = None,
+    # 5/18 M83 · exact Beijing date+hour reweight with global normalizer.
+    target_day_hour_weight_date: str = "",
+    target_day_hour_weight_min: Optional[int] = None,
+    target_day_hour_weight_max: Optional[int] = None,
+    target_day_hour_weight_multiplier: Optional[float] = None,
+    enable_beijing_time_features: bool = False,
+    enable_beijing_time_v2_features: bool = False,
     enable_hour_only_features: bool = False,
     holdout_ratio: float = 0.0,
     valid_gap_ratio: float = 0.0,
@@ -3487,6 +3720,36 @@ def get_pcvr_data(
                 f"[temporal_weight] alpha={temporal_weight_alpha}, "
                 f"ts_range=[{train_ts_range[0]}, {train_ts_range[1]}]")
 
+    target_day_hour_weight_norm = None
+    if (target_day_hour_weight_date
+            and target_day_hour_weight_min is not None
+            and target_day_hour_weight_max is not None
+            and target_day_hour_weight_multiplier is not None
+            and target_day_hour_weight_multiplier > 0):
+        dh_total, dh_match, dh_frac = _beijing_date_hour_weight_fraction(
+            train_rgs,
+            target_day_hour_weight_date,
+            int(target_day_hour_weight_min),
+            int(target_day_hour_weight_max),
+            timestamp_min=train_timestamp_min,
+            timestamp_max=train_timestamp_max,
+        )
+        target_day_hour_weight_norm = (
+            1.0 + (float(target_day_hour_weight_multiplier) - 1.0) * dh_frac
+        )
+        logging.info(
+            "[target_day_hour_weight] date=%s hour=[%s,%s] multiplier=%.3f "
+            "matched=%d/%d frac=%.6f global_norm=%.6f",
+            target_day_hour_weight_date,
+            target_day_hour_weight_min,
+            target_day_hour_weight_max,
+            float(target_day_hour_weight_multiplier),
+            dh_match,
+            dh_total,
+            dh_frac,
+            target_day_hour_weight_norm,
+        )
+
     if enable_history_cvr_features:
         if not history_cvr_cache_path:
             raise ValueError(
@@ -3528,6 +3791,12 @@ def get_pcvr_data(
                 f"p99={int(np.quantile(diffs[diffs > 0], 0.99)) if (diffs > 0).any() else 0}s "
                 f"first_5_boundaries={fitted[:5].tolist()} "
                 f"last_5_boundaries={fitted[-5:].tolist()}")
+        if sum(int(diffs.size) for diffs in per_domain_diffs.values()) == 0:
+            raise ValueError(
+                "[T38] enable_per_domain_buckets=True but all domains got "
+                "n_samples=0. Refusing to silently fall back to default "
+                "bucket boundaries; check uploaded dataset.py/schema_path and "
+                "look for '[T38] resolved timestamp columns from schema'.")
         bucket_boundaries = fitted_boundaries
     elif enable_per_domain_buckets and bucket_boundaries is not None:
         logging.warning(
@@ -3560,6 +3829,8 @@ def get_pcvr_data(
         negative_maturity_end_ts=negative_maturity_end_ts,
         dense_log1p_fids=dense_log1p_fids,
         enable_time_of_day_features=enable_time_of_day_features,
+        enable_beijing_time_features=enable_beijing_time_features,
+        enable_beijing_time_v2_features=enable_beijing_time_v2_features,
         temporal_weight_alpha=temporal_weight_alpha,
         temporal_weight_ts_min=int(train_ts_range[0]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
         temporal_weight_ts_max=int(train_ts_range[1]) if temporal_weight_alpha > 0.0 and train_ts_range else None,
@@ -3567,6 +3838,11 @@ def get_pcvr_data(
         hour_weight_min=hour_weight_min,
         hour_weight_max=hour_weight_max,
         hour_weight_multiplier=hour_weight_multiplier,
+        target_day_hour_weight_date=target_day_hour_weight_date,
+        target_day_hour_weight_min=target_day_hour_weight_min,
+        target_day_hour_weight_max=target_day_hour_weight_max,
+        target_day_hour_weight_multiplier=target_day_hour_weight_multiplier,
+        target_day_hour_weight_norm=target_day_hour_weight_norm,
         enable_hour_only_features=enable_hour_only_features,
         id_mask_prob=id_mask_prob,
         id_mask_seq_domains=id_mask_seq_domains,
@@ -3623,6 +3899,8 @@ def get_pcvr_data(
         history_cvr_prior_strength=history_cvr_prior_strength,
         dense_log1p_fids=dense_log1p_fids,
         enable_time_of_day_features=enable_time_of_day_features,
+        enable_beijing_time_features=enable_beijing_time_features,
+        enable_beijing_time_v2_features=enable_beijing_time_v2_features,
         enable_hour_only_features=enable_hour_only_features,
         disable_seq_fids=disable_seq_fids,
         bucket_boundaries=bucket_boundaries,
@@ -3661,6 +3939,8 @@ def get_pcvr_data(
             history_cvr_prior_strength=history_cvr_prior_strength,
             dense_log1p_fids=dense_log1p_fids,
             enable_time_of_day_features=enable_time_of_day_features,
+            enable_beijing_time_features=enable_beijing_time_features,
+            enable_beijing_time_v2_features=enable_beijing_time_v2_features,
             enable_hour_only_features=enable_hour_only_features,
             disable_seq_fids=disable_seq_fids,
             bucket_boundaries=bucket_boundaries,

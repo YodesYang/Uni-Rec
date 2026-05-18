@@ -251,6 +251,8 @@ class _TestEdaState:
         cls,
         dataset: PCVRParquetDataset,
         seq_item_id_min_vocab: int = 1_000_000,
+        seq_item_id_top_k: int = 50_000,
+        id_counter_cap: int = 200_000,
     ) -> "_TestEdaState":
         """Build accumulator using dataset's read-only attrs (no shared state).
 
@@ -280,6 +282,8 @@ class _TestEdaState:
             seq_domains=list(dataset.seq_domains),
             seq_maxlen={d: dataset._seq_maxlen.get(d, 0) for d in dataset.seq_domains},
             seq_item_fid_plan=seq_item_fid_plan,
+            seq_item_id_top_k=seq_item_id_top_k,
+            id_counter_cap=id_counter_cap,
         )
 
     def _reservoir_extend(self, entry: Dict[str, Any], new_values, max_size: int) -> None:
@@ -513,8 +517,10 @@ class _TestEdaState:
         user_id_set = sorted(self.user_id_counter.keys())[:self.id_counter_cap]
 
         return {
+            'eda_format': 'test_eda_full_v1',
             'total_samples': self.total_samples,
             'user_id_distinct': len(self.user_id_counter),
+            'user_id_counter_cap': self.id_counter_cap,
             'user_id_freq_hist_top20': user_id_freq_hist,
             'user_id_set_capped': user_id_set,  # F3 cross-reference
             'user_int_missing': user_int_missing_summary,
@@ -525,6 +531,7 @@ class _TestEdaState:
             'item_int_value': item_int_value_summary,
             # A2 cross-reference fields
             'seq_item_id_top_k': seq_item_id_summary,
+            'seq_item_id_top_k_limit': self.seq_item_id_top_k,
             'seq_item_id_distinct_per_fid': seq_item_id_distinct,
             'seq_item_fid_plan': {
                 d: [[int(s), int(f)] for s, f in plan]
@@ -580,6 +587,147 @@ def _load_state_dict(path: str, device: torch.device) -> Dict[str, torch.Tensor]
     return sd
 
 
+def _get_int_env(name: str, default: int, min_value: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.warning(
+            f"[test-eda] invalid {name}={raw!r}; using default {default}")
+        return default
+    if value < min_value:
+        logging.warning(
+            f"[test-eda] {name}={value} < {min_value}; using default {default}")
+        return default
+    return value
+
+
+def _get_eda_blob_mode() -> str:
+    mode = os.environ.get("EDA_BLOB_MODE", "compact").strip().lower()
+    if mode in {"compact", "small", "summary"}:
+        return "compact"
+    if mode in {"full", "raw"}:
+        return "full"
+    logging.warning(
+        f"[test-eda] unknown EDA_BLOB_MODE={mode!r}; using compact")
+    return "compact"
+
+
+def _compact_test_eda_summary(
+    summary: Dict[str, Any],
+    seq_item_top_k_per_fid: int,
+) -> Dict[str, Any]:
+    """Drop fields that make platform Logs UI tail-truncate the EDA blob."""
+    seq_item_top = summary.get("seq_item_id_top_k") or {}
+    compact_seq_item_top = {
+        key: values[:seq_item_top_k_per_fid]
+        for key, values in seq_item_top.items()
+    }
+    return {
+        "eda_format": "test_eda_compact_v1",
+        "total_samples": summary.get("total_samples"),
+        "user_id": {
+            "distinct_capped": summary.get("user_id_distinct"),
+            "counter_cap": summary.get("user_id_counter_cap"),
+            "freq_hist_top20": summary.get("user_id_freq_hist_top20", {}),
+            "note": "user_id_set_capped omitted in compact mode",
+        },
+        "abs_timestamp": summary.get("abs_timestamp"),
+        "seq_length": summary.get("seq_length", {}),
+        "user_int_missing": summary.get("user_int_missing", {}),
+        "item_int_missing": summary.get("item_int_missing", {}),
+        "user_int_value": summary.get("user_int_value", {}),
+        "item_int_value": summary.get("item_int_value", {}),
+        "seq_item_fid_plan": summary.get("seq_item_fid_plan", {}),
+        "seq_item_id_distinct_per_fid": summary.get(
+            "seq_item_id_distinct_per_fid", {}),
+        "seq_item_id_top_k_limit": min(
+            int(summary.get("seq_item_id_top_k_limit", seq_item_top_k_per_fid)),
+            seq_item_top_k_per_fid,
+        ),
+        "seq_item_id_top_k": compact_seq_item_top,
+    }
+
+
+def _fmt_ts_bj(ts_value: Any) -> str:
+    if ts_value is None:
+        return "NA"
+    try:
+        from datetime import datetime, timezone, timedelta
+        tz_bj = timezone(timedelta(hours=8))
+        return datetime.fromtimestamp(float(ts_value), tz=timezone.utc).astimezone(
+            tz_bj).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:  # pylint: disable=broad-except
+        return str(ts_value)
+
+
+def _print_test_eda_compact_summary(summary: Dict[str, Any], mode: str) -> None:
+    abs_ts = summary.get("abs_timestamp") or {}
+    seq_length = summary.get("seq_length") or {}
+    seq_item = summary.get("seq_item_id_top_k") or {}
+    print()
+    print("#" * 72)
+    print("## TEST EDA COMPACT SUMMARY")
+    print(f"# mode={mode} total_samples={summary.get('total_samples')}")
+    print(
+        "# user_id_distinct_capped="
+        f"{summary.get('user_id', {}).get('distinct_capped', summary.get('user_id_distinct'))} "
+        "cap="
+        f"{summary.get('user_id', {}).get('counter_cap', summary.get('user_id_counter_cap'))}"
+    )
+    if abs_ts:
+        print(
+            "# abs_timestamp "
+            f"min={abs_ts.get('min')} p50={abs_ts.get('p50')} max={abs_ts.get('max')} "
+            f"bj_min={_fmt_ts_bj(abs_ts.get('min'))} "
+            f"bj_max={_fmt_ts_bj(abs_ts.get('max'))}"
+        )
+    for domain, stats in seq_length.items():
+        if not stats:
+            continue
+        print(
+            f"# seq_length {domain}: "
+            f"p50={stats.get('p50')} p95={stats.get('p95')} "
+            f"max={stats.get('max')} n={stats.get('n')}"
+        )
+    print(
+        "# seq_item_id_top_k "
+        f"fids={len(seq_item)} limit={summary.get('seq_item_id_top_k_limit')}"
+    )
+    print("#" * 72)
+
+
+def _emit_summary_blob(summary: Dict[str, Any], mode: str) -> None:
+    import base64
+    import gzip
+    import sys
+
+    try:
+        payload = json.dumps(summary, sort_keys=True).encode("utf-8")
+        gz = gzip.compress(payload, compresslevel=9)
+        b64 = base64.b64encode(gz).decode("ascii")
+    except Exception as exc:  # pylint: disable=broad-except
+        logging.warning(f"[test-eda] blob encode failed: {exc!r}")
+        return
+
+    chunk_size = 120
+    chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)]
+
+    sys.stdout.flush()
+    _print_test_eda_compact_summary(summary, mode)
+    print()
+    print("<<<EDA_BLOB_START>>>")
+    for ch in chunks:
+        print(ch)
+    print("<<<EDA_BLOB_END>>>")
+    sys.stdout.flush()
+    logging.info(
+        f"[test-eda] blob emitted: mode={mode}, {len(b64)} chars, "
+        f"{len(chunks)} chunks, raw {len(payload)} bytes")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -613,6 +761,13 @@ def main() -> None:
     # no num_workers=0 forcing. Wall-time impact ~+1-3% (counter+reservoir
     # update on already-loaded batch tensors).
     enable_test_eda = os.environ.get("EDA_BLOB", "1") != "0"
+    eda_blob_mode = _get_eda_blob_mode()
+    eda_seq_item_top_k = _get_int_env(
+        "EDA_SEQ_ITEM_TOP_K",
+        200 if eda_blob_mode == "compact" else 50_000,
+        min_value=1,
+    )
+    eda_user_id_cap = _get_int_env("EDA_USER_ID_CAP", 200_000, min_value=1)
     eda_state: Optional[_TestEdaState] = None
     # eda_state is initialized AFTER dataset is built (needs dataset's
     # read-only schema attrs). See after PCVRParquetDataset(...) call below.
@@ -635,6 +790,9 @@ def main() -> None:
         history_cvr_available_lag_sec=int(cfg.get("history_cvr_available_lag_sec", 0)),
         history_cvr_prior_strength=float(cfg.get("history_cvr_prior_strength", 20.0)),
         enable_time_of_day_features=bool(cfg.get("enable_time_of_day_features", False)),
+        enable_beijing_time_features=bool(cfg.get("enable_beijing_time_features", False)),
+        enable_beijing_time_v2_features=bool(
+            cfg.get("enable_beijing_time_v2_features", False)),
         enable_hour_only_features=bool(cfg.get("enable_hour_only_features", False)),
         disable_seq_fids=_parse_disable_seq_fids(cfg.get("disable_seq_fids", "")),
         bucket_boundaries=_resolve_bucket_boundaries(cfg),
@@ -645,10 +803,16 @@ def main() -> None:
     )
 
     if enable_test_eda:
-        eda_state = _TestEdaState.from_dataset(dataset)
+        eda_state = _TestEdaState.from_dataset(
+            dataset,
+            seq_item_id_top_k=eda_seq_item_top_k,
+            id_counter_cap=eda_user_id_cap,
+        )
         logging.info(
-            "[test-eda] EDA_BLOB=1 (default) · main-process accumulator · "
-            "compatible with num_workers>0"
+            "[test-eda] EDA_BLOB=1 (default) · mode=%s · "
+            "seq_item_id_top_k=%d · user_id_cap=%d · "
+            "main-process accumulator · compatible with num_workers>0",
+            eda_blob_mode, eda_seq_item_top_k, eda_user_id_cap,
         )
 
     loader_kwargs: Dict[str, Any] = {}
@@ -684,7 +848,6 @@ def main() -> None:
     ) -> Optional[List[int]]:
         if raw_value is None:
             return None
-        # Parse raw value → list of raw fids
         if isinstance(raw_value, str):
             try:
                 raw_fids = [int(x.strip()) for x in raw_value.split(',') if x.strip()]
@@ -692,35 +855,51 @@ def main() -> None:
                 raise ValueError(
                     f"dcn_cross_{side}_fids '{raw_value}' parse error: {e}"
                 ) from e
+            fid_to_idx = {entry[0]: i for i, entry in enumerate(schema_entries)}
+            unknown = [f for f in raw_fids if f not in fid_to_idx]
+            if unknown:
+                raise ValueError(
+                    f"dcn_cross_{side}_fids contains unknown fids "
+                    f"{unknown} (available: {sorted(fid_to_idx.keys())})"
+                )
+            return [fid_to_idx[f] for f in raw_fids]
         elif isinstance(raw_value, list):
-            raw_fids = [int(x) for x in raw_value]
+            values = [int(x) for x in raw_value]
         else:
             raise ValueError(
                 f"dcn_cross_{side}_fids type {type(raw_value).__name__} "
                 f"unexpected · expected str or list"
             )
-        # Build raw_fid → list_index map from schema entries
-        # entries: List[Tuple[fid, offset, length]]
+        # Newer train.py writes list indices, while older configs may contain
+        # raw fid strings. When a JSON list is present, prefer index semantics
+        # because it mirrors train.py's train_config override and avoids
+        # re-mapping indices like [0, 5] as raw fid numbers during evaluation.
+        if all(0 <= v < len(schema_entries) for v in values):
+            return values
         fid_to_idx = {entry[0]: i for i, entry in enumerate(schema_entries)}
-        # Resolve · raise if any raw fid not in schema
-        unknown = [f for f in raw_fids if f not in fid_to_idx]
-        if unknown:
-            raise ValueError(
-                f"dcn_cross_{side}_fids contains unknown fids "
-                f"{unknown} (available: {sorted(fid_to_idx.keys())})"
-            )
-        return [fid_to_idx[f] for f in raw_fids]
+        if all(v in fid_to_idx for v in values):
+            return [fid_to_idx[v] for v in values]
+        raise ValueError(
+            f"dcn_cross_{side}_fids contains values {values} that are "
+            f"neither valid list indices [0,{len(schema_entries) - 1}] nor "
+            f"known raw fids (available: {sorted(fid_to_idx.keys())})"
+        )
 
-    dcn_user_fid_indices = _resolve_dcn_fids(
-        cfg.get("dcn_cross_user_fids"),
-        dataset.user_int_schema.entries,
-        "user",
-    )
-    dcn_item_fid_indices = _resolve_dcn_fids(
-        cfg.get("dcn_cross_item_fids"),
-        dataset.item_int_schema.entries,
-        "item",
-    )
+    enable_dcn_cross = bool(cfg.get("enable_dcn_cross", False))
+    if enable_dcn_cross:
+        dcn_user_fid_indices = _resolve_dcn_fids(
+            cfg.get("dcn_cross_user_fids"),
+            dataset.user_int_schema.entries,
+            "user",
+        )
+        dcn_item_fid_indices = _resolve_dcn_fids(
+            cfg.get("dcn_cross_item_fids"),
+            dataset.item_int_schema.entries,
+            "item",
+        )
+    else:
+        dcn_user_fid_indices = None
+        dcn_item_fid_indices = None
 
     model_args = {
         "user_int_feature_specs": _build_feature_specs(
@@ -774,7 +953,7 @@ def main() -> None:
         "din_integrated_alpha_init": float(cfg.get("din_integrated_alpha_init", 0.1)),
         "enable_nlir_gating": bool(cfg.get("enable_nlir_gating", False)),
         "enable_fafe": bool(cfg.get("enable_fafe", False)),
-        "enable_dcn_cross": bool(cfg.get("enable_dcn_cross", False)),
+        "enable_dcn_cross": enable_dcn_cross,
         # T34 · DCN cross list indices (resolved from raw fids by
         # _resolve_dcn_fids above · no longer trust cfg raw value).
         "dcn_cross_user_fids": dcn_user_fid_indices,
@@ -833,10 +1012,13 @@ def main() -> None:
         f"Saved {len(predictions)} predictions from {seen_rows} rows to {out_path}")
 
     if eda_state is not None:
-        _emit_test_eda_blob_from_state(eda_state)
+        _emit_test_eda_blob_from_state(eda_state, mode=eda_blob_mode)
 
 
-def _emit_test_eda_blob_from_state(state: "_TestEdaState") -> None:
+def _emit_test_eda_blob_from_state(
+    state: "_TestEdaState",
+    mode: str = "compact",
+) -> None:
     """Emit base64+gzip JSON blob of test-set EDA stats to stdout.
 
     Placed at the very END of stdout (after predictions are saved and after
@@ -847,9 +1029,6 @@ def _emit_test_eda_blob_from_state(state: "_TestEdaState") -> None:
     Wraps in try/except so any EDA failure NEVER fails the overall
     evaluation (predictions.json is the contract; EDA is bonus).
     """
-    import base64
-    import gzip
-    import sys
     try:
         summary = state.finalize()
     except Exception as exc:  # pylint: disable=broad-except
@@ -858,34 +1037,17 @@ def _emit_test_eda_blob_from_state(state: "_TestEdaState") -> None:
     if summary is None or not summary.get('total_samples', 0):
         logging.warning("[test-eda] empty EDA state, skipping blob")
         return
-    try:
-        payload = json.dumps(summary, sort_keys=True).encode("utf-8")
-        gz = gzip.compress(payload, compresslevel=9)
-        b64 = base64.b64encode(gz).decode("ascii")
-    except Exception as exc:  # pylint: disable=broad-except
-        logging.warning(f"[test-eda] blob encode failed: {exc!r}")
-        return
-
-    chunk_size = 120
-    chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)]
-
-    sys.stdout.flush()
-    print()
-    print("<<<EDA_BLOB_START>>>")
-    for ch in chunks:
-        print(ch)
-    print("<<<EDA_BLOB_END>>>")
-    sys.stdout.flush()
-    logging.info(
-        f"[test-eda] blob emitted: {len(b64)} chars, "
-        f"~{len(b64) // 1024} KiB raw")
+    if mode == "compact":
+        summary = _compact_test_eda_summary(
+            summary,
+            seq_item_top_k_per_fid=_get_int_env(
+                "EDA_COMPACT_SEQ_ITEM_TOP_K", 200, min_value=1),
+        )
+    _emit_summary_blob(summary, mode)
 
 
 def _emit_test_eda_blob(dataset: PCVRParquetDataset) -> None:
     """Legacy emit (kept for compat with non-refactored call sites)."""
-    import base64
-    import gzip
-    import sys
     try:
         summary = dataset.finalize_eda()
     except Exception as exc:  # pylint: disable=broad-except
@@ -894,27 +1056,14 @@ def _emit_test_eda_blob(dataset: PCVRParquetDataset) -> None:
     if summary is None:
         logging.warning("[test-eda] EDA_BLOB=1 but no EDA state collected")
         return
-    try:
-        payload = json.dumps(summary, sort_keys=True).encode("utf-8")
-        gz = gzip.compress(payload, compresslevel=9)
-        b64 = base64.b64encode(gz).decode("ascii")
-    except Exception as exc:  # pylint: disable=broad-except
-        logging.warning(f"[test-eda] blob encode failed: {exc!r}")
-        return
-
-    chunk_size = 120
-    chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)]
-
-    sys.stdout.flush()
-    print()
-    print("<<<EDA_BLOB_START>>>")
-    for ch in chunks:
-        print(ch)
-    print("<<<EDA_BLOB_END>>>")
-    sys.stdout.flush()
-    logging.info(
-        f"[test-eda] blob emitted: {len(b64)} chars, "
-        f"{len(chunks)} chunks, raw {len(payload)} bytes")
+    mode = _get_eda_blob_mode()
+    if mode == "compact":
+        summary = _compact_test_eda_summary(
+            summary,
+            seq_item_top_k_per_fid=_get_int_env(
+                "EDA_COMPACT_SEQ_ITEM_TOP_K", 200, min_value=1),
+        )
+    _emit_summary_blob(summary, mode)
 
 
 if __name__ == "__main__":

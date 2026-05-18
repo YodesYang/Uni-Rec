@@ -1,9 +1,9 @@
 # EXP-069 · 三集分布差异理论框架 + Hour-Aware Sample Reweight (方案 D-3) · 2026-05-17
 
-> **Status**: ✅ Code 已实施 · Smoke test pass · M82 待平台启动 (~22:30+ 5/17)
+> **Status**: Closed negative · M82 public 0.846197
 > **Date**: 2026-05-17 CEST 20:50 起草
 > **Trigger**: 用户深入审视"训练集/验证集/测试集差异 + 是否同分布" + 用户决 5/20 ddl 内 0.852 战略
-> **Related**: EXP-052 (M22 LB + Test EDA 5 facts) · EXP-056 (Tier-0 EDA · 元宵节认知反转) · EXP-058 (8 大错误 audit) · EXP-059 (M49 LB SOTA 0.848162) · EXP-068 (5/17 晚 batch) · ADR-014 (UE split path B) · team-memory line 195 (5/20 ddl 战略约束)
+> **Related**: EXP-052 (M22 LB + Test EDA 5 facts) · EXP-056 (Tier-0 EDA · 元宵节认知反转) · EXP-058 (8 大错误 audit) · EXP-059 (M49 LB SOTA 0.848162) · EXP-068 (5/17 晚 batch) · EXP-071 (M75 LB 0.848788 新 SOTA) · ADR-014 (UE split path B) · team-memory line 195 (5/20 ddl 战略约束)
 
 ---
 
@@ -23,6 +23,13 @@
 - ✅ `src/train.py` 3 新 CLI flags + propagate
 - ✅ Smoke test pass · 训练完整完成 · 0 model param 增加 (仅 sample reweight)
 - ✅ Commit `9330ce1`
+
+**2026-05-18 Result Addendum**:
+- `M82-m22-uesplit-alpha25-hour9to14x5-gap0-seed42-4ep` completed with best dev **0.869709** (E4).
+- Compared with current anchor M75-4ep dev **0.870856**, M82 is **-0.001147**.
+- Public evaluation returned **0.846197** (684.43s), which is **-0.002591 vs M75 0.848788** and **-0.002657 vs M84 0.848854**.
+- D-3 hour-aware reweight is therefore **rejected**. The hoped-for dev-down/LB-up did not materialize.
+- Follow-up record: [EXP-072](EXP-072-may18-morning-batch-results.md).
 
 ---
 
@@ -285,20 +292,21 @@ src/ns_groups_vocab_tier.json
 
 ### 5.3 5/20 前到 0.852 概率重估
 
-**修订 (基于 M82 ROI 重新评估)**:
-- 当前 SOTA: M49 0.848162
-- 距 0.852: +0.003838
+**2026-05-18 修订 (M75 LB 回流后)**:
+- 当前 SOTA: **M75 0.848788** (见 EXP-071)
+- 距 0.852: **+0.003212**
+- 归因 caveat: M75 不是有效 T38/per-domain 机制验证, 更像 path B / UE split 机制族里的更好 public 泛化落点
 
 **多路径累积**:
 - M82 (D-3): +0.001 ~ +0.003
-- 5/18 早 LB confirm (M51/M53/M75) 任一 work: +0.001 ~ +0.002
+- 5/18 早 LB confirm (M51/M53) 任一 work: +0.001 ~ +0.002
 - M76 (DCN + UE) work: +0.001 ~ +0.002
 - Cross-seed luck (M73/M74 上沿): +0.001 ~ +0.005 (5% 概率单点)
 - ckpt selection (E2/E3): +0.001 ~ +0.003 (10% 概率)
 
-**累积期望** (假设独立): 0.001 + 0.001 + 0.001 + 0.0005 = +0.0035 → **LB ~0.8517**
+**累积期望** (假设独立): M75 anchor 0.848788 + 0.001 (M82) + 0.001 (M51/M53) + 0.001 (M76) + 0.0005 (cross-seed/ckpt) = **LB ~0.8523**
 
-→ **5/20 前到 0.852 概率**: **~25~35%** (维持上次估)
+→ **5/20 前到 0.852 概率**: **~25~35%** (M75 抬高 anchor, 但仍缺 +0.0032; 未因 T38 归因上调机制信心)
 
 ---
 
@@ -314,6 +322,8 @@ src/ns_groups_vocab_tier.json
 | ~03:30 | M82 + M76 完成 |
 
 ### 5/18 早 (CEST 06:00 quota refresh)
+
+**Superseded 2026-05-18**: M82 completed with dev 0.869709, so the priority list below is historical. Current recommendation is in [EXP-072](EXP-072-may18-morning-batch-results.md): M75(E6) for score-max mode, M84 for information-gain mode; M82 is no longer a top quota candidate.
 
 **4 quota 候选优先级** (修订):
 

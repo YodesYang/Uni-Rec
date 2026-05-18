@@ -1,9 +1,44 @@
 # EXP-068 · 5/17 晚 4 Free Slots Overnight Batch · M73/M74/M75 + M50 重跑 + M76 接力 · 2026-05-17
 
-> **Status**: 🟡 4 jobs in-flight (M73/M74/M75 启 ~CEST 17:00 5/17 + M50 重跑 ~17:30) · M76 等 M50 重跑完接力
+> **Status**: Completed / superseded by 5/18 morning results
 > **Date**: 2026-05-17 CEST 18:35 起草
 > **Trigger**: 5/17 全天 LB 数据回流 (M55 死 / M71 cross-seed 下沿 / M68 stack 失败) + 用户 5/20 ddl 战略约束 + EDA-67 v2 progress 完成 (blob 暂不分析)
 > **Related**: EXP-067 (EDA-67 v2 design) · EXP-065 (5/16 晚 batch · 部分混淆纠正) · EXP-061 (5/16 晚 stack overnight) · EXP-059 (M49 LB SOTA) · ADR-014 (UE split path B) · team-memory line 195 (5/20 ddl 新铁律)
+
+---
+
+## 2026-05-18 Addendum · M75 Evaluation Result
+
+M75 evaluation completed after this planning doc was written:
+
+- **M75 public AUC = 0.848788** (inference time 731.79s)
+- M49 old SOTA = 0.848162
+- **M75 - M49 = +0.000626**
+- M75 best dev = 0.870856 vs M49 dev 0.870741, only **+0.000115**
+
+Attribution correction:
+
+> M75 is **new SOTA**, but it should **not** be interpreted as a true T38/per-domain bucket success.
+>
+> The observed M75 training log had per-domain fit `n_samples=0` and missed the later T38 schema-resolve log, so the run is best understood as a stronger public realization of the path B / UE split family.
+
+See [EXP-071](./EXP-071-m75-lb-new-sota-attribution-2026-05-18.md) for the full attribution.
+
+---
+
+## 2026-05-18 Addendum · Morning Batch Training Results
+
+User later reported `M76 / M82 / M83 / M84 / M75(E6)` all completed. Summary:
+
+| Job | Best dev | Read |
+|---|---:|---|
+| M75(E6) | **0.870651** | closest score candidate, but below original M75-4ep 0.870856 |
+| M84 | 0.870490 | corrected T38 high-information candidate |
+| M76 | 0.870247 | DCN stack not locally positive |
+| M82 | 0.869709 | hour-aware reweight dev negative |
+| M83 | 0.867486 | reject exact day/hour x25 weighting |
+
+See [EXP-072](./EXP-072-may18-morning-batch-results.md) for the full analysis.
 
 ---
 

@@ -418,6 +418,17 @@ def parse_args() -> argparse.Namespace:
                              'dow_sin, dow_cos (day-of-week circular encoding), is_weekend. '
                              'Captures diurnal and weekly purchase-intent periodicity absent '
                              'from existing sequence features. (T12)')
+    parser.add_argument('--enable_beijing_time_features', action='store_true', default=False,
+                        help='Append 10 synthetic dense features derived from Beijing local '
+                             'time (UTC+8): first/second harmonic hour, day-of-week, '
+                             'weekend/workday, test-window 09-14, and early-morning 06-08. '
+                             'Can replace or append --enable_time_of_day_features.')
+    parser.add_argument('--enable_beijing_time_v2_features', action='store_true', default=False,
+                        help='Append 14 Beijing-local distribution features: distance to '
+                             'the observed test date, festival/post-festival flags, distance '
+                             'to the 09-14 test window, coarse daypart one-hot features, and '
+                             'a target-day test-window indicator. Feature-only; no sample '
+                             'reweighting.')
     parser.add_argument('--seq_id_threshold', type=int, default=10000,
                         help='Within the sequence tokenizer, features with vocab_size '
                              'exceeding this value are treated as id features and receive '
@@ -678,6 +689,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--hour_weight_multiplier', type=float, default=-1.0,
                         help='5/17 EXP-069 · Multiplier (e.g. 5.0) applied to in-window '
                              'samples. Default -1.0 = disabled.')
+    parser.add_argument('--target_day_hour_weight_date', type=str, default='',
+                        help='5/18 M83 · Exact Beijing date sample reweight '
+                             '(YYYY-MM-DD). When set with hour min/max and multiplier, '
+                             'only rows on this Beijing date and hour window are '
+                             'upweighted, using a global train-set normalizer.')
+    parser.add_argument('--target_day_hour_weight_min', type=int, default=-1,
+                        help='5/18 M83 · Inclusive Beijing hour lower bound for '
+                             '--target_day_hour_weight_date. Default -1 = disabled.')
+    parser.add_argument('--target_day_hour_weight_max', type=int, default=-1,
+                        help='5/18 M83 · Inclusive Beijing hour upper bound for '
+                             '--target_day_hour_weight_date. Default -1 = disabled.')
+    parser.add_argument('--target_day_hour_weight_multiplier', type=float, default=-1.0,
+                        help='5/18 M83 · Multiplier for exact date+hour rows, '
+                             'normalized by global expected mean weight.')
     parser.add_argument('--enable_hour_only_features', action='store_true', default=False,
                         help='Append hour-of-day sin/cos (2 dims) to user_dense. '
                              'Captures diurnal periodicity WITHOUT day-of-week, which '
@@ -784,6 +809,7 @@ def main() -> None:
 
     if not os.path.exists(schema_path):
         raise FileNotFoundError(f"schema file not found at {schema_path}")
+    logging.info(f"Resolved schema_path: {schema_path}")
 
     # Parse per-domain sequence-length overrides.
     seq_max_lens = {}
@@ -826,6 +852,8 @@ def main() -> None:
             int(x) for x in args.dense_log1p_fids.split(',') if x.strip()
         ),
         enable_time_of_day_features=args.enable_time_of_day_features,
+        enable_beijing_time_features=args.enable_beijing_time_features,
+        enable_beijing_time_v2_features=args.enable_beijing_time_v2_features,
         temporal_weight_alpha=args.temporal_weight_alpha,
         # 5/17 EXP-069 · hour-aware reweight (None disables · only train)
         hour_weight_min=(args.hour_weight_min
@@ -834,6 +862,15 @@ def main() -> None:
                          if args.hour_weight_max >= 0 else None),
         hour_weight_multiplier=(args.hour_weight_multiplier
                                 if args.hour_weight_multiplier > 0 else None),
+        target_day_hour_weight_date=args.target_day_hour_weight_date,
+        target_day_hour_weight_min=(args.target_day_hour_weight_min
+                                    if args.target_day_hour_weight_min >= 0 else None),
+        target_day_hour_weight_max=(args.target_day_hour_weight_max
+                                    if args.target_day_hour_weight_max >= 0 else None),
+        target_day_hour_weight_multiplier=(
+            args.target_day_hour_weight_multiplier
+            if args.target_day_hour_weight_multiplier > 0 else None
+        ),
         enable_hour_only_features=args.enable_hour_only_features,
         # M45 / EXP-056 · weekend-CVR-low filter (0 = disabled · backward compat)
         user_train_timestamp_min=(args.user_train_timestamp_min

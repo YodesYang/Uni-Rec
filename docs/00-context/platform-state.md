@@ -2,7 +2,21 @@
 
 > **每次 agent 推荐 platform 操作前必须 grep 此文件**。任何资源状态陈述 (slot / quota / in-flight) 凭此文件 · 不凭印象。
 >
-> **Last updated**: 2026-05-17 CEST 19:51 (M51 / M53 ckpt 已 publish · 5/18 04:22 过期风险解除)
+> **Last updated**: 2026-05-18 14:13 CEST platform update (M89/M90 started)
+
+> **Hotfix Update · M75 Result**: M75 evaluation completed with **public AUC 0.848788** (731.79s), replacing M49 0.848162 as LB SOTA. Attribution caveat: M75 should **not** be counted as true T38/per-domain bucket success because its training log showed per-domain fit `n_samples=0`; treat it as a stronger path B / UE split family realization. Full record: [EXP-071](../40-experiments/EXP-071-m75-lb-new-sota-attribution-2026-05-18.md).
+
+> **Morning Batch Update**: 用户回报 **M76 / M82 / M83 / M84 / M75(E6)** 均训练完成. Best dev: M75(E6)=0.870651, M84=0.870490, M76=0.870247, M82=0.869709, M83=0.867486. Full record: [EXP-072](../40-experiments/EXP-072-may18-morning-batch-results.md).
+
+> **M84/M82 Eval Update**: M84 public **0.848854** (695.58s) is a tiny new SOTA over M75 by +0.000066 and validates true T38 as small public-positive. M82 public **0.846197** (684.43s) rejects the alpha+hour daypart reweight path.
+
+> **XHS Intel Update**: external post says baseline + rewritten **time** features can reach ~0.849 while TokenFormer is not clearly superior. We added opt-in `--enable_beijing_time_features` and prepared M85-M88. Full record: [EXP-073](../40-experiments/EXP-073-xhs-time-intel-m85-m88-plan-2026-05-18.md).
+
+> **M85/M86 Update**: M85 best dev **0.870887** and M86 best dev **0.871415**. Both used corrected T38 nonzero per-domain samples. M86 is the new strongest dev candidate and validates time-feature expansion as a main path.
+
+> **M89/M90 Training Update**: 用户回报 M89 and M90 both started. Treat training pool as **2 in-flight / 2 free** until completion logs arrive.
+
+> **Staleness Warning**: Training completion status and M84/M82 eval results are synced. Publish-ready status for remaining candidates still needs platform confirmation before submit.
 
 ---
 
@@ -24,21 +38,51 @@
 
 > 来源: team-memory line 175 ("训练 slot 与 evaluation quota 是两个完全独立的资源池")
 
-### Current In-Flight (5/17 CEST 18:35 起)
+### Current In-Flight (latest sync · 2026-05-18)
 
-| Slot | Status | Job | 起 (CEST) | 完成预估 (CEST) | 配置 |
-|---|---|---|---|---|---|
-| 1 | 🟡 **in-flight** | **M73** (path B × seed=2) | ~17:00 5/17 | ~22:00 5/17 | path B cross-seed 第 3 数据点 |
-| 2 | 🟡 **in-flight** | **M74** (path B × seed=5) | ~17:00 5/17 | ~22:00 5/17 | path B cross-seed 第 4 数据点 |
-| 3 | 🟡 **in-flight** | **M75** (path B + per-domain T38 v2) | ~17:00 5/17 | ~22:00 5/17 | T38 v2 fix + UE stack |
-| 4 | 🟡 **in-flight** | **M50 重跑** (path B + weekend filter) | ~17:30 5/17 | ~22:30 5/17 | M50 ckpt 5/17 15:53 已过期 · 重训保 LB 评估 |
+| Slot | Status | Job | Notes |
+|---|---|---|---|
+| 1 | 🟡 in-flight | **M89-m84-t38fix-bjtime-v2-gap0-seed42-4ep** | started by user 2026-05-18 14:13 CEST sync; Beijing time v1+v2 |
+| 2 | 🟡 in-flight | **M90-m86-utc-bjtime-6ep-gap0-seed42** | started by user 2026-05-18 14:13 CEST sync; M86 6ep |
+| 3 | 🟢 free | — |  |
+| 4 | 🟢 free | — |  |
 
-**Pending (M50 重跑完接力)**:
-- ⏸️ **M76** (path B + DCN cross · T34 ready) · 期望启 ~CEST 22:30 · 完成 ~03:30 5/18 · ckpt 24h 过期 5/19 03:30 OK
+### Ready To Launch (M85-M88 · XHS time-feature response)
 
-**Note**: M73/M74/M75 用户已 self-verify Args 5 keys all OK (CEST 18:35 用户确认)。
+| Priority | Job | Run script | Purpose |
+|---|---|---|---|
+| 1 | `M85-m84-t38fix-bjtime-gap0-seed42-4ep` | `src/run_m85_t38_fix_bjtime.sh` | M84 stack; replace UTC time with Beijing-rich time |
+| 2 | `M86-m84-t38fix-utc-bjtime-gap0-seed42-4ep` | `src/run_m86_t38_fix_utc_bjtime.sh` | M84 stack; append Beijing-rich time to current UTC time |
+| 3 | `M87-m84-t38fix-tempweight25-gap0-seed42-4ep` | `src/run_m87_t38_fix_tempweight25.sh` | M84 stack + M41-style soft temporal reweight |
+| 4 | `M88-m84-t38fix-6ep-gap0-seed42` | `src/run_m88_t38_fix_6ep.sh` | M84 stack longer training |
 
-### Last Completed Jobs (按时间倒序 · 5/17 14:15~21:26)
+Started after M85/M86回流:
+
+| Job | Run script | Purpose |
+|---|---|---|
+| `M89-m84-t38fix-bjtime-v2-gap0-seed42-4ep` | `src/run_m89_t38_fix_bjtime_v2.sh` | Beijing time v1 + distribution time v2; no sample reweight |
+| `M90-m86-utc-bjtime-6ep-gap0-seed42` | `src/run_m90_t38_fix_utc_bjtime_6ep.sh` | M86 exact config extended to 6 epochs |
+
+### Last Completed Jobs (按时间倒序)
+
+5/18 XHS time-feature batch:
+
+| Job | Config | Best dev | Best epoch | LB | Notes |
+|---|---|---:|---:|---|---|
+| **M86** | M84 + UTC time + Beijing time | **0.871415** | E4 | 待评 | Clear dev leader; eval first |
+| **M85** | M84 + Beijing time only | **0.870887** | E4 | 待评 | Slightly above M75 dev; mechanism-confirm candidate |
+
+5/18 morning batch:
+
+| Job | Config | Best dev | Best epoch | LB | Notes |
+|---|---|---:|---:|---|---|
+| **M75(E6)** | M75 family extended to 6 epochs | **0.870651** | E6 | 待评 | E4/E5/E6 几乎持平；仍是 T38 `n_samples=0` default path |
+| **M84** | path B + corrected per-domain T38 | 0.870490 | E4 | **0.848854** ⭐ SOTA | 有 schema timestamp resolve log；true T38 小正向 |
+| **M76** | path B + DCN cross | 0.870247 | E4 | 待评 | DCN stack dev 未超过 M75 |
+| **M82** | path B + alpha2.5 + hour 9-14 x5 | 0.869709 | E4 | **0.846197** ❌ | hour-aware reweight public 负向 |
+| **M83** | target-day/hour x25 global weighting | 0.867486 | E4 | 不优先 | 明确负向；reject |
+
+5/17 早起 4 jobs:
 
 5/17 早起 4 jobs 全部完成:
 
@@ -61,7 +105,51 @@
 
 > 来源: team-memory line 9
 
-### 5/17 (today)
+### 5/18 (today · refreshed @ CEST 06:00 / 北京 12:00)
+
+| Used | Remaining | Used by |
+|---|---|---|
+| **2** | **2** | M84 LB 0.848854 + M82 LB 0.846197 |
+
+**Future allocation policy (user decision)**:
+
+- Spain morning: use **2-3** eval quotas.
+- Spain evening: use **1-2** eval quotas.
+- Keep the last quota flexible when training pool has unresolved high-upside candidates.
+
+**User decision (2026-05-18 morning)**:
+
+- Evaluate **M84 E4** now.
+- Evaluate **M82 E4** now.
+- Reserve the other **2 quotas** for evening decision after more information.
+- Expected remaining after these two submissions: **2/4**.
+
+**Evaluation failure note (2026-05-18 14:31 Beijing log)**:
+
+- **M82 E4 evaluation failed before inference** with `dcn_cross_user_fids contains unknown fids [0, 5]`.
+- Root cause: `infer.py` parsed residual DCN fields even when `enable_dcn_cross=False`; M82 should ignore those fields.
+- Fix applied in `src/infer.py`: skip DCN fid parsing unless DCN is enabled; for true DCN ckpts, accept both raw-fid strings and already-mapped index lists.
+- Retry M82 (and M84 if not completed) with patched custom `infer.py`. Failure should not consume quota under the known platform rule, but confirm UI remaining count before evening decisions.
+
+**Evaluation results (2026-05-18 later update)**:
+
+| Candidate | Eval job | Public AUC | Time | Decision |
+|---|---|---:|---:|---|
+| **M84 E4** | `M84-m22-uesplit-perdomain-t38fix-gap0-seed42-4ep_eval_1779085777310` | **0.848854** | 695.58s | Tiny new SOTA; true T38 small positive |
+| **M82 E4** | `M82-m22-uesplit-alpha25-hour9to14x5-gap0-seed42-4ep_eval_1779085835759_copy_1779086114784` | **0.846197** | 684.43s | Reject alpha+hour reweight |
+
+**Reference 4-quota recommendation (post morning-batch)**:
+
+| Priority | Candidate | Why | Mode |
+|---|---|---|---|
+| 1 | **M75(E6) E6** | Closest same-family score candidate; best dev 0.870651 | score-max |
+| 2 | **M84 E4** | Corrected true-T38 path; highest information among new jobs | mechanism + possible score |
+| 3 | **M82 E4** | Direct test daypart/reweight hypothesis; dev negative but public-shift question worth one quota | distribution-shift calibration |
+| 4 | **M51** if publish-ready; otherwise **M76 E4** | M51 is softer temporal reweight with prior M41 public-positive hint; M76 only if limiting to new-batch jobs | fallback / closure |
+
+Do **not** evaluate M83 with scarce quota.
+
+### 5/17 (closed)
 
 | Used | Remaining | Used by |
 |---|---|---|
@@ -71,7 +159,9 @@
 
 **🟢 失败 evaluation 不消耗 quota** (5/17 用户告知铁律): M68 第 1 次 evaluation state_dict mismatch 失败 (q_init_item key bug · commit `cfd15f7` 修复) · 重提成功。
 
-### 5/18 (next day) · 4 quota refresh @ CEST 06:00
+### 5/18 (historical pre-refresh plan) · 4 quota refresh @ CEST 06:00
+
+**Latest note (2026-05-18 morning)**: superseded by current 4-quota recommendation above.
 
 **5/18 早 4 quota 候选** (优先级修订 · 5/17 18:35):
 
@@ -107,7 +197,13 @@
 |---|---|---|---|---|
 | **M22** (vocabtier × s42) | 0.868576 | ✅ historical | safe | **0.847592** ⭐ #2 |
 | **M22-rerun** | 0.868582 | ✅ | safe | 0.847324 |
-| **M49** ⭐⭐⭐ (UE split path B) | 0.870741 | ✅ | safe | **0.848162** ⭐ SOTA |
+| **M49** ⭐⭐⭐ (UE split path B) | 0.870741 | ✅ | safe | **0.848162** · previous SOTA |
+| **M75** ⭐⭐⭐ (path B family · nominal per-domain) | 0.870856 | ✅ evaluated | safe | **0.848788** · previous SOTA · T38 not validated (`n_samples=0`) |
+| **M75(E6)** (same family extended) | 0.870651 | TBD | 5/19 ~11:22 | 待评 · score-max candidate only if quota allows |
+| **M84** (corrected T38 + path B) | 0.870490 | ✅ evaluated | safe | **0.848854** ⭐ SOTA · true T38 small positive |
+| **M76** (path B + DCN) | 0.870247 | TBD | 5/19 ~07:37 | 待评低优先 |
+| **M82** (path B + alpha/hour reweight) | 0.869709 | ✅ evaluated | safe | **0.846197** ❌ |
+| **M83** (exact day/hour global weighting) | 0.867486 | TBD | 5/19 ~10:22 | 不评 |
 | **M51** (path B + temporal_weight) | TBD | ✅ **published 5/17 19:51** | safe (publish 锁) | 待评 |
 | **M52** (path B + per-domain · M52' silent skip) | TBD | ⚠️ TBD | 5/18 04:22 ⚠️ | 不评 (silent skip) |
 | **M53** (path B + NLIR) | TBD | ✅ **published 5/17 19:51** | safe (publish 锁) | 待评 |
@@ -127,10 +223,10 @@
 
 ## Strategic Status (5/17 CEST 18:35 修订 · 5/20 ddl 战略约束下)
 
-**LB SOTA**: **M49 (UE split path B · seed=42) = 0.848162** ⭐ (5/16)
-**前 SOTA**: M22 (vocabtier × s42) = 0.847592 (5/14)
-**距 0.852 (用户硬 deadline)**: 还差 +0.003838
-**距 0.85 (Top 20)**: 还差 +0.0018
+**LB SOTA**: **M84 (path B + corrected true T38) = 0.848854** ⭐
+**前 SOTA**: M75 (path B family · nominal per-domain) = 0.848788
+**距 0.852 (用户硬 deadline)**: 还差 +0.003146
+**距 0.85 (Top 20)**: 还差 +0.001146
 
 **用户硬 deadline (5/17 CEST 16:14 立)**: **0.852 by 5/20** (推前 5/22 → 5/20)
 
@@ -153,6 +249,14 @@
 - 1 stack (M75 T38 v2 + UE) → T38 v2 fix 真测 + path B
 - 1 救活 (M50 重跑) → 防 ckpt 过期 + LB 评估
 - M76 (DCN + UE) 接力 M50 重跑
+
+**Post-update caveat**:
+- M75 LB 已回流为 **0.848788 SOTA**。
+- 但 M75 训练日志里的 T38 fit `n_samples=0`，所以它不是 T38 真测成功；后续 T38 仍需依赖 corrected nonzero-sample run (如 M84b) 判断。
+- 5/18 morning batch 未产生 dev 超越 M75-4ep 的新模型：M75(E6) 0.870651 / M84 0.870490 / M76 0.870247 / M82 0.869709 / M83 0.867486。
+- 单 quota 下：若冲分优先，M75(E6) 是最接近 SOTA family 的候选；若机制学习优先，M84 是 true-T38 高信息候选。M83 不评。
+- M84 public 0.848854 证明 true T38 小幅 public-positive，但增益只有 **+0.000066 vs M75**，不是足以单独冲 0.852 的大机制。
+- M82 public 0.846197 证明 alpha2.5 + hour9~14 x5 reweight 负向；暂停强 daypart reweight variants。
 
 **关键 deprecated 方向 (不再投资源)**:
 - ❌ Q_init in path B (M68 LB 净损害 −0.001694 · stack 失败)
@@ -182,6 +286,9 @@
 
 ## Update Log
 
+- **2026-05-18 14:13 CEST**: 用户回报 **M89 / M90 均已启动训练任务**。训练池状态改为 2 in-flight / 2 free。M89 = Beijing time v1+v2 feature-only; M90 = M86 exact config extended to 6 epochs.
+- **2026-05-18 CEST later**: M84/M82 eval 回流。M84 public **0.848854** (695.58s) 成为 tiny new SOTA, vs M75 +0.000066；M82 public **0.846197** (684.43s), vs M75 -0.002591。结论: true T38 小正向，hour-aware reweight 负向。今日 quota 用 2/4，剩 2/4。
+- **2026-05-18 CEST morning**: 用户回报 M76/M82/M83/M84/M75(E6) 全部训练完成并贴 `train_log.txt`。Best dev: M75(E6)=0.870651, M84=0.870490, M76=0.870247, M82=0.869709, M83=0.867486。结论: 无新 dev SOTA；M75(E6) 是弱冲分候选，M84 是高信息候选，M83 reject。详见 EXP-072。
 - **2026-05-17 CEST 19:51**: 用户 publish M51 / M53 ckpt · 5/18 04:22 24h 过期风险解除 · 5/18 早 quota 可正常评 (无 ckpt 时间窗约束) · M52 / M54 未 publish (silent skip 失败 job · 不值得评)
 - **2026-05-17 CEST 18:35**: 用户启动 M73/M74/M75 + M50 重跑 (M76 接力 M50 重跑) · M50 ckpt 5/17 15:53 已过期 · 重训挽救 LB 评估机会 · 4 slots 全占 · today quota used 3/4 (M55+M71+M68 LB) · 今晚剩 1 quota = M50 LB · 5/20 ddl 战略下 cross-seed heavy + stack accumulation + ckpt selection 三轨并进
 - **2026-05-17 CEST 16:14**: 用户立新硬 deadline = 0.852 by 5/20 (推前 5/22 → 5/20) · 5/22 cross-seed lock ARCHIVED · 立新铁律 team-memory line 195 (cross-seed 主线开放) · commit `541ef12`
