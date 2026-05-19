@@ -949,6 +949,8 @@ def main() -> None:
         "target_inject_alpha_init": float(cfg.get("target_inject_alpha_init", 0.0)),
         "enable_dense_bypass": bool(cfg.get("enable_dense_bypass", False)),
         "enable_din_interest": bool(cfg.get("enable_din_interest", False)),
+        "din_interest_source": str(cfg.get("din_interest_source", "raw")),
+        "din_interest_merge": str(cfg.get("din_interest_merge", "compact")),
         "enable_din_integrated": bool(cfg.get("enable_din_integrated", False)),
         "din_integrated_alpha_init": float(cfg.get("din_integrated_alpha_init", 0.1)),
         "enable_nlir_gating": bool(cfg.get("enable_nlir_gating", False)),

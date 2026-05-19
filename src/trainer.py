@@ -69,6 +69,7 @@ class PCVRHyFormerRankingTrainer:
         logloss_rebound_patience: int = 0,
         logloss_rebound_delta: float = 0.0,
         holdout_loader: Optional[DataLoader] = None,
+        aux_valid_loaders: Optional[Dict[str, DataLoader]] = None,
         enable_torch_compile: bool = False,
         enable_amp: bool = False,
         amp_dtype: str = 'bfloat16',
@@ -90,6 +91,11 @@ class PCVRHyFormerRankingTrainer:
         self.holdout_loader: Optional[DataLoader] = holdout_loader
         self.last_val_holdout_auc: Optional[float] = None
         self.last_val_holdout_logloss: Optional[float] = None
+        # Auxiliary validation loaders are read-only diagnostics evaluated
+        # after the primary valid split. They never drive best_model
+        # selection, top-k retention, early stopping, or logloss rebound.
+        self.aux_valid_loaders: Dict[str, DataLoader] = aux_valid_loaders or {}
+        self.last_aux_valid_metrics: Dict[str, Dict[str, float]] = {}
         self.writer = writer
         # schema_path is copied alongside every checkpoint so that infer.py can
         # rebuild the exact same feature schema the model was trained with.
@@ -268,6 +274,11 @@ class PCVRHyFormerRankingTrainer:
                 "[ADR-005] holdout_loader attached: holdout AUC/LogLoss "
                 "will be logged every epoch. holdout never drives best_model "
                 "selection, EarlyStopping, or LogLoss rebound guard.")
+        if self.aux_valid_loaders:
+            logging.info(
+                "[aux_valid] attached auxiliary validation windows: "
+                f"{list(self.aux_valid_loaders)}. These metrics are logged "
+                "only and never drive checkpoint selection.")
 
     def _record_validation_result(
         self,
@@ -303,6 +314,24 @@ class PCVRHyFormerRankingTrainer:
                 # Never let holdout eval crash training.
                 logging.warning(f"[ADR-005] holdout evaluation failed: {e}")
 
+        aux_metrics: Dict[str, Dict[str, float]] = {}
+        for name, loader in self.aux_valid_loaders.items():
+            try:
+                aux_auc, aux_logloss = self.evaluate_aux_valid(name, loader)
+                aux_metrics[name] = {
+                    "auc": float(aux_auc),
+                    "logloss": float(aux_logloss),
+                }
+                logging.info(
+                    f"[aux_valid/{name}] Epoch {epoch} step {total_step} "
+                    f"AUC: {aux_auc:.6f}, LogLoss: {aux_logloss:.6f} "
+                    f"(valid AUC: {val_auc:.6f}, LogLoss: {val_logloss:.6f}; "
+                    f"gap_auc=valid-aux={val_auc - aux_auc:+.6f})")
+            except Exception as e:
+                logging.warning(f"[aux_valid/{name}] evaluation failed: {e}")
+        if aux_metrics:
+            self.last_aux_valid_metrics = aux_metrics
+
         is_new_best = (
             self.early_stopping.best_score is not None
             and (previous_best is None
@@ -318,6 +347,8 @@ class PCVRHyFormerRankingTrainer:
         if holdout_auc is not None and holdout_logloss is not None:
             row["holdout_auc"] = float(holdout_auc)
             row["holdout_logloss"] = float(holdout_logloss)
+        if aux_metrics:
+            row["aux_valid"] = aux_metrics
         self.validation_history.append(row)
         self.last_epoch = int(epoch)
         self.last_global_step = int(total_step)
@@ -429,6 +460,7 @@ class PCVRHyFormerRankingTrainer:
             "logloss_rebound_counter": self._logloss_rebound_counter,
             "best_logloss_for_guard": self._best_logloss_for_guard,
             "validation_history": self.validation_history,
+            "last_aux_valid_metrics": self.last_aux_valid_metrics,
             "keep_topk_ckpt": self.keep_topk_ckpt,
             "topk_checkpoints": [
                 {
@@ -448,6 +480,7 @@ class PCVRHyFormerRankingTrainer:
                 "seq_encoder_type", "valid_split_strategy", "valid_ratio",
                 "train_ratio", "limit_train_rgs", "limit_valid_rgs",
                 "max_train_steps", "enable_row_time_cutoff",
+                "aux_valid_windows",
                 "enable_count_features", "enable_seq_stats_features",
                 "enable_history_cvr_features", "history_cvr_item_fids",
                 "history_cvr_cache_path",
@@ -457,6 +490,8 @@ class PCVRHyFormerRankingTrainer:
                 "enable_mature_negative_weighting",
                 "negative_maturity_sec", "immature_negative_weight",
                 "d_model", "num_queries",
+                "enable_din_interest", "din_interest_source",
+                "din_interest_merge",
                 "dropout_rate", "loss_type", "multi_task_loss",
                 "click_loss_weight", "conversion_loss_weight",
                 "auc_loss_weight", "auc_margin", "auc_max_pairs",
@@ -1224,6 +1259,18 @@ class PCVRHyFormerRankingTrainer:
             run_slice_diag=False,
         )
 
+    def evaluate_aux_valid(
+        self,
+        name: str,
+        loader: DataLoader,
+    ) -> Tuple[float, float]:
+        """Evaluate one read-only auxiliary validation loader."""
+        return self._evaluate_on_loader(
+            loader=loader,
+            split_tag=f'aux_valid/{name}',
+            run_slice_diag=False,
+        )
+
     def _evaluate_on_loader(
         self,
         loader: DataLoader,
@@ -1254,6 +1301,12 @@ class PCVRHyFormerRankingTrainer:
                 for k in diag_keys:
                     if k in batch:
                         all_diag[k].append(batch[k].numpy())
+
+        if not all_logits_list:
+            logging.warning(
+                f"[Evaluate/{split_tag}] loader produced no batches; "
+                "returning AUC=0.0 and LogLoss=inf")
+            return 0.0, float('inf')
 
         all_logits = torch.cat(all_logits_list, dim=0)
         all_labels = torch.cat(all_labels_list, dim=0).long()

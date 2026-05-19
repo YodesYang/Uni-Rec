@@ -3150,6 +3150,7 @@ def get_pcvr_data(
     fixed_valid_timestamp_min: Optional[int] = None,
     fixed_valid_timestamp_max: Optional[int] = None,
     fixed_train_timestamp_max: Optional[int] = None,
+    aux_valid_windows: Optional[List[Tuple[str, int, int]]] = None,
     enable_count_features: bool = False,
     enable_seq_stats_features: bool = False,
     enable_history_cvr_features: bool = False,
@@ -3202,7 +3203,13 @@ def get_pcvr_data(
     is_missing_user_int_fids: Optional[List[int]] = None,
     is_missing_item_int_fids: Optional[List[int]] = None,
     **kwargs: Any,
-) -> Tuple[DataLoader, DataLoader, Optional[DataLoader], PCVRParquetDataset]:
+) -> Tuple[
+    DataLoader,
+    DataLoader,
+    Optional[DataLoader],
+    Dict[str, DataLoader],
+    PCVRParquetDataset,
+]:
     """Create train / valid DataLoaders from raw multi-column Parquet files.
 
     The validation split is taken as the last ``valid_ratio`` fraction of Row
@@ -3244,10 +3251,18 @@ def get_pcvr_data(
     2026-03-03 09:49:51~14:49:07" and is mutually exclusive with the
     ratio-based row cutoffs.
 
+    ``aux_valid_windows`` adds one or more extra read-only validation windows
+    evaluated by the trainer after primary validation. These loaders never
+    drive best-model selection. A window is "clean" only if the current
+    training rows end at or before its start; otherwise the metric is logged as
+    a leaky diagnostic.
+
     Returns:
-        A tuple ``(train_loader, valid_loader, holdout_loader, train_dataset)``.
+        A tuple ``(train_loader, valid_loader, holdout_loader,
+        aux_valid_loaders, train_dataset)``.
         ``holdout_loader`` is ``None`` unless ``holdout_ratio > 0``. The
-        fourth element is returned so the caller can access the feature
+        ``aux_valid_loaders`` dict is empty unless ``aux_valid_windows`` is
+        non-empty. The fifth element is returned so the caller can access the feature
         schema (``user_int_schema``, ``item_int_schema``, ...) needed to
         construct the model.
     """
@@ -3299,6 +3314,23 @@ def get_pcvr_data(
             raise ValueError(
                 "fixed validation window is mutually exclusive with "
                 "holdout_ratio and valid_gap_ratio")
+    if aux_valid_windows:
+        if valid_split_strategy != 'time':
+            raise ValueError(
+                "aux_valid_windows requires valid_split_strategy='time' so "
+                "Row Group timestamp ranges are available.")
+        seen_aux_names: set[str] = set()
+        for name, start_ts, end_ts in aux_valid_windows:
+            if not name:
+                raise ValueError("aux validation window name must be non-empty")
+            if name in seen_aux_names:
+                raise ValueError(
+                    f"duplicate aux validation window name: {name}")
+            seen_aux_names.add(name)
+            if int(end_ts) <= int(start_ts):
+                raise ValueError(
+                    f"aux validation window {name!r} has end <= start: "
+                    f"{start_ts}..{end_ts}")
     if valid_gap_ratio > 0.0 and valid_split_strategy != 'time':
         raise ValueError(
             "valid_gap_ratio > 0 requires valid_split_strategy='time' "
@@ -4056,6 +4088,79 @@ def get_pcvr_data(
             num_workers=0, pin_memory=use_cuda,
         )
 
+    aux_valid_loaders: Dict[str, DataLoader] = {}
+    if aux_valid_windows:
+        # Prefer the effective row-level cutoff when present. The Row Groups
+        # that touch a cutoff can still contain later rows, so their metadata
+        # max would falsely mark a genuinely clean aux window as leaky.
+        effective_train_max = (
+            int(train_timestamp_max)
+            if train_timestamp_max is not None
+            else None
+        )
+        if effective_train_max is None:
+            actual_train_ts_range = _row_groups_ts_range(train_rgs)
+            effective_train_max = (
+                int(actual_train_ts_range[1])
+                if actual_train_ts_range is not None else None
+            )
+        for name, start_ts, end_ts in aux_valid_windows:
+            aux_rgs = [
+                rg for rg, ts in zip(rg_info, rg_ts_ranges)
+                if ts is not None
+                and ts[1] >= int(start_ts)
+                and ts[0] < int(end_ts)
+            ]
+            if not aux_rgs:
+                logging.warning(
+                    f"[aux_valid/{name}] window [{start_ts}, {end_ts}) "
+                    "has no touching Row Groups; skipping")
+                continue
+            aux_rows = sum(r[2] for r in aux_rgs)
+            clean_flag = (
+                effective_train_max is not None
+                and effective_train_max <= int(start_ts)
+            )
+            logging.info(
+                f"[aux_valid/{name}] configured: window=[{start_ts}, "
+                f"{end_ts}), train_max={effective_train_max}, "
+                f"status={'clean' if clean_flag else 'leaky'}, "
+                f"touching_rgs={len(aux_rgs)}, pre_filter_rows={aux_rows}")
+            aux_dataset = PCVRParquetDataset(
+                parquet_path=data_dir,
+                schema_path=schema_path,
+                batch_size=batch_size,
+                seq_max_lens=seq_max_lens,
+                shuffle=False,
+                buffer_batches=0,
+                row_groups=aux_rgs,
+                clip_vocab=clip_vocab,
+                timestamp_min=int(start_ts),
+                timestamp_max=int(end_ts),
+                enable_count_features=enable_count_features,
+                enable_seq_stats_features=enable_seq_stats_features,
+                enable_history_cvr_features=enable_history_cvr_features,
+                history_cvr_cache_path=history_cvr_cache_path,
+                history_cvr_time_mode=history_cvr_time_mode,
+                history_cvr_cutoff_sec=history_cvr_cutoff_sec,
+                history_cvr_available_lag_sec=history_cvr_available_lag_sec,
+                history_cvr_prior_strength=history_cvr_prior_strength,
+                dense_log1p_fids=dense_log1p_fids,
+                enable_time_of_day_features=enable_time_of_day_features,
+                enable_beijing_time_features=enable_beijing_time_features,
+                enable_beijing_time_v2_features=enable_beijing_time_v2_features,
+                enable_hour_only_features=enable_hour_only_features,
+                disable_seq_fids=disable_seq_fids,
+                bucket_boundaries=bucket_boundaries,
+                enable_is_missing=enable_is_missing,
+                is_missing_user_int_fids=is_missing_user_int_fids,
+                is_missing_item_int_fids=is_missing_item_int_fids,
+            )
+            aux_valid_loaders[name] = DataLoader(
+                aux_dataset, batch_size=None,
+                num_workers=0, pin_memory=use_cuda,
+            )
+
     if enable_row_time_cutoff:
         logging.info(
             f"Parquet train: {train_rows} pre-filter rows "
@@ -4067,6 +4172,8 @@ def get_pcvr_data(
         logging.info(
             f"Parquet train: {train_rows} rows, valid: {valid_rows} rows"
             + (f", holdout: {holdout_rows} rows" if holdout_ratio > 0 else "")
+            + (f", aux_valid={list(aux_valid_loaders)}"
+               if aux_valid_loaders else "")
             + f", batch_size={batch_size}, buffer_batches={buffer_batches}")
 
-    return train_loader, valid_loader, holdout_loader, train_dataset
+    return train_loader, valid_loader, holdout_loader, aux_valid_loaders, train_dataset

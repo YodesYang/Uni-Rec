@@ -181,3 +181,57 @@ Decision readout when logs return:
   consideration.
 - If M92 <= M91, the M86 public miss is likely structural; stop spending LB
   quota on UTC+Beijing dense time stacks and move to non-time/ensemble paths.
+
+## M91/M92 Result
+
+Source: user pasted `~/Downloads/train_log.txt`; M92 final checkpoint table was
+supplemented manually because the log copy was incomplete.
+
+| Job | Clean-window config | Best AUC | Best ckpt |
+|---|---|---:|---|
+| `M91-cleanwin0303-m84-t38fix-gap0-seed42-4ep` | M84 stack on BJ 2026-03-03 09:49:51~14:49:07 | **0.769513** | `global_step10136...auc=0.769513.best_model` |
+| `M92-cleanwin0303-m86-utc-bjtime-gap0-seed42-4ep` | M86 UTC+Beijing time stack on the same window | **0.766748** | `global_step10136...auc=0.766748.best_model` |
+
+Delta:
+
+- M92 - M91 = **-0.002765**
+
+Decision:
+
+- Gate 1 fails hard.
+- This pseudo-public split reproduces the M86 public failure mode, so the issue
+  is not just one unlucky public evaluation.
+- Do **not** spend scarce eval quota on M89/M90 solely because normal dev is
+  high; normal dev is contaminated for dense time-feature decisions.
+- Time work should shift away from adding more absolute-time encodings and
+  toward delayed feedback, cleaner validation, sequence/activity features, or
+  ensembling.
+
+## M99/M100 Time-Feature Closure
+
+Source: user pasted `~/Downloads/train_log.txt` after M93-M100 completed.
+
+Both jobs use the same clean pseudo-public BJ window as M91/M92:
+
+| Job | Clean-window config | Best AUC | Delta vs M91 | Decision |
+|---|---|---:|---:|---|
+| `M99-cleanwin0303-m84-bjtime-v2-gap0-seed42-4ep` | M89-style Beijing v1+v2, no UTC time | **0.764915** | **-0.004598** | fail |
+| `M100-cleanwin0303-m84-bjtime-gap0-seed42-4ep` | M85-style Beijing-only | **0.763198** | **-0.006315** | fail |
+
+Conclusion: the cleaner time-feature variants also fail the pseudo-public gate.
+M89 and M85 should not receive default eval quota despite their normal-dev
+signals; any eval would be a deliberate high-risk calibration probe.
+
+## M89 Calibration Result
+
+User spent one 5/19 quota to test whether the clean-window gate was too
+pessimistic for M89.
+
+| Full candidate | Normal dev | Clean proxy | Public AUC | Decision |
+|---|---:|---:|---:|---|
+| M89 Beijing v1+v2, no UTC | **0.871864** | M99 **0.764915** (**-0.004598 vs M91**) | **0.847650** | reject |
+
+M89 is **-0.001204 vs M84 public 0.848854**. This confirms the clean-window
+diagnostic direction for the time-feature branch: the normal-dev gain did not
+transfer. The clean window remains imperfect, but after M86 and M89 it should
+be trusted strongly for dense time-feature allocation decisions.

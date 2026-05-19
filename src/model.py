@@ -565,8 +565,9 @@ class DINInterestExtractor(nn.Module):
 
     For each of the S sequence domains, computes a single interest token
     by cross-attending a target-item query against that domain's sequence
-    tokens. The S interest vectors are concatenated and projected back to
-    ``d_model``, producing one composite "interest" representation.
+    tokens. In ``compact`` mode the S interest vectors are concatenated and
+    projected back to ``d_model``; in ``per_domain`` mode the concatenated
+    ``S*d_model`` vector is exposed directly to the classifier.
 
     This representation is emitted as a side output (B, D) and is later
     concatenated to the backbone output before the classifier — exactly
@@ -591,10 +592,16 @@ class DINInterestExtractor(nn.Module):
         num_heads: int,
         num_sequences: int,
         dropout: float = 0.0,
+        merge_mode: str = 'compact',
     ) -> None:
         super().__init__()
         self.d_model = d_model
         self.num_sequences = num_sequences
+        self.merge_mode = merge_mode
+        if merge_mode not in ('compact', 'per_domain'):
+            raise ValueError(
+                f"DINInterestExtractor merge_mode must be 'compact' or "
+                f"'per_domain', got {merge_mode!r}")
         # One cross-attention head per sequence domain. We use the shared
         # CrossAttention class that already exists in this file to avoid
         # re-implementing MHA + RoPE handling.
@@ -608,11 +615,14 @@ class DINInterestExtractor(nn.Module):
             for _ in range(num_sequences)
         ])
         # Merge S interest vectors (B, S, D) → (B, D).
-        self.merge = nn.Sequential(
-            nn.Linear(d_model * num_sequences, d_model),
-            nn.LayerNorm(d_model),
-            nn.SiLU(),
-        )
+        if merge_mode == 'compact':
+            self.merge = nn.Sequential(
+                nn.Linear(d_model * num_sequences, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+            )
+        else:
+            self.merge = None
 
     def forward(
         self,
@@ -651,8 +661,11 @@ class DINInterestExtractor(nn.Module):
             )
             per_seq_interests.append(attended.squeeze(1))  # (B, D)
         concat = torch.cat(per_seq_interests, dim=-1)  # (B, S*D)
-        merged = self.merge(concat)                     # (B, D)
-        return merged
+        if self.merge_mode == 'per_domain':
+            return concat
+        if self.merge is None:
+            raise RuntimeError("DINInterestExtractor compact merge is missing")
+        return self.merge(concat)                       # (B, D)
 
 
 class DCNCrossBypass(nn.Module):
@@ -2438,6 +2451,8 @@ class PCVRHyFormer(nn.Module):
         # dense_bypass integration pattern). Zero effect on RankMixer token
         # count / divisibility constraint.
         enable_din_interest: bool = False,
+        din_interest_source: str = 'raw',
+        din_interest_merge: str = 'compact',
         # T28 · DIN integrated INSIDE each HyFormer block. Each block
         # computes its own composite target-aware interest vector from its
         # just-encoded sequences and injects it (with a per-block learnable
@@ -2753,12 +2768,32 @@ class PCVRHyFormer(nn.Module):
 
         # T25 / G1 · DIN-style target-aware interest pooling (bypass mode).
         self.enable_din_interest = bool(enable_din_interest)
+        self.din_interest_source = str(din_interest_source)
+        self.din_interest_merge = str(din_interest_merge)
+        if self.din_interest_source not in ('raw', 'encoded'):
+            raise ValueError(
+                "din_interest_source must be 'raw' or 'encoded', "
+                f"got {self.din_interest_source!r}")
+        if self.din_interest_merge not in ('compact', 'per_domain'):
+            raise ValueError(
+                "din_interest_merge must be 'compact' or 'per_domain', "
+                f"got {self.din_interest_merge!r}")
+        if (self.enable_din_interest and self.use_onetrans
+                and self.din_interest_source == 'encoded'):
+            raise ValueError(
+                "din_interest_source='encoded' is only supported on the "
+                "HyFormer path; use 'raw' with --use_onetrans.")
+        self.din_interest_out_dim = (
+            d_model * self.num_sequences
+            if self.din_interest_merge == 'per_domain' else d_model
+        )
         if self.enable_din_interest:
             self.din_extractor = DINInterestExtractor(
                 d_model=d_model,
                 num_heads=num_heads,
                 num_sequences=self.num_sequences,
                 dropout=dropout_rate,
+                merge_mode=self.din_interest_merge,
             )
 
         # T28 · DIN integrated inside each HyFormer block. The flag is
@@ -2986,12 +3021,13 @@ class PCVRHyFormer(nn.Module):
 
         # Classifier input dimension: d_model normally; d_model*2 when dense
         # bypass is active because the bypass vector is concatenated to output;
-        # plus d_model when DIN interest is active (same pattern); plus
-        # d_model when T34 DCN cross bypass is active (same pattern).
-        clsfier_in_dim = d_model * (
-            1 + (1 if self.has_dense_bypass else 0)
-              + (1 if self.enable_din_interest else 0)
-              + (1 if self.enable_dcn_cross else 0)
+        # plus the selected DIN interest width when active; plus d_model
+        # when T34 DCN cross bypass is active (same pattern).
+        clsfier_in_dim = (
+            d_model
+            + (d_model if self.has_dense_bypass else 0)
+            + (self.din_interest_out_dim if self.enable_din_interest else 0)
+            + (d_model if self.enable_dcn_cross else 0)
         )
 
         # Classifier
@@ -3260,7 +3296,8 @@ class PCVRHyFormer(nn.Module):
         seq_masks_list: list,
         apply_dropout: bool = True,
         target_repr: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_seq_states: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]]:
         """Runs the HyFormer multi-sequence block stack.
 
         Args:
@@ -3269,6 +3306,8 @@ class PCVRHyFormer(nn.Module):
             apply_dropout: whether to apply emb_dropout (train path only).
             target_repr: (B, D) target-item representation, required when
                 ``enable_din_integrated`` is True (each block uses it).
+            return_seq_states: when True, also return the final encoded
+                sequence tensors and masks for late classifier-time DIN.
         """
         if apply_dropout:
             q_tokens_list = [self.emb_dropout(q) for q in q_tokens_list]
@@ -3307,6 +3346,8 @@ class PCVRHyFormer(nn.Module):
         all_q = torch.cat(curr_qs, dim=1)
         output = all_q.view(B, -1)
         output = self.output_proj(output)
+        if return_seq_states:
+            return output, curr_seqs, curr_masks
         return output
 
     def _build_ns_tokens(
@@ -3449,8 +3490,9 @@ class PCVRHyFormer(nn.Module):
 
         Only called when ``enable_din_interest`` is True. The target
         representation is the mean of the item_ns_tokens slice, matching
-        TargetItemSeqInjector's convention (keeps the two target-aware
-        mechanisms on the same footing).
+        TargetItemSeqInjector's convention. Depending on
+        ``din_interest_merge``, the appended interest width is either
+        ``D`` (compact) or ``S*D`` (per-domain).
         """
         target_repr = self._compute_target_repr(ns_tokens)  # (B, D)
         din_interest = self.din_extractor(
@@ -3561,6 +3603,8 @@ class PCVRHyFormer(nn.Module):
             seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
         seq_tokens_list = self._maybe_inject_target_into_seq(
             ns_tokens, seq_tokens_list)
+        din_seq_tokens_list = seq_tokens_list
+        din_seq_masks_list = seq_masks_list
 
         # T28 · target_repr shared across all HyFormer blocks when DIN
         # integrated is enabled. Compute once to avoid re-slicing per block.
@@ -3576,10 +3620,20 @@ class PCVRHyFormer(nn.Module):
         else:
             q_tokens_list = self.query_generator(
                 ns_tokens, seq_tokens_list, seq_masks_list)
-            output = self._run_multi_seq_blocks(
-                q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-                apply_dropout=self.training,
-                target_repr=target_repr)
+            if (self.enable_din_interest
+                    and self.din_interest_source == 'encoded'):
+                output, din_seq_tokens_list, din_seq_masks_list = (
+                    self._run_multi_seq_blocks(
+                        q_tokens_list, ns_tokens, seq_tokens_list,
+                        seq_masks_list, apply_dropout=self.training,
+                        target_repr=target_repr,
+                        return_seq_states=True)
+                )
+            else:
+                output = self._run_multi_seq_blocks(
+                    q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+                    apply_dropout=self.training,
+                    target_repr=target_repr)
 
         if self.has_dense_bypass:
             user_ns_for_bilinear = (
@@ -3590,7 +3644,7 @@ class PCVRHyFormer(nn.Module):
 
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(
-                output, seq_tokens_list, seq_masks_list, ns_tokens)
+                output, din_seq_tokens_list, din_seq_masks_list, ns_tokens)
 
         if self.enable_dcn_cross:
             output = self._apply_dcn_cross_bypass(output, inputs)
@@ -3609,6 +3663,8 @@ class PCVRHyFormer(nn.Module):
             seq_tokens_list, seq_masks_list = self._build_seq_tokens(inputs)
         seq_tokens_list = self._maybe_inject_target_into_seq(
             ns_tokens, seq_tokens_list)
+        din_seq_tokens_list = seq_tokens_list
+        din_seq_masks_list = seq_masks_list
 
         target_repr = (
             self._compute_target_repr(ns_tokens)
@@ -3622,10 +3678,20 @@ class PCVRHyFormer(nn.Module):
         else:
             q_tokens_list = self.query_generator(
                 ns_tokens, seq_tokens_list, seq_masks_list)
-            output = self._run_multi_seq_blocks(
-                q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-                apply_dropout=False,
-                target_repr=target_repr)
+            if (self.enable_din_interest
+                    and self.din_interest_source == 'encoded'):
+                output, din_seq_tokens_list, din_seq_masks_list = (
+                    self._run_multi_seq_blocks(
+                        q_tokens_list, ns_tokens, seq_tokens_list,
+                        seq_masks_list, apply_dropout=False,
+                        target_repr=target_repr,
+                        return_seq_states=True)
+                )
+            else:
+                output = self._run_multi_seq_blocks(
+                    q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+                    apply_dropout=False,
+                    target_repr=target_repr)
 
         if self.has_dense_bypass:
             user_ns_for_bilinear = (
@@ -3636,7 +3702,7 @@ class PCVRHyFormer(nn.Module):
 
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(
-                output, seq_tokens_list, seq_masks_list, ns_tokens)
+                output, din_seq_tokens_list, din_seq_masks_list, ns_tokens)
 
         if self.enable_dcn_cross:
             output = self._apply_dcn_cross_bypass(output, inputs)

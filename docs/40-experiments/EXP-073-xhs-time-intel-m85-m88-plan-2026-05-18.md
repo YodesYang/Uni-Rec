@@ -99,7 +99,7 @@ Prepared follow-up:
 
 | Job | Purpose | Run script |
 |---|---|---|
-| `M90-m86-utc-bjtime-6ep-gap0-seed42` | M86 exact config extended to 6 epochs | `src/run_m90_t38_fix_utc_bjtime_6ep.sh` |
+| `M90-m86-utc-bjtime-6ep-gap0-seed42` | M86 exact config extended to 6 epochs | `platform_run_templates/run_m90_t38_fix_utc_bjtime_6ep.sh` |
 
 2026-05-18 14:13 CEST user update:
 
@@ -134,7 +134,145 @@ Decision after M86 public:
 - Do **not** evaluate M86 further.
 - Downgrade M90 unless its 6ep curve provides unusually strong evidence; it is the same public-negative mechanism extended.
 - M89 becomes high information but high risk; wait for its training result before considering quota.
-- With one remaining 5/18 quota, **M88 E6** becomes the best score-max candidate; **M85 E4** is mechanism-only and lower confidence after M86 miss.
+- With one remaining 5/18 quota, **M88 E6** became the best score-max
+  candidate at that point; this was later superseded by the M88 public result
+  below.
+
+## M89 Result
+
+Source: user pasted `~/Downloads/train_log.txt` after M89 completed.
+
+Config confirmed:
+
+- `enable_time_of_day_features=False`
+- `enable_beijing_time_features=True`
+- `enable_beijing_time_v2_features=True`
+- `enable_per_domain_buckets=True`
+- corrected T38 present with schema timestamp resolve and `n_samples=5000000` for each domain
+- same contaminated RG time split as earlier normal-dev runs:
+  `overlap_sec=341086`
+
+Dev curve:
+
+| Epoch | Step | Dev AUC | LogLoss |
+|---:|---:|---:|---:|
+| E1 | 15941 | 0.867292 | 0.224508 |
+| E2 | 31882 | 0.869521 | 0.222458 |
+| E3 | 47823 | 0.870616 | 0.221622 |
+| E4 | 63764 | **0.871864** | **0.221121** |
+
+Readout:
+
+- M89 vs M84: **+0.001374 dev**
+- M89 vs M86: **+0.000449 dev**
+- M89 vs M88: **+0.000954 dev**
+
+This is the strongest normal-dev time-feature candidate so far. The v2
+features improve dev while dropping the old UTC time-of-day block, so M89 is
+not identical to the M86 failure. However, the validation split is still the
+same contaminated RG split that EDA-71 warned about.
+
+Decision:
+
+- Promote M89 to **high-information / high-risk**.
+- Do **not** evaluate only because normal dev is high.
+- If M92 > M91 on the clean-window gate, M89 becomes a serious eval candidate.
+- If M92 <= M91, M89 should remain held unless we intentionally spend quota on
+  a risky mechanism probe.
+
+Follow-up closure:
+
+- M99 later tested the M89-style Beijing v1+v2 stack on the clean pseudo-public
+  window and reached only **0.764915**, below M91 by **-0.004598**.
+- M100 tested Beijing-only and reached **0.763198**, below M91 by **-0.006315**.
+- Therefore the XHS time-feature branch is closed for default quota allocation.
+  M89 is no longer score-max recommended; it is only a high-risk calibration
+  probe if we explicitly want one.
+
+## M89 Public Calibration
+
+Source: user reported leaderboard result on 2026-05-19.
+
+| Eval job | Public AUC | Time | Decision |
+|---|---:|---:|---|
+| `M89-m84-t38fix-bjtime-v2-gap0-seed42-4ep_eval_1779176001150` | **0.847650** | 746.62s | reject |
+
+Readout:
+
+- M89 public vs M84 SOTA: **-0.001204**.
+- M89 public vs M86: **+0.000544**, so removing UTC and adding Beijing v2 is
+  better than M86, but still below the leaderboard target path.
+- M89 normal dev was **+0.001374 vs M84**, so this is another strong
+  dev-public mismatch.
+- M99 clean-window diagnostic had already failed by **-0.004598 vs M91**.
+  The public result validates the clean-window warning direction for this
+  time-feature branch.
+
+Conclusion: close the XHS/time-feature rewrite branch for score-max quota. It
+may still be useful as feature-understanding evidence, but not as a path to
+0.852 under the current deadline.
+
+## M90 Result
+
+Source: user pasted `~/Downloads/train_log.txt`; checkpoint table was
+supplemented manually because the copied log was incomplete.
+
+Config confirmed:
+
+- `num_epochs=6`
+- `enable_time_of_day_features=True`
+- `enable_beijing_time_features=True`
+- `enable_beijing_time_v2_features=False`
+- otherwise M86 exact UTC+Beijing time-stack configuration
+
+Dev curve:
+
+| Epoch | Step | Dev AUC | LogLoss |
+|---:|---:|---:|---:|
+| E1 | 15941 | 0.866561 | 0.224511 |
+| E2 | 31882 | 0.869504 | 0.222583 |
+| E3 | 47823 | 0.869825 | n/a |
+| E4 | 63764 | **0.871206** | 0.221508 |
+| E5 | 79705 | 0.870696 | n/a |
+| E6 | 95646 | 0.870880 | n/a |
+
+Readout:
+
+- M90 vs M86: **-0.000209 dev**
+- M90 vs M84: **+0.000716 dev**
+- M90 vs M88: **+0.000296 dev**
+
+Decision:
+
+- Longer training does **not** rescue M86; best remains E4 and is lower than
+  M86's 4ep best.
+- E5/E6 are below E4, so there is no checkpoint-selection reason to evaluate
+  the 6ep continuation.
+- Combined with M91/M92 clean-window failure, M90 should stay held by default.
+
+## M91/M92 Clean-Window Gate Result
+
+Source: user pasted `~/Downloads/train_log.txt`; M92 checkpoint table was
+supplemented manually because the copied log was incomplete.
+
+| Job | Role | Best clean-window AUC |
+|---|---|---:|
+| M91 | M84 clean pseudo-public baseline | **0.769513** |
+| M92 | M86 UTC+Beijing time stack on the same window | **0.766748** |
+
+Delta:
+
+- M92 - M91 = **-0.002765**
+
+Decision update:
+
+- M91/M92 rejects the UTC+Beijing dense time stack under clean future-window
+  validation.
+- M86 public failure is likely structural and not an infer/config accident.
+- M89 is not exactly M92 because it removes the old UTC block and adds Beijing
+  v2 features, but after this gate failure it should stay **hold** by default.
+- Do not spend scarce quota on M89/M90 unless intentionally using one quota for
+  high-risk information instead of score maximization.
 
 ## M87 Result
 
@@ -167,7 +305,8 @@ Decision:
 
 - Do **not** evaluate M87 with scarce quota.
 - M41-style temporal reweight is not stackable with corrected T38/path B in this form.
-- Continue time-feature work via feature-only branches (M89/M90), not sample reweight.
+- Historical next step was feature-only branches (M89/M90), not sample reweight;
+  after the M91/M92 gate result, those branches should stay held by default.
 
 ## M88 Result
 
@@ -200,10 +339,46 @@ Readout:
 
 Decision:
 
-- Longer training helps the corrected-T38 branch, but does not beat M86.
-- After M86 public miss, if only one evening quota remains: evaluate **M88 E6**.
-- If using quota for mechanism learning instead of score-max, **M85 E4** is still informative but lower confidence.
-- Do **not** use scarce quota on M87; hold M89/M90 until their training results arrive.
+- Longer training helps the corrected-T38 branch on normal dev, but does not beat M86.
+- M88 E6 was evaluated with the last 5/18 quota and public result rejects this
+  interpretation (see below).
+- If using quota for mechanism learning after this result, **M85 E4** is still
+  only low-priority and should be gated by M100.
+- Do **not** use scarce quota on M87; after M91/M92, hold M89/M90 unless
+  intentionally buying high-risk information.
+
+## M88 Evaluation Result
+
+Source: user reported public result and pasted `~/Downloads/eval_log.txt`.
+
+| Candidate | Eval job | Public AUC | Time |
+|---|---|---:|---:|
+| M88 E6 | `M88-m84-t38fix-6ep-gap0-seed42_eval_1779130091934_copy_1779131732501_copy_1779131958877_copy_1779132760150` | **0.846209** | 722.84s |
+
+Eval-log sanity:
+
+- Loaded checkpoint: `global_step95646.layer=2.head=4.hidden=64.auc=0.870910.best_model`.
+- Dataset flags: `time_of_day_features=True`, `beijing_time_features=False`,
+  `beijing_time_v2_features=False`, `seq_stats_features=False`,
+  `mature_negative_weighting=False`.
+- Model config remains the intended M84/path-B stack with `enable_ue_split=True`,
+  `enable_din_interest=True`, `enable_dcn_cross=False`.
+
+Readout:
+
+- M88 public vs M84: **-0.002645**
+- M88 public vs M75: **-0.002579**
+- M88 public vs M86: **-0.000897**
+- M88 public vs M82: **+0.000012** (essentially tied with the rejected M82)
+
+Decision:
+
+- Reject M84 longer training / E6 checkpoint selection.
+- Normal-dev +0.000420 vs M84 did not transfer; this is another clear example
+  that normal dev is not enough for public-window selection.
+- Do not evaluate additional M88 checkpoints unless a separate checkpoint-
+  selection protocol explicitly justifies it; E4 dev is below M84 and the E6
+  result makes the family low priority.
 
 ## Upload Files
 
@@ -222,7 +397,7 @@ M85-M88 出分后，优先评估顺序按:
 1. 是否超过 M84 dev 或接近 M75/M84 dev 且机制有 public-up 可能。
 2. M86 public miss 后，时间特征分支不能只看 dev；需要公共榜或更强 EDA 支撑。
 3. M85 只作为 Beijing-only 机制确认，不作为最高冲分候选。
-4. M88 E6 是当前剩余额度下更稳的 score candidate；M87 不再评。
+4. M88 E6 已被 public 0.846209 拒绝；M87 不再评。
 
 ## EDA-71 Correction
 
@@ -233,6 +408,7 @@ After EDA-71, the XHS "time feature" direction should be narrowed:
 - Current RG time split has **341,086s (~3.95d)** train/valid overlap.
 - Therefore M86's dev gain is not reliable evidence for time-feature transfer.
 
-Next action is not another dense absolute-time feature by normal dev. Use M91
-vs M92 clean-window backtests to judge whether UTC+Beijing time helps on a
-pseudo-public window before spending evaluation quota on M89/M90.
+M91 vs M92 has now returned: M92 loses to M91 by **-0.002765**. Therefore the
+next action is not another dense absolute-time feature by normal dev, and not
+an M89/M90 evaluation by default. Move budget to delayed feedback, sequence
+activity features, cleaner validation, or ensembling.

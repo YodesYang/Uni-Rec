@@ -38,6 +38,51 @@ def build_feature_specs(
     return specs
 
 
+def parse_aux_valid_windows(raw: str) -> List[Tuple[str, int, int]]:
+    """Parse ``name:start:end`` auxiliary validation windows from CLI."""
+    if not raw or not raw.strip():
+        return []
+    windows: List[Tuple[str, int, int]] = []
+    seen: set[str] = set()
+    for idx, token in enumerate(raw.split(','), start=1):
+        part = token.strip()
+        if not part:
+            continue
+        fields = [x.strip() for x in part.split(':')]
+        if len(fields) == 2:
+            name = f"aux{idx}"
+            start_raw, end_raw = fields
+        elif len(fields) == 3:
+            name, start_raw, end_raw = fields
+        else:
+            raise ValueError(
+                "--aux_valid_windows entries must be 'name:start:end' or "
+                f"'start:end'; got {part!r}")
+        name = ''.join(
+            ch if ch.isalnum() or ch in ('_', '-') else '_'
+            for ch in name.strip()
+        )
+        if not name:
+            name = f"aux{idx}"
+        if name in seen:
+            raise ValueError(
+                f"duplicate auxiliary validation window name: {name}")
+        seen.add(name)
+        try:
+            start_ts = int(start_raw)
+            end_ts = int(end_raw)
+        except ValueError as e:
+            raise ValueError(
+                f"aux validation window timestamps must be integers: "
+                f"{part!r}") from e
+        if end_ts <= start_ts:
+            raise ValueError(
+                f"aux validation window {name!r} has end <= start: "
+                f"{start_ts}..{end_ts}")
+        windows.append((name, start_ts, end_ts))
+    return windows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PCVRHyFormer Training")
 
@@ -216,6 +261,14 @@ def parse_args() -> argparse.Namespace:
                         help='EDA-71 clean-window backtest: fixed exclusive '
                              'training timestamp upper bound. Defaults to '
                              '--fixed_valid_timestamp_min when omitted.')
+    parser.add_argument('--aux_valid_windows', type=str, default='',
+                        help="Optional comma-separated auxiliary validation "
+                             "windows, format 'name:start:end' with inclusive "
+                             "start and exclusive end timestamps, e.g. "
+                             "'m91:1772502591:1772520547'. These windows are "
+                             "logged every epoch but never drive best_model, "
+                             "top-k, early stopping, or training updates. "
+                             "Requires --valid_split_strategy time.")
     parser.add_argument('--enable_count_features', action='store_true', default=False,
                         help='P0-A switch: append user/item non-zero feature counts '
                              'to user dense features (default off)')
@@ -560,6 +613,21 @@ def parse_args() -> argparse.Namespace:
                              '--enable_dense_bypass integration pattern). Orthogonal to '
                              '--target_item_seq_injection (T16 additive, which modifies '
                              'seq encoder inputs). Default off (back-compat).')
+    parser.add_argument('--din_interest_source', type=str, default='raw',
+                        choices=['raw', 'encoded'],
+                        help='DIN 2.0: sequence representation used by '
+                             '--enable_din_interest. raw preserves the original '
+                             'T25 bypass path. encoded runs classifier-time DIN '
+                             'over the final HyFormer-encoded sequence states, '
+                             'keeping the signal late/bypass-only while giving '
+                             'DIN a richer sequence representation.')
+    parser.add_argument('--din_interest_merge', type=str, default='compact',
+                        choices=['compact', 'per_domain'],
+                        help='DIN 2.0: how per-domain DIN interests enter the '
+                             'classifier. compact preserves T25 by merging all '
+                             'domains to one d_model vector. per_domain keeps '
+                             'the S domain interest vectors concatenated '
+                             '(S*d_model) before the classifier.')
     parser.add_argument('--enable_din_integrated', action='store_true', default=False,
                         help='T28: DIN target-aware interest injected INSIDE each '
                              'HyFormer block (not as a classifier-time bypass like '
@@ -832,7 +900,11 @@ def main() -> None:
         logging.info(f"Seq max_lens override: {seq_max_lens}")
 
     logging.info("Using Parquet data format (IterableDataset)")
-    train_loader, valid_loader, holdout_loader, pcvr_dataset = get_pcvr_data(
+    aux_valid_windows = parse_aux_valid_windows(args.aux_valid_windows)
+    if aux_valid_windows:
+        logging.info(f"Aux validation windows: {aux_valid_windows}")
+
+    data_result = get_pcvr_data(
         data_dir=args.data_dir,
         schema_path=schema_path,
         batch_size=args.batch_size,
@@ -859,6 +931,7 @@ def main() -> None:
             args.fixed_train_timestamp_max
             if args.fixed_train_timestamp_max > 0 else None
         ),
+        aux_valid_windows=aux_valid_windows,
         enable_count_features=args.enable_count_features,
         enable_seq_stats_features=args.enable_seq_stats_features,
         enable_history_cvr_features=args.enable_history_cvr_features,
@@ -934,6 +1007,25 @@ def main() -> None:
         is_missing_user_int_fids=parse_int_csv(args.is_missing_user_int_fids),
         is_missing_item_int_fids=parse_int_csv(args.is_missing_item_int_fids),
     )
+    if len(data_result) == 5:
+        (
+            train_loader,
+            valid_loader,
+            holdout_loader,
+            aux_valid_loaders,
+            pcvr_dataset,
+        ) = data_result
+    elif len(data_result) == 4:
+        train_loader, valid_loader, holdout_loader, pcvr_dataset = data_result
+        aux_valid_loaders = {}
+        if aux_valid_windows:
+            logging.warning(
+                "get_pcvr_data returned 4 values; aux_valid_windows will not "
+                "be logged. Upload the matching dataset.py with aux validation "
+                "support for diagnostic metrics.")
+    else:
+        raise ValueError(
+            f"get_pcvr_data returned {len(data_result)} values; expected 4 or 5")
 
     # ---- NS groups ----
     if args.ns_groups_json and os.path.exists(args.ns_groups_json):
@@ -1065,6 +1157,8 @@ def main() -> None:
         "target_inject_alpha_init": args.target_inject_alpha_init,
         "enable_dense_bypass": args.enable_dense_bypass,
         "enable_din_interest": args.enable_din_interest,
+        "din_interest_source": args.din_interest_source,
+        "din_interest_merge": args.din_interest_merge,
         "enable_din_integrated": args.enable_din_integrated,
         "din_integrated_alpha_init": args.din_integrated_alpha_init,
         "enable_nlir_gating": args.enable_nlir_gating,
@@ -1161,6 +1255,7 @@ def main() -> None:
         logloss_rebound_patience=args.logloss_rebound_patience,
         logloss_rebound_delta=args.logloss_rebound_delta,
         holdout_loader=holdout_loader,
+        aux_valid_loaders=aux_valid_loaders,
         enable_torch_compile=args.enable_torch_compile,
         enable_amp=args.enable_amp,
         amp_dtype=args.amp_dtype,
