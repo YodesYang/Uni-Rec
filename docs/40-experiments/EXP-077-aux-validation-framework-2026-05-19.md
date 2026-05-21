@@ -48,6 +48,11 @@ Aux validation is **diagnostic only**:
 - does not affect early stopping;
 - does not affect the logloss rebound guard.
 
+As of 2026-05-20, there is one explicit opt-in exception:
+`--enable_aux_ckpt_select` can save **extra side checkpoints** ranked by an aux
+window and by a primary/aux blend. This still does not replace the canonical
+primary-valid `best_model`, `topk`, early stopping, or training updates.
+
 Each aux window is logged with:
 
 - timestamp range;
@@ -85,6 +90,28 @@ Decision policy:
 | primary valid up, aux also up | stronger candidate |
 | clean fixed-window up | eval-worthy if full dev/logloss are sane |
 | leaky aux up | useful, but not enough alone for scarce quota |
+
+## Aux Checkpoint Side Selector
+
+New optional CLI:
+
+```bash
+--enable_aux_ckpt_select \
+--aux_ckpt_name m91 \
+--aux_ckpt_primary_tolerance 0.0008 \
+--aux_ckpt_blend_weight 0.5
+```
+
+When enabled, the trainer keeps the original primary-valid `*.best_model` and
+`*.topk_N` directories, and additionally saves:
+
+- `*.aux_m91_best`: highest `aux_valid/m91` AUC among checkpoints whose primary
+  AUC is within `best_primary_auc - tolerance`;
+- `*.blend_m91_best`: highest `(1-w)*primary_auc + w*aux_auc` under the same
+  primary guard.
+
+This is intended for late-stage manual public-eval selection. The primary AUC
+guard prevents an aux spike from choosing a severely underfit checkpoint.
 
 ## Status
 

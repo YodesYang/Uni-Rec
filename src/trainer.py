@@ -9,6 +9,7 @@ import glob
 import shutil
 import logging
 import json
+import gc
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -70,10 +71,19 @@ class PCVRHyFormerRankingTrainer:
         logloss_rebound_delta: float = 0.0,
         holdout_loader: Optional[DataLoader] = None,
         aux_valid_loaders: Optional[Dict[str, DataLoader]] = None,
+        enable_aux_ckpt_select: bool = False,
+        aux_ckpt_name: str = 'm91',
+        aux_ckpt_primary_tolerance: float = 0.0008,
+        aux_ckpt_blend_weight: float = 0.5,
         enable_torch_compile: bool = False,
         enable_amp: bool = False,
         amp_dtype: str = 'bfloat16',
         keep_topk_ckpt: int = 1,
+        enable_weight_soup: bool = False,
+        weight_soup_topk: int = 4,
+        weight_soup_primary_tolerance: float = 0.0010,
+        weight_soup_min_members: int = 2,
+        weight_soup_include_sparse: bool = False,
     ) -> None:
         self.model: nn.Module = model
         # ``_raw_model`` always points at the un-compiled instance. Used
@@ -96,6 +106,49 @@ class PCVRHyFormerRankingTrainer:
         # selection, top-k retention, early stopping, or logloss rebound.
         self.aux_valid_loaders: Dict[str, DataLoader] = aux_valid_loaders or {}
         self.last_aux_valid_metrics: Dict[str, Dict[str, float]] = {}
+        self.enable_aux_ckpt_select: bool = bool(enable_aux_ckpt_select)
+        self.aux_ckpt_name: str = str(aux_ckpt_name or 'm91')
+        self.aux_ckpt_primary_tolerance: float = float(
+            aux_ckpt_primary_tolerance)
+        self.aux_ckpt_blend_weight: float = float(aux_ckpt_blend_weight)
+        if not (0.0 <= self.aux_ckpt_blend_weight <= 1.0):
+            raise ValueError(
+                "aux_ckpt_blend_weight must be in [0, 1], "
+                f"got {self.aux_ckpt_blend_weight}")
+        if self.aux_ckpt_primary_tolerance < 0:
+            raise ValueError(
+                "aux_ckpt_primary_tolerance must be >= 0, "
+                f"got {self.aux_ckpt_primary_tolerance}")
+        self.aux_best_checkpoint_dir: Optional[str] = None
+        self.aux_best_score: Optional[float] = None
+        self.aux_best_primary_auc: Optional[float] = None
+        self.aux_best_aux_auc: Optional[float] = None
+        self.aux_best_global_step: Optional[int] = None
+        self.blend_best_checkpoint_dir: Optional[str] = None
+        self.blend_best_score: Optional[float] = None
+        self.blend_best_primary_auc: Optional[float] = None
+        self.blend_best_aux_auc: Optional[float] = None
+        self.blend_best_global_step: Optional[int] = None
+        self._aux_ckpt_missing_warned: bool = False
+        # Optional post-hoc checkpoint weight soup. This is a side artifact:
+        # it averages already-saved same-run top-k checkpoints after training
+        # finishes, and never affects optimization, early stopping, best_model,
+        # or top-k retention.
+        self.enable_weight_soup: bool = bool(enable_weight_soup)
+        self.weight_soup_topk: int = max(1, int(weight_soup_topk))
+        self.weight_soup_primary_tolerance: float = float(
+            weight_soup_primary_tolerance)
+        self.weight_soup_min_members: int = max(2, int(weight_soup_min_members))
+        self.weight_soup_include_sparse: bool = bool(
+            weight_soup_include_sparse)
+        if self.weight_soup_primary_tolerance < 0:
+            raise ValueError(
+                "weight_soup_primary_tolerance must be >= 0, "
+                f"got {self.weight_soup_primary_tolerance}")
+        self.weight_soup_checkpoint_dir: Optional[str] = None
+        self.weight_soup_sources: list[Dict[str, Any]] = []
+        self.weight_soup_error: Optional[str] = None
+        self._weight_soup_attempted: bool = False
         self.writer = writer
         # schema_path is copied alongside every checkpoint so that infer.py can
         # rebuild the exact same feature schema the model was trained with.
@@ -279,6 +332,27 @@ class PCVRHyFormerRankingTrainer:
                 "[aux_valid] attached auxiliary validation windows: "
                 f"{list(self.aux_valid_loaders)}. These metrics are logged "
                 "only and never drive checkpoint selection.")
+        if self.enable_aux_ckpt_select:
+            logging.info(
+                "[aux_ckpt_select] ENABLED: name=%s, primary_tolerance=%.6f, "
+                "blend_weight=%.3f. Primary best_model/top-k/early-stopping "
+                "remain unchanged; aux/blend checkpoints are extra side "
+                "candidates.",
+                self.aux_ckpt_name,
+                self.aux_ckpt_primary_tolerance,
+                self.aux_ckpt_blend_weight,
+            )
+        if self.enable_weight_soup:
+            logging.info(
+                "[weight_soup] ENABLED: topk=%d, primary_tolerance=%.6f, "
+                "min_members=%d, include_sparse=%s. The soup checkpoint is "
+                "created after training from saved best/top-k checkpoints "
+                "only.",
+                self.weight_soup_topk,
+                self.weight_soup_primary_tolerance,
+                self.weight_soup_min_members,
+                self.weight_soup_include_sparse,
+            )
 
     def _record_validation_result(
         self,
@@ -362,6 +436,13 @@ class PCVRHyFormerRankingTrainer:
             self.best_checkpoint_dir = os.path.dirname(
                 self.early_stopping.checkpoint_path)
 
+        self._maybe_update_aux_selected_ckpts(
+            total_step=total_step,
+            val_auc=val_auc,
+            val_logloss=val_logloss,
+            aux_metrics=aux_metrics,
+        )
+
         self._check_logloss_rebound_guard(
             epoch=epoch, total_step=total_step, val_logloss=val_logloss)
 
@@ -440,8 +521,306 @@ class PCVRHyFormerRankingTrainer:
             if float(val_logloss) < self._best_logloss_for_guard:
                 self._best_logloss_for_guard = float(val_logloss)
 
+    @staticmethod
+    def _load_checkpoint_state_dict(model_path: str) -> Dict[str, torch.Tensor]:
+        """Load a checkpoint state_dict on CPU across torch versions."""
+        try:
+            state = torch.load(
+                model_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state = torch.load(model_path, map_location="cpu")
+        if not isinstance(state, dict):
+            raise ValueError(
+                f"Expected state_dict dict from {model_path}, "
+                f"got {type(state).__name__}")
+        return state
+
+    def _collect_weight_soup_sources(self) -> list[Dict[str, Any]]:
+        """Return deduplicated, score-filtered checkpoint sources for soup."""
+        if self.best_val_auc is None:
+            return []
+
+        candidates: list[Dict[str, Any]] = []
+
+        def add_candidate(
+            *,
+            kind: str,
+            rank: Optional[int],
+            val_auc: Optional[float],
+            val_logloss: Optional[float],
+            global_step: Optional[int],
+            ckpt_dir: Optional[str],
+        ) -> None:
+            if not ckpt_dir:
+                return
+            model_path = os.path.join(ckpt_dir, "model.pt")
+            if not os.path.exists(model_path):
+                return
+            candidates.append({
+                "kind": kind,
+                "rank": rank,
+                "val_auc": (
+                    float(val_auc) if val_auc is not None else None
+                ),
+                "val_logloss": (
+                    float(val_logloss) if val_logloss is not None else None
+                ),
+                "global_step": (
+                    int(global_step) if global_step is not None else None
+                ),
+                "ckpt_dir": ckpt_dir,
+                "model_path": model_path,
+            })
+
+        add_candidate(
+            kind="best_model",
+            rank=None,
+            val_auc=self.best_val_auc,
+            val_logloss=self.best_val_logloss,
+            global_step=self.best_global_step,
+            ckpt_dir=self.best_checkpoint_dir,
+        )
+        for rank, (auc, ll, step, ckpt_dir) in enumerate(
+            self._topk_ckpts, start=1
+        ):
+            add_candidate(
+                kind="topk",
+                rank=rank,
+                val_auc=auc,
+                val_logloss=ll,
+                global_step=step,
+                ckpt_dir=ckpt_dir,
+            )
+
+        seen: set[Any] = set()
+        deduped: list[Dict[str, Any]] = []
+        for item in candidates:
+            key = item["global_step"]
+            if key is None:
+                key = os.path.realpath(item["model_path"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        if not deduped:
+            return []
+
+        scored_aucs = [
+            float(item["val_auc"])
+            for item in deduped
+            if item["val_auc"] is not None
+        ]
+        if not scored_aucs:
+            return []
+        best_auc = max(scored_aucs)
+        auc_floor = best_auc - self.weight_soup_primary_tolerance
+        eligible = [
+            item for item in deduped
+            if item["val_auc"] is not None and item["val_auc"] >= auc_floor
+        ]
+        eligible.sort(key=lambda item: (
+            -float(item["val_auc"]),
+            int(item["global_step"] or 0),
+        ))
+        return eligible[:self.weight_soup_topk]
+
+    def _build_weight_soup_dir_name(
+        self,
+        member_count: int,
+        best_auc: float,
+    ) -> str:
+        parts = [f"global_step{self.last_global_step or 0}"]
+        for key in ("layer", "head", "hidden"):
+            if key in self.ckpt_params:
+                parts.append(f"{key}={self.ckpt_params[key]}")
+        parts.extend([
+            f"auc={best_auc:.6f}",
+            f"members={member_count}",
+            "weight_soup",
+        ])
+        return ".".join(parts)
+
+    def _remove_old_weight_soup_dirs(self) -> None:
+        pattern = os.path.join(self.save_dir, "global_step*.weight_soup")
+        for old_dir in glob.glob(pattern):
+            if os.path.isdir(old_dir):
+                shutil.rmtree(old_dir)
+                logging.info("[weight_soup] removed old dir: %s", old_dir)
+
+    def _get_sparse_state_keys(self) -> set[str]:
+        """Return state_dict keys that belong to nn.Embedding weights."""
+        sparse_keys: set[str] = set()
+        for module_name, module in self._raw_model.named_modules():
+            if isinstance(module, nn.Embedding):
+                key = f"{module_name}.weight" if module_name else "weight"
+                sparse_keys.add(key)
+        return sparse_keys
+
+    def _average_checkpoint_state_dicts(
+        self,
+        sources: list[Dict[str, Any]],
+    ) -> Dict[str, torch.Tensor]:
+        """Average floating tensors from same-architecture checkpoints.
+
+        Non-floating tensors are copied from the first checkpoint after shape
+        and dtype compatibility checks. Accumulation is CPU fp32 for numerical
+        stability, then cast back to each tensor's original dtype before save.
+        By default, sparse embedding tensors are also copied from the best
+        source instead of averaged because this project cold-restarts
+        high-cardinality embeddings at epoch boundaries.
+        """
+        if not sources:
+            raise ValueError("weight soup requires at least one source")
+
+        acc: Optional[Dict[str, torch.Tensor]] = None
+        expected_keys: Optional[set[str]] = None
+        floating_keys: set[str] = set()
+        original_dtypes: Dict[str, torch.dtype] = {}
+        sparse_keys = (
+            set()
+            if self.weight_soup_include_sparse
+            else self._get_sparse_state_keys()
+        )
+        if sparse_keys:
+            logging.info(
+                "[weight_soup] dense-only averaging: preserving %d sparse "
+                "embedding tensor(s) from the best source.",
+                len(sparse_keys),
+            )
+
+        for index, source in enumerate(sources):
+            model_path = source["model_path"]
+            logging.info(
+                "[weight_soup] loading source %d/%d: %s",
+                index + 1,
+                len(sources),
+                model_path,
+            )
+            state = self._load_checkpoint_state_dict(model_path)
+            state_keys = set(state.keys())
+            if index == 0:
+                expected_keys = state_keys
+                acc = {}
+                for key, tensor in state.items():
+                    if not isinstance(tensor, torch.Tensor):
+                        raise ValueError(
+                            f"Unexpected non-tensor value for key {key!r} "
+                            f"in {model_path}: {type(tensor).__name__}")
+                    cpu_tensor = tensor.detach().cpu()
+                    original_dtypes[key] = cpu_tensor.dtype
+                    if (
+                        torch.is_floating_point(cpu_tensor)
+                        and key not in sparse_keys
+                    ):
+                        floating_keys.add(key)
+                        acc[key] = cpu_tensor.float()
+                    else:
+                        acc[key] = cpu_tensor
+            else:
+                if expected_keys is None or acc is None:
+                    raise RuntimeError("weight soup accumulator not initialized")
+                missing = expected_keys - state_keys
+                extra = state_keys - expected_keys
+                if missing or extra:
+                    raise ValueError(
+                        "Checkpoint key mismatch while building weight soup: "
+                        f"missing={sorted(missing)[:5]}, "
+                        f"extra={sorted(extra)[:5]}")
+                for key in expected_keys:
+                    other = state[key]
+                    if not isinstance(other, torch.Tensor):
+                        raise ValueError(
+                            f"Unexpected non-tensor value for key {key!r} "
+                            f"in {model_path}: {type(other).__name__}")
+                    base = acc[key]
+                    other_cpu = other.detach().cpu()
+                    if base.shape != other_cpu.shape:
+                        raise ValueError(
+                            f"Shape mismatch for key {key!r}: "
+                            f"{tuple(base.shape)} vs {tuple(other_cpu.shape)}")
+                    if key in floating_keys:
+                        acc[key].add_(other_cpu.float())
+                    elif base.dtype != other_cpu.dtype:
+                        raise ValueError(
+                            f"Dtype mismatch for key {key!r}: "
+                            f"{base.dtype} vs {other_cpu.dtype}")
+            del state
+            gc.collect()
+
+        if acc is None:
+            raise RuntimeError("weight soup accumulator is empty")
+        member_count = len(sources)
+        for key in floating_keys:
+            acc[key].div_(member_count)
+            target_dtype = original_dtypes[key]
+            if acc[key].dtype != target_dtype:
+                acc[key] = acc[key].to(dtype=target_dtype)
+        return acc
+
+    def _maybe_create_weight_soup_checkpoint(self) -> None:
+        """Create one post-hoc weight-soup side checkpoint if enabled."""
+        if not self.enable_weight_soup or self._weight_soup_attempted:
+            return
+        self._weight_soup_attempted = True
+        try:
+            sources = self._collect_weight_soup_sources()
+            self.weight_soup_sources = sources
+            if len(sources) < self.weight_soup_min_members:
+                self.weight_soup_error = (
+                    f"not enough eligible checkpoints: {len(sources)} "
+                    f"< {self.weight_soup_min_members}; "
+                    "set --keep_topk_ckpt > 1 and/or relax "
+                    "--weight_soup_primary_tolerance"
+                )
+                logging.info("[weight_soup] skipped: %s", self.weight_soup_error)
+                return
+
+            best_auc = max(float(src["val_auc"]) for src in sources)
+            logging.info(
+                "[weight_soup] building soup from %d source(s): %s",
+                len(sources),
+                ", ".join(
+                    f"{src['kind']}@step{src['global_step']}:"
+                    f"auc={src['val_auc']:.6f}"
+                    for src in sources
+                ),
+            )
+            soup_state = self._average_checkpoint_state_dicts(sources)
+            self._remove_old_weight_soup_dirs()
+            dir_name = self._build_weight_soup_dir_name(
+                member_count=len(sources),
+                best_auc=best_auc,
+            )
+            ckpt_dir = os.path.join(self.save_dir, dir_name)
+            os.makedirs(ckpt_dir, exist_ok=True)
+            torch.save(soup_state, os.path.join(ckpt_dir, "model.pt"))
+            del soup_state
+            gc.collect()
+            self._write_sidecar_files(ckpt_dir)
+            metadata = {
+                "member_count": len(sources),
+                "best_source_auc": best_auc,
+                "primary_tolerance": self.weight_soup_primary_tolerance,
+                "include_sparse": self.weight_soup_include_sparse,
+                "sources": sources,
+            }
+            with open(
+                os.path.join(ckpt_dir, "soup_metadata.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(metadata, f, indent=2, sort_keys=True)
+            self.weight_soup_checkpoint_dir = ckpt_dir
+            logging.info(
+                "[weight_soup] saved checkpoint to %s/model.pt", ckpt_dir)
+        except Exception as exc:
+            self.weight_soup_error = repr(exc)
+            logging.warning("[weight_soup] failed: %s", exc)
+
     def _write_training_summary(self, stop_reason: str) -> None:
         """Emit a grep-friendly summary and persist it next to logs/checkpoints."""
+        self._maybe_create_weight_soup_checkpoint()
         summary = {
             "stop_reason": stop_reason,
             "best_val_auc": self.best_val_auc,
@@ -461,6 +840,32 @@ class PCVRHyFormerRankingTrainer:
             "best_logloss_for_guard": self._best_logloss_for_guard,
             "validation_history": self.validation_history,
             "last_aux_valid_metrics": self.last_aux_valid_metrics,
+            "aux_ckpt_select": {
+                "enabled": self.enable_aux_ckpt_select,
+                "name": self.aux_ckpt_name,
+                "primary_tolerance": self.aux_ckpt_primary_tolerance,
+                "blend_weight": self.aux_ckpt_blend_weight,
+                "aux_best_checkpoint_dir": self.aux_best_checkpoint_dir,
+                "aux_best_score": self.aux_best_score,
+                "aux_best_primary_auc": self.aux_best_primary_auc,
+                "aux_best_aux_auc": self.aux_best_aux_auc,
+                "aux_best_global_step": self.aux_best_global_step,
+                "blend_best_checkpoint_dir": self.blend_best_checkpoint_dir,
+                "blend_best_score": self.blend_best_score,
+                "blend_best_primary_auc": self.blend_best_primary_auc,
+                "blend_best_aux_auc": self.blend_best_aux_auc,
+                "blend_best_global_step": self.blend_best_global_step,
+            },
+            "weight_soup": {
+                "enabled": self.enable_weight_soup,
+                "topk": self.weight_soup_topk,
+                "primary_tolerance": self.weight_soup_primary_tolerance,
+                "min_members": self.weight_soup_min_members,
+                "include_sparse": self.weight_soup_include_sparse,
+                "checkpoint_dir": self.weight_soup_checkpoint_dir,
+                "sources": self.weight_soup_sources,
+                "error": self.weight_soup_error,
+            },
             "keep_topk_ckpt": self.keep_topk_ckpt,
             "topk_checkpoints": [
                 {
@@ -481,6 +886,11 @@ class PCVRHyFormerRankingTrainer:
                 "train_ratio", "limit_train_rgs", "limit_valid_rgs",
                 "max_train_steps", "enable_row_time_cutoff",
                 "aux_valid_windows",
+                "enable_aux_ckpt_select", "aux_ckpt_name",
+                "aux_ckpt_primary_tolerance", "aux_ckpt_blend_weight",
+                "enable_weight_soup", "weight_soup_topk",
+                "weight_soup_primary_tolerance",
+                "weight_soup_min_members", "weight_soup_include_sparse",
                 "enable_count_features", "enable_seq_stats_features",
                 "enable_history_cvr_features", "history_cvr_item_fids",
                 "history_cvr_cache_path",
@@ -491,7 +901,8 @@ class PCVRHyFormerRankingTrainer:
                 "negative_maturity_sec", "immature_negative_weight",
                 "d_model", "num_queries",
                 "enable_din_interest", "din_interest_source",
-                "din_interest_merge",
+                "din_interest_merge", "enable_tin_interest",
+                "tin_time_alpha_init",
                 "dropout_rate", "loss_type", "multi_task_loss",
                 "click_loss_weight", "conversion_loss_weight",
                 "auc_loss_weight", "auc_margin", "auc_max_pairs",
@@ -550,6 +961,18 @@ class PCVRHyFormerRankingTrainer:
             logging.info(
                 f"[summary] topk_ckpts (K={self.keep_topk_ckpt}): "
                 f"{topk_compact}")
+        if self.enable_aux_ckpt_select:
+            logging.info(
+                "[summary] aux_ckpt_select aux_best=%s blend_best=%s",
+                self.aux_best_checkpoint_dir,
+                self.blend_best_checkpoint_dir,
+            )
+        if self.enable_weight_soup:
+            logging.info(
+                "[summary] weight_soup checkpoint=%s error=%s",
+                self.weight_soup_checkpoint_dir,
+                self.weight_soup_error,
+            )
         logging.info("[summary] ===== End Training Summary =====")
 
         out_paths = [os.path.join(self.save_dir, "training_summary.json")]
@@ -667,6 +1090,163 @@ class PCVRHyFormerRankingTrainer:
         self._write_sidecar_files(ckpt_dir)
         logging.info(f"Saved checkpoint to {ckpt_dir}/model.pt")
         return ckpt_dir
+
+    @staticmethod
+    def _safe_ckpt_token(raw: str) -> str:
+        """Sanitize a token for platform checkpoint directory names."""
+        safe_chars = []
+        for ch in str(raw):
+            if ch.isalnum() or ch in ("_", "-", "=", "."):
+                safe_chars.append(ch)
+            else:
+                safe_chars.append("_")
+        return "".join(safe_chars).strip("._") or "aux"
+
+    def _build_aux_select_dir_name(
+        self,
+        global_step: int,
+        kind: str,
+        score: float,
+        val_auc: float,
+        aux_auc: float,
+    ) -> str:
+        aux_name = self._safe_ckpt_token(self.aux_ckpt_name)
+        kind_token = self._safe_ckpt_token(kind)
+        parts = [f"global_step{global_step}"]
+        for key in ("layer", "head", "hidden"):
+            if key in self.ckpt_params:
+                parts.append(f"{key}={self.ckpt_params[key]}")
+        parts.extend([
+            f"score={score:.6f}",
+            f"auc={val_auc:.6f}",
+            f"aux_{aux_name}={aux_auc:.6f}",
+            f"{kind_token}_{aux_name}_best",
+        ])
+        return ".".join(parts)
+
+    def _remove_old_aux_select_dirs(self, kind: str) -> None:
+        kind_token = self._safe_ckpt_token(kind)
+        aux_name = self._safe_ckpt_token(self.aux_ckpt_name)
+        pattern = os.path.join(
+            self.save_dir, f"global_step*.{kind_token}_{aux_name}_best")
+        for old_dir in glob.glob(pattern):
+            shutil.rmtree(old_dir)
+            logging.info(
+                f"[aux_ckpt_select] removed old {kind_token} dir: {old_dir}")
+
+    def _save_aux_select_checkpoint(
+        self,
+        global_step: int,
+        kind: str,
+        score: float,
+        val_auc: float,
+        aux_auc: float,
+    ) -> str:
+        kind_token = self._safe_ckpt_token(kind)
+        self._remove_old_aux_select_dirs(kind_token)
+        dir_name = self._build_aux_select_dir_name(
+            global_step=global_step,
+            kind=kind_token,
+            score=score,
+            val_auc=val_auc,
+            aux_auc=aux_auc,
+        )
+        ckpt_dir = os.path.join(self.save_dir, dir_name)
+        os.makedirs(ckpt_dir, exist_ok=True)
+        torch.save(
+            self._raw_model.state_dict(), os.path.join(ckpt_dir, "model.pt"))
+        self._write_sidecar_files(ckpt_dir)
+        logging.info(
+            f"[aux_ckpt_select] saved {kind_token} checkpoint to "
+            f"{ckpt_dir}/model.pt")
+        return ckpt_dir
+
+    def _maybe_update_aux_selected_ckpts(
+        self,
+        total_step: int,
+        val_auc: float,
+        val_logloss: float,
+        aux_metrics: Dict[str, Dict[str, float]],
+    ) -> None:
+        """Save extra aux/blend-best checkpoints without touching primary ES.
+
+        This is intentionally a side selector. The primary AUC best_model and
+        top-k ring remain the canonical platform-safe checkpoints. Aux/blend
+        candidates are only materialized when the current primary AUC is close
+        enough to the current best primary AUC, preventing a public-like aux
+        spike from selecting a badly underfit primary model.
+        """
+        del val_logloss  # reserved for future calibrated blend variants
+        if not self.enable_aux_ckpt_select:
+            return
+        if not aux_metrics:
+            return
+        if self.aux_ckpt_name not in aux_metrics:
+            if not self._aux_ckpt_missing_warned:
+                logging.warning(
+                    "[aux_ckpt_select] aux window %r not found in metrics %s; "
+                    "side checkpoint selection disabled for now.",
+                    self.aux_ckpt_name,
+                    sorted(aux_metrics),
+                )
+                self._aux_ckpt_missing_warned = True
+            return
+
+        primary_ref = (
+            float(self.best_val_auc)
+            if self.best_val_auc is not None
+            else float(val_auc)
+        )
+        primary_floor = primary_ref - self.aux_ckpt_primary_tolerance
+        if float(val_auc) < primary_floor:
+            logging.info(
+                "[aux_ckpt_select] skip step=%s: primary_auc=%.6f below "
+                "floor %.6f (best_primary=%.6f, tolerance=%.6f)",
+                total_step,
+                val_auc,
+                primary_floor,
+                primary_ref,
+                self.aux_ckpt_primary_tolerance,
+            )
+            return
+
+        aux_auc = float(aux_metrics[self.aux_ckpt_name]["auc"])
+        aux_score = aux_auc
+        blend_score = (
+            (1.0 - self.aux_ckpt_blend_weight) * float(val_auc)
+            + self.aux_ckpt_blend_weight * aux_auc
+        )
+
+        if self.aux_best_score is None or aux_score > self.aux_best_score:
+            ckpt_dir = self._save_aux_select_checkpoint(
+                global_step=total_step,
+                kind="aux",
+                score=aux_score,
+                val_auc=float(val_auc),
+                aux_auc=aux_auc,
+            )
+            self.aux_best_checkpoint_dir = ckpt_dir
+            self.aux_best_score = aux_score
+            self.aux_best_primary_auc = float(val_auc)
+            self.aux_best_aux_auc = aux_auc
+            self.aux_best_global_step = int(total_step)
+
+        if (
+            self.blend_best_score is None
+            or blend_score > self.blend_best_score
+        ):
+            ckpt_dir = self._save_aux_select_checkpoint(
+                global_step=total_step,
+                kind="blend",
+                score=blend_score,
+                val_auc=float(val_auc),
+                aux_auc=aux_auc,
+            )
+            self.blend_best_checkpoint_dir = ckpt_dir
+            self.blend_best_score = blend_score
+            self.blend_best_primary_auc = float(val_auc)
+            self.blend_best_aux_auc = aux_auc
+            self.blend_best_global_step = int(total_step)
 
     def _remove_old_best_dirs(self) -> None:
         """Delete stale ``*.best_model`` directories so that only the latest

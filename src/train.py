@@ -269,6 +269,26 @@ def parse_args() -> argparse.Namespace:
                              "logged every epoch but never drive best_model, "
                              "top-k, early stopping, or training updates. "
                              "Requires --valid_split_strategy time.")
+    parser.add_argument('--enable_aux_ckpt_select', action='store_true',
+                        default=False,
+                        help='Opt-in checkpoint side selection from an aux '
+                             'validation window. This does NOT replace the '
+                             'primary-valid best_model/top-k/early-stopping; '
+                             'it only saves extra aux/blend best checkpoint '
+                             'directories for manual public eval selection.')
+    parser.add_argument('--aux_ckpt_name', type=str, default='m91',
+                        help='Aux validation window name used by '
+                             '--enable_aux_ckpt_select. Must match one entry '
+                             'from --aux_valid_windows. Default: m91.')
+    parser.add_argument('--aux_ckpt_primary_tolerance', type=float,
+                        default=0.0008,
+                        help='Primary valid AUC guard for aux-selected '
+                             'checkpoints: save aux/blend ckpts only when '
+                             'current primary AUC is at least '
+                             'best_primary_auc - tolerance. Default 0.0008.')
+    parser.add_argument('--aux_ckpt_blend_weight', type=float, default=0.5,
+                        help='Aux weight for blend-selected checkpoint score: '
+                             '(1-w)*primary_auc + w*aux_auc. Default 0.5.')
     parser.add_argument('--enable_count_features', action='store_true', default=False,
                         help='P0-A switch: append user/item non-zero feature counts '
                              'to user dense features (default off)')
@@ -581,6 +601,19 @@ def parse_args() -> argparse.Namespace:
                         help='T37: raw schema fid for UE (default 61 = 预归一化 user '
                              'embedding · 256-dim). Resolved to (ue_offset, ue_dim) via '
                              'pcvr_dataset.user_dense_schema.entries.')
+    parser.add_argument('--ue_split_fids', type=str, default='',
+                        help='T40: comma-separated user_dense raw fids to concatenate '
+                             'into the UE token. Empty keeps legacy --ue_split_fid. '
+                             'External intel 5/20 suggests "61,87".')
+    parser.add_argument('--ue_split_separate_tokens', action='store_true',
+                        default=False,
+                        help='T42: with --enable_ue_split and multiple '
+                             '--ue_split_fids, project each selected dense '
+                             'fid into its own NS token instead of '
+                             'concatenating them into one UE token. Keep the '
+                             'RankMixer token budget valid manually, e.g. '
+                             '--user_ns_tokens 4 with fids 61,87 keeps '
+                             'T=16 at d_model=64.')
     parser.add_argument('--enable_ue_int_bilinear', action='store_true',
                         default=False,
                         help='T39 / M55 · UE × user_int Bilinear gating. Implements '
@@ -603,6 +636,15 @@ def parse_args() -> argparse.Namespace:
                              '1+alpha] (via tanh). Default 0.5 = mild reweighting '
                              '[0.5, 1.5]. Larger = more aggressive gating, more '
                              'risk of training instability.')
+    parser.add_argument('--enable_ue_item_interaction', action='store_true',
+                        default=False,
+                        help='T40 · Explicit UE x target-item interaction bypass. '
+                             'Requires --enable_ue_split. Projects '
+                             '[UE, item_repr, UE*item_repr] to d_model and '
+                             'concatenates it to the classifier input.')
+    parser.add_argument('--ue_item_interaction_alpha_init', type=float, default=1.0,
+                        help='T40 · Initial learnable scalar for the UE x item '
+                             'interaction bypass. Default 1.0.')
     parser.add_argument('--enable_din_interest', action='store_true', default=False,
                         help='T25 / G1: DIN-style target-aware interest pooling. '
                              'Per-domain cross-attention uses the mean of item_ns '
@@ -628,6 +670,19 @@ def parse_args() -> argparse.Namespace:
                              'domains to one d_model vector. per_domain keeps '
                              'the S domain interest vectors concatenated '
                              '(S*d_model) before the classifier.')
+    parser.add_argument('--enable_tin_interest', action='store_true',
+                        default=False,
+                        help='T41 · TIN-lite target-aware temporal interest. '
+                             'Requires --enable_din_interest and raw DIN '
+                             'source. Replaces the DIN classifier-time '
+                             'extractor with a shape-compatible variant that '
+                             'modulates sequence tokens by target-item and '
+                             'time-bucket embeddings before attention.')
+    parser.add_argument('--tin_time_alpha_init', type=float, default=1.0,
+                        help='T41 · Initial scalar for the TIN-lite temporal '
+                             'modulation. The final temporal MLP layer is '
+                             'zero-initialized, so the extractor starts close '
+                             'to ordinary DIN regardless of this value.')
     parser.add_argument('--enable_din_integrated', action='store_true', default=False,
                         help='T28: DIN target-aware interest injected INSIDE each '
                              'HyFormer block (not as a classifier-time bypass like '
@@ -746,6 +801,35 @@ def parse_args() -> argparse.Namespace:
                              'lets evaluation quota test multiple ckpts from '
                              'a single training run (4x effective evaluation '
                              'utilization when K=4).')
+    parser.add_argument('--enable_weight_soup', action='store_true',
+                        default=False,
+                        help='Post-train side checkpoint: average eligible '
+                             'same-run best/top-k model weights into one '
+                             '*.weight_soup checkpoint. This does not affect '
+                             'training, best_model, top-k, early stopping, or '
+                             'aux checkpoint selection. Requires multiple '
+                             'saved checkpoints, typically --keep_topk_ckpt 4.')
+    parser.add_argument('--weight_soup_topk', type=int, default=4,
+                        help='Maximum number of eligible best/top-k '
+                             'checkpoints to average when '
+                             '--enable_weight_soup is set. Default 4.')
+    parser.add_argument('--weight_soup_primary_tolerance', type=float,
+                        default=0.0010,
+                        help='Only average checkpoints with primary-valid '
+                             'AUC at least best_auc - tolerance. Default '
+                             '0.0010, intended to include late near-best '
+                             'epochs while excluding underfit early models.')
+    parser.add_argument('--weight_soup_min_members', type=int, default=2,
+                        help='Minimum number of eligible checkpoints required '
+                             'to materialize a weight-soup checkpoint. '
+                             'Default 2; otherwise the run logs a skip.')
+    parser.add_argument('--weight_soup_include_sparse', action='store_true',
+                        default=False,
+                        help='Also average sparse embedding tensors in the '
+                             'weight soup. Default off because this project '
+                             'cold-restarts high-cardinality embeddings after '
+                             'epoch validation; dense-only soup preserves '
+                             'embedding weights from the best checkpoint.')
 
 
     parser.add_argument('--temporal_weight_alpha', type=float, default=0.0,
@@ -843,6 +927,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--history_cvr_prior_strength must be >= 0")
     if args.immature_negative_weight < 0:
         parser.error("--immature_negative_weight must be >= 0")
+    if args.weight_soup_topk <= 0:
+        parser.error("--weight_soup_topk must be > 0")
+    if args.weight_soup_primary_tolerance < 0:
+        parser.error("--weight_soup_primary_tolerance must be >= 0")
+    if args.weight_soup_min_members < 2:
+        parser.error("--weight_soup_min_members must be >= 2")
+    if args.enable_tin_interest and not args.enable_din_interest:
+        parser.error("--enable_tin_interest requires --enable_din_interest")
+    if args.enable_tin_interest and args.din_interest_source != 'raw':
+        parser.error("--enable_tin_interest requires --din_interest_source raw")
+    if args.enable_tin_interest and not args.use_time_buckets:
+        parser.error("--enable_tin_interest requires --use_time_buckets")
 
     # Environment variables take precedence.
     args.data_dir = os.environ.get('TRAIN_DATA_PATH', args.data_dir)
@@ -1095,28 +1191,34 @@ def main() -> None:
         dcn_user_fid_indices = None
         dcn_item_fid_indices = None
 
-    # T37 / ADR-014 · UE split fid resolution. fid_61 (default) 在
-    # user_dense_schema 中找 (offset, length) → 传给 model。
+    # T37 / ADR-014 · UE split fid resolution. Legacy path resolves one
+    # fid from --ue_split_fid. T40 extends this to --ue_split_fids (e.g.
+    # "61,87") and concatenates all selected dense slices into one UE token.
     ue_offset_resolved = 0
     ue_dim_resolved = 256  # default; updated by schema resolve below
+    ue_slices_resolved = None
+    ue_split_fids_resolved = None
     if args.enable_ue_split:
-        target_fid = int(args.ue_split_fid)
-        ue_entry = None
-        for entry in pcvr_dataset.user_dense_schema.entries:
-            # entries: List[Tuple[fid, offset, length]]
-            if entry[0] == target_fid:
-                ue_entry = entry
-                break
-        if ue_entry is None:
+        target_fids = parse_int_csv(args.ue_split_fids) or [int(args.ue_split_fid)]
+        entry_by_fid = {
+            entry[0]: entry for entry in pcvr_dataset.user_dense_schema.entries
+        }
+        unknown_ue_fids = [fid for fid in target_fids if fid not in entry_by_fid]
+        if unknown_ue_fids:
             raise ValueError(
-                f"--enable_ue_split=True but --ue_split_fid={target_fid} "
+                f"--enable_ue_split=True but UE fid(s) {unknown_ue_fids} "
                 f"not found in user_dense_schema (available fids: "
                 f"{[e[0] for e in pcvr_dataset.user_dense_schema.entries]})")
-        ue_offset_resolved = int(ue_entry[1])
-        ue_dim_resolved = int(ue_entry[2])
+        ue_split_fids_resolved = list(target_fids)
+        ue_slices_resolved = [
+            (int(entry_by_fid[fid][1]), int(entry_by_fid[fid][2]))
+            for fid in target_fids
+        ]
+        ue_offset_resolved = int(ue_slices_resolved[0][0])
+        ue_dim_resolved = int(sum(dim for _, dim in ue_slices_resolved))
         logging.info(
-            f"T37 UE split: fid={target_fid} resolved to offset="
-            f"{ue_offset_resolved}, dim={ue_dim_resolved}")
+            f"T37/T40 UE split: fids={target_fids} resolved to slices="
+            f"{ue_slices_resolved}, total_dim={ue_dim_resolved}")
 
     model_args = {
         "user_int_feature_specs": user_int_feature_specs,
@@ -1159,6 +1261,8 @@ def main() -> None:
         "enable_din_interest": args.enable_din_interest,
         "din_interest_source": args.din_interest_source,
         "din_interest_merge": args.din_interest_merge,
+        "enable_tin_interest": args.enable_tin_interest,
+        "tin_time_alpha_init": args.tin_time_alpha_init,
         "enable_din_integrated": args.enable_din_integrated,
         "din_integrated_alpha_init": args.din_integrated_alpha_init,
         "enable_nlir_gating": args.enable_nlir_gating,
@@ -1171,8 +1275,12 @@ def main() -> None:
         "enable_ue_split": args.enable_ue_split,
         "ue_offset": ue_offset_resolved,
         "ue_dim": ue_dim_resolved,
+        "ue_slices": ue_slices_resolved,
+        "ue_split_separate_tokens": args.ue_split_separate_tokens,
         "enable_ue_int_bilinear": args.enable_ue_int_bilinear,
         "ue_int_bilinear_alpha_init": args.ue_int_bilinear_alpha_init,
+        "enable_ue_item_interaction": args.enable_ue_item_interaction,
+        "ue_item_interaction_alpha_init": args.ue_item_interaction_alpha_init,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
@@ -1243,6 +1351,10 @@ def main() -> None:
             **vars(args),
             "dcn_cross_user_fids": dcn_user_fid_indices,
             "dcn_cross_item_fids": dcn_item_fid_indices,
+            "ue_split_fids_resolved": ue_split_fids_resolved,
+            "ue_slices": ue_slices_resolved,
+            "ue_offset": ue_offset_resolved,
+            "ue_dim": ue_dim_resolved,
             "fitted_per_domain_bucket_boundaries": (
                 {
                     d: arr.tolist()
@@ -1256,10 +1368,19 @@ def main() -> None:
         logloss_rebound_delta=args.logloss_rebound_delta,
         holdout_loader=holdout_loader,
         aux_valid_loaders=aux_valid_loaders,
+        enable_aux_ckpt_select=args.enable_aux_ckpt_select,
+        aux_ckpt_name=args.aux_ckpt_name,
+        aux_ckpt_primary_tolerance=args.aux_ckpt_primary_tolerance,
+        aux_ckpt_blend_weight=args.aux_ckpt_blend_weight,
         enable_torch_compile=args.enable_torch_compile,
         enable_amp=args.enable_amp,
         amp_dtype=args.amp_dtype,
         keep_topk_ckpt=args.keep_topk_ckpt,
+        enable_weight_soup=args.enable_weight_soup,
+        weight_soup_topk=args.weight_soup_topk,
+        weight_soup_primary_tolerance=args.weight_soup_primary_tolerance,
+        weight_soup_min_members=args.weight_soup_min_members,
+        weight_soup_include_sparse=args.weight_soup_include_sparse,
     )
 
     trainer.train()

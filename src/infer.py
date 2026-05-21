@@ -754,13 +754,14 @@ def main() -> None:
     batch_size = int(cfg.get("batch_size", 256))
     num_workers = int(os.environ.get("EVAL_NUM_WORKERS", cfg.get("num_workers", 8)))
 
-    # ── Test-set EDA dump (default ON · 2026-05-14 19:00 · option D ──────
+    # ── Test-set EDA dump (default OFF · 2026-05-20 eval-speed hotfix) ─────
     # Refactored from dataset-internal _update_test_eda_stats to main-process
     # accumulator. Main process iterates batch dicts (already produced by
     # workers) and updates EDA state directly. No worker-state copy issue,
-    # no num_workers=0 forcing. Wall-time impact ~+1-3% (counter+reservoir
-    # update on already-loaded batch tensors).
-    enable_test_eda = os.environ.get("EDA_BLOB", "1") != "0"
+    # no num_workers=0 forcing. Still, score-max evaluations should not pay
+    # the extra CPU/logging cost by default; set EDA_BLOB=1 only for
+    # deliberate diagnostic evals.
+    enable_test_eda = os.environ.get("EDA_BLOB", "0") != "0"
     eda_blob_mode = _get_eda_blob_mode()
     eda_seq_item_top_k = _get_int_env(
         "EDA_SEQ_ITEM_TOP_K",
@@ -809,7 +810,7 @@ def main() -> None:
             id_counter_cap=eda_user_id_cap,
         )
         logging.info(
-            "[test-eda] EDA_BLOB=1 (default) · mode=%s · "
+            "[test-eda] EDA_BLOB=1 · mode=%s · "
             "seq_item_id_top_k=%d · user_id_cap=%d · "
             "main-process accumulator · compatible with num_workers>0",
             eda_blob_mode, eda_seq_item_top_k, eda_user_id_cap,
@@ -951,6 +952,8 @@ def main() -> None:
         "enable_din_interest": bool(cfg.get("enable_din_interest", False)),
         "din_interest_source": str(cfg.get("din_interest_source", "raw")),
         "din_interest_merge": str(cfg.get("din_interest_merge", "compact")),
+        "enable_tin_interest": bool(cfg.get("enable_tin_interest", False)),
+        "tin_time_alpha_init": float(cfg.get("tin_time_alpha_init", 1.0)),
         "enable_din_integrated": bool(cfg.get("enable_din_integrated", False)),
         "din_integrated_alpha_init": float(cfg.get("din_integrated_alpha_init", 0.1)),
         "enable_nlir_gating": bool(cfg.get("enable_nlir_gating", False)),
@@ -965,10 +968,17 @@ def main() -> None:
         "enable_ue_split": bool(cfg.get("enable_ue_split", False)),
         "ue_offset": int(cfg.get("ue_offset", 0)),
         "ue_dim": int(cfg.get("ue_dim", 256)),
+        "ue_slices": cfg.get("ue_slices", None),
+        "ue_split_separate_tokens": bool(
+            cfg.get("ue_split_separate_tokens", False)),
         "enable_ue_int_bilinear": bool(
             cfg.get("enable_ue_int_bilinear", False)),
         "ue_int_bilinear_alpha_init": float(
             cfg.get("ue_int_bilinear_alpha_init", 0.5)),
+        "enable_ue_item_interaction": bool(
+            cfg.get("enable_ue_item_interaction", False)),
+        "ue_item_interaction_alpha_init": float(
+            cfg.get("ue_item_interaction_alpha_init", 1.0)),
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

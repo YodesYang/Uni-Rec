@@ -668,6 +668,137 @@ class DINInterestExtractor(nn.Module):
         return self.merge(concat)                       # (B, D)
 
 
+class TINLiteInterestExtractor(nn.Module):
+    """Target-aware temporal interest pooling.
+
+    This is a conservative TIN-style upgrade over the existing DIN bypass.
+    It keeps the same output shape and merge modes as ``DINInterestExtractor``
+    but enriches each sequence token with a target-conditioned time-bucket
+    modulation before the target-item attention pooling:
+
+        seq'_t = seq_t + alpha_i * MLP_i([time_t, target, time_t * target])
+
+    The final projection in each temporal MLP is zero-initialized, so the
+    module starts as ordinary DIN and learns whether the explicit temporal
+    modulation is useful. Sparse/id features and the main HyFormer path are
+    untouched.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_sequences: int,
+        num_time_buckets: int,
+        dropout: float = 0.0,
+        merge_mode: str = 'compact',
+        time_alpha_init: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.num_sequences = num_sequences
+        self.num_time_buckets = int(num_time_buckets)
+        self.merge_mode = merge_mode
+        if self.num_time_buckets <= 0:
+            raise ValueError(
+                "TINLiteInterestExtractor requires num_time_buckets > 0")
+        if merge_mode not in ('compact', 'per_domain'):
+            raise ValueError(
+                f"TINLiteInterestExtractor merge_mode must be 'compact' or "
+                f"'per_domain', got {merge_mode!r}")
+
+        self.time_embedding = nn.Embedding(
+            self.num_time_buckets, d_model, padding_idx=0)
+        self.time_mod_per_seq = nn.ModuleList()
+        for _ in range(num_sequences):
+            mod = nn.Sequential(
+                nn.Linear(3 * d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+                nn.Linear(d_model, d_model),
+            )
+            # Start from DIN-equivalent behavior; training can grow the
+            # target-time modulation if it transfers.
+            nn.init.zeros_(mod[3].weight)
+            nn.init.zeros_(mod[3].bias)
+            self.time_mod_per_seq.append(mod)
+        self.time_alpha = nn.Parameter(
+            torch.full((num_sequences,), float(time_alpha_init)))
+
+        self.attn_per_seq = nn.ModuleList([
+            CrossAttention(
+                d_model=d_model,
+                num_heads=num_heads,
+                dropout=dropout,
+                ln_mode='pre',
+            )
+            for _ in range(num_sequences)
+        ])
+        if merge_mode == 'compact':
+            self.merge = nn.Sequential(
+                nn.Linear(d_model * num_sequences, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+            )
+        else:
+            self.merge = None
+
+        nn.init.xavier_normal_(self.time_embedding.weight.data)
+        self.time_embedding.weight.data[0, :] = 0
+
+    def forward(
+        self,
+        target_repr: torch.Tensor,
+        seq_tokens_list: List[torch.Tensor],
+        seq_padding_masks: List[torch.Tensor],
+        seq_time_buckets_list: List[torch.Tensor],
+    ) -> torch.Tensor:
+        if len(seq_tokens_list) != self.num_sequences:
+            raise ValueError(
+                f"TINLiteInterestExtractor expects {self.num_sequences} seq "
+                f"domains; got {len(seq_tokens_list)}.")
+        if len(seq_time_buckets_list) != self.num_sequences:
+            raise ValueError(
+                f"TINLiteInterestExtractor expects {self.num_sequences} time "
+                f"bucket tensors; got {len(seq_time_buckets_list)}.")
+
+        query = target_repr.unsqueeze(1)  # (B, 1, D)
+        per_seq_interests: List[torch.Tensor] = []
+        for i in range(self.num_sequences):
+            seq_tokens = seq_tokens_list[i]           # (B, L_i, D)
+            mask = seq_padding_masks[i]               # (B, L_i)
+            time_bucket_ids = seq_time_buckets_list[i]
+            if time_bucket_ids.shape != seq_tokens.shape[:2]:
+                raise ValueError(
+                    "TINLiteInterestExtractor time bucket shape mismatch: "
+                    f"domain_index={i}, time={tuple(time_bucket_ids.shape)}, "
+                    f"seq={tuple(seq_tokens.shape[:2])}")
+            time_repr = self.time_embedding(time_bucket_ids)  # (B, L_i, D)
+            target_expand = target_repr.unsqueeze(1).expand_as(seq_tokens)
+            mod_in = torch.cat(
+                [time_repr, target_expand, time_repr * target_expand],
+                dim=-1,
+            )
+            time_mod = self.time_mod_per_seq[i](mod_in)
+            enriched_seq = (
+                seq_tokens
+                + self.time_alpha[i] * time_mod
+            )
+            attended = self.attn_per_seq[i](
+                query=query,
+                key_value=enriched_seq,
+                key_padding_mask=mask,
+            )
+            per_seq_interests.append(attended.squeeze(1))
+
+        concat = torch.cat(per_seq_interests, dim=-1)
+        if self.merge_mode == 'per_domain':
+            return concat
+        if self.merge is None:
+            raise RuntimeError("TINLiteInterestExtractor compact merge is missing")
+        return self.merge(concat)
+
+
 class DCNCrossBypass(nn.Module):
     """T34 / EXP-049 · DCN-V2 cross-feature bypass.
 
@@ -2453,6 +2584,11 @@ class PCVRHyFormer(nn.Module):
         enable_din_interest: bool = False,
         din_interest_source: str = 'raw',
         din_interest_merge: str = 'compact',
+        # T41 · TIN-lite target-aware temporal interest. Replaces the
+        # classifier-time DIN extractor with a shape-compatible temporal
+        # variant when enable_din_interest=True.
+        enable_tin_interest: bool = False,
+        tin_time_alpha_init: float = 1.0,
         # T28 · DIN integrated INSIDE each HyFormer block. Each block
         # computes its own composite target-aware interest vector from its
         # just-encoded sequences and injects it (with a per-block learnable
@@ -2529,6 +2665,8 @@ class PCVRHyFormer(nn.Module):
         enable_ue_split: bool = False,
         ue_offset: int = 0,
         ue_dim: int = 256,
+        ue_slices: Optional[List[Tuple[int, int]]] = None,
+        ue_split_separate_tokens: bool = False,
         # T39 / M55 · enable_ue_int_bilinear: gate the "other" dense feats
         # by a Linear projection of the pooled user_int representation
         # before the dense_bypass projection. Implements Seed 主楼 5/5
@@ -2539,6 +2677,12 @@ class PCVRHyFormer(nn.Module):
         # train-internal user × item co-occurrence.
         enable_ue_int_bilinear: bool = False,
         ue_int_bilinear_alpha_init: float = 0.5,
+        # T40 · Explicit UE x target-item interaction bypass. Requires
+        # enable_ue_split so the UE vector is well-defined. Projects
+        # [UE, item_repr, UE * item_repr] to d_model and appends it to the
+        # classifier input.
+        enable_ue_item_interaction: bool = False,
+        ue_item_interaction_alpha_init: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -2639,6 +2783,7 @@ class PCVRHyFormer(nn.Module):
         # UE token (only fid_61 256-dim) · 其他 dense 走 dense_bypass。
         # 与 enable_global_token 互斥 (都复用 user_dense slot)。
         self.enable_ue_split = bool(enable_ue_split)
+        self.ue_split_separate_tokens = bool(ue_split_separate_tokens)
         if self.enable_ue_split and self.enable_global_token:
             raise ValueError(
                 "enable_ue_split and enable_global_token both reuse the "
@@ -2647,19 +2792,48 @@ class PCVRHyFormer(nn.Module):
             raise ValueError(
                 "enable_ue_split=True requires user_dense_dim > 0")
         if self.enable_ue_split:
-            if ue_dim <= 0 or ue_dim > user_dense_dim:
-                raise ValueError(
-                    f"enable_ue_split: ue_dim {ue_dim} must be in "
-                    f"(0, user_dense_dim={user_dense_dim}]")
-            if ue_offset < 0 or ue_offset + ue_dim > user_dense_dim:
-                raise ValueError(
-                    f"enable_ue_split: ue_offset {ue_offset} + ue_dim "
-                    f"{ue_dim} > user_dense_dim {user_dense_dim}")
-            self.ue_offset = int(ue_offset)
-            self.ue_dim = int(ue_dim)
+            raw_slices = (
+                list(ue_slices)
+                if ue_slices is not None
+                else [(int(ue_offset), int(ue_dim))]
+            )
+            if not raw_slices:
+                raise ValueError("enable_ue_split=True requires non-empty ue_slices")
+            norm_slices: List[Tuple[int, int]] = []
+            for offset_raw, dim_raw in raw_slices:
+                offset_i = int(offset_raw)
+                dim_i = int(dim_raw)
+                if dim_i <= 0 or dim_i > user_dense_dim:
+                    raise ValueError(
+                        f"enable_ue_split: slice dim {dim_i} must be in "
+                        f"(0, user_dense_dim={user_dense_dim}]")
+                if offset_i < 0 or offset_i + dim_i > user_dense_dim:
+                    raise ValueError(
+                        f"enable_ue_split: slice offset {offset_i} + dim "
+                        f"{dim_i} > user_dense_dim {user_dense_dim}")
+                norm_slices.append((offset_i, dim_i))
+            sorted_slices = sorted(norm_slices, key=lambda x: x[0])
+            last_end = 0
+            for offset_i, dim_i in sorted_slices:
+                if offset_i < last_end:
+                    raise ValueError(
+                        f"enable_ue_split: overlapping ue_slices {sorted_slices}")
+                last_end = offset_i + dim_i
+            self.ue_slices = sorted_slices
+            self.ue_offset = int(sorted_slices[0][0])
+            self.ue_dim = int(sum(dim for _, dim in sorted_slices))
         else:
+            self.ue_slices = []
             self.ue_offset = 0
             self.ue_dim = 0
+        if self.ue_split_separate_tokens and not self.enable_ue_split:
+            raise ValueError(
+                "ue_split_separate_tokens requires enable_ue_split=True")
+        self.user_dense_ns_tokens = (
+            len(self.ue_slices)
+            if self.enable_ue_split and self.ue_split_separate_tokens
+            else (1 if self.has_user_dense else 0)
+        )
 
         if self.has_user_dense:
             if self.enable_global_token:
@@ -2678,11 +2852,20 @@ class PCVRHyFormer(nn.Module):
                 self.user_dense_proj = None
                 self.ue_proj = None
             elif self.enable_ue_split:
-                # T37 · UE token = fid_61 only (ue_dim subset of user_dense)
-                self.ue_proj = nn.Sequential(
-                    nn.Linear(self.ue_dim, d_model),
-                    nn.LayerNorm(d_model),
-                )
+                # T37/T40 · UE token = one or more selected user_dense fids.
+                if self.ue_split_separate_tokens:
+                    self.ue_proj = nn.ModuleList([
+                        nn.Sequential(
+                            nn.Linear(dim_i, d_model),
+                            nn.LayerNorm(d_model),
+                        )
+                        for _, dim_i in self.ue_slices
+                    ])
+                else:
+                    self.ue_proj = nn.Sequential(
+                        nn.Linear(self.ue_dim, d_model),
+                        nn.LayerNorm(d_model),
+                    )
                 self.user_dense_proj = None
                 self.global_token_proj = None
             else:
@@ -2710,7 +2893,7 @@ class PCVRHyFormer(nn.Module):
         # preserved. The bypass projection adds a SECOND, undiluted path for
         # the dense features directly into the classifier — they flow through
         # both the NS-token path and the bypass path simultaneously.
-        self.num_ns = (num_user_ns + (1 if self.has_user_dense else 0)
+        self.num_ns = (num_user_ns + self.user_dense_ns_tokens
                        + num_item_ns + (1 if self.has_item_dense else 0))
 
         # Dense bypass projections: an extra projection added ALONGSIDE the
@@ -2728,7 +2911,8 @@ class PCVRHyFormer(nn.Module):
         )
         if self.has_dense_bypass:
             # Bypass input dim: when ue_split, only the "other" dense feats
-            # (user_dense_dim - ue_dim). Otherwise full user_dense_dim.
+            # (user_dense_dim - sum(ue_slice_dims)). Otherwise full
+            # user_dense_dim.
             bypass_in_dim = (user_dense_dim - self.ue_dim
                              if self.enable_ue_split else user_dense_dim)
             self.user_dense_bypass_proj = nn.Sequential(
@@ -2766,8 +2950,28 @@ class PCVRHyFormer(nn.Module):
             nn.init.zeros_(self.ue_int_bilinear_proj.weight)
             nn.init.zeros_(self.ue_int_bilinear_proj.bias)
 
+        # T40 · Explicit UE x target-item interaction bypass. This is kept
+        # outside the token mixer so it does not disturb RankMixer's
+        # d_model % T divisibility constraint.
+        self.enable_ue_item_interaction = bool(enable_ue_item_interaction)
+        if self.enable_ue_item_interaction and not self.enable_ue_split:
+            raise ValueError(
+                "enable_ue_item_interaction requires enable_ue_split=True")
+        if self.enable_ue_item_interaction and self.num_item_ns <= 0:
+            raise ValueError(
+                "enable_ue_item_interaction requires at least one item NS token")
+        if self.enable_ue_item_interaction:
+            self.ue_item_interaction_proj = nn.Sequential(
+                nn.Linear(3 * d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+            )
+            self.ue_item_interaction_alpha = nn.Parameter(
+                torch.tensor(float(ue_item_interaction_alpha_init)))
+
         # T25 / G1 · DIN-style target-aware interest pooling (bypass mode).
         self.enable_din_interest = bool(enable_din_interest)
+        self.enable_tin_interest = bool(enable_tin_interest)
         self.din_interest_source = str(din_interest_source)
         self.din_interest_merge = str(din_interest_merge)
         if self.din_interest_source not in ('raw', 'encoded'):
@@ -2783,18 +2987,41 @@ class PCVRHyFormer(nn.Module):
             raise ValueError(
                 "din_interest_source='encoded' is only supported on the "
                 "HyFormer path; use 'raw' with --use_onetrans.")
+        if self.enable_tin_interest and not self.enable_din_interest:
+            raise ValueError(
+                "enable_tin_interest requires enable_din_interest=True; "
+                "TIN-lite is a drop-in temporal upgrade to the DIN bypass.")
+        if self.enable_tin_interest and self.din_interest_source != 'raw':
+            raise ValueError(
+                "enable_tin_interest currently requires "
+                "din_interest_source='raw' so seq_time_buckets align with "
+                "the sequence tokens.")
+        if self.enable_tin_interest and self.num_time_buckets <= 0:
+            raise ValueError(
+                "enable_tin_interest requires use_time_buckets=True")
         self.din_interest_out_dim = (
             d_model * self.num_sequences
             if self.din_interest_merge == 'per_domain' else d_model
         )
         if self.enable_din_interest:
-            self.din_extractor = DINInterestExtractor(
-                d_model=d_model,
-                num_heads=num_heads,
-                num_sequences=self.num_sequences,
-                dropout=dropout_rate,
-                merge_mode=self.din_interest_merge,
-            )
+            if self.enable_tin_interest:
+                self.din_extractor = TINLiteInterestExtractor(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    num_sequences=self.num_sequences,
+                    num_time_buckets=self.num_time_buckets,
+                    dropout=dropout_rate,
+                    merge_mode=self.din_interest_merge,
+                    time_alpha_init=tin_time_alpha_init,
+                )
+            else:
+                self.din_extractor = DINInterestExtractor(
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    num_sequences=self.num_sequences,
+                    dropout=dropout_rate,
+                    merge_mode=self.din_interest_merge,
+                )
 
         # T28 · DIN integrated inside each HyFormer block. The flag is
         # stored here so self.blocks construction (below) can read it;
@@ -3028,6 +3255,7 @@ class PCVRHyFormer(nn.Module):
             + (d_model if self.has_dense_bypass else 0)
             + (self.din_interest_out_dim if self.enable_din_interest else 0)
             + (d_model if self.enable_dcn_cross else 0)
+            + (d_model if self.enable_ue_item_interaction else 0)
         )
 
         # Classifier
@@ -3386,14 +3614,10 @@ class PCVRHyFormer(nn.Module):
                 )
                 ns_parts.append(global_token)
             elif self.enable_ue_split:
-                # T37 / ADR-014 · UE token = fid_61 only (slice
-                # user_dense_feats[ue_offset:ue_offset+ue_dim]).
+                # T37/T40/T42 · UE token(s) = selected dense embedding slice(s).
                 # 其他 dense feats 不进 ns · 走 dense_bypass (T25 路径).
-                ue_feats = inputs.user_dense_feats[
-                    :, self.ue_offset:self.ue_offset + self.ue_dim
-                ]
                 ns_parts.append(
-                    F.silu(self.ue_proj(ue_feats)).unsqueeze(1))
+                    self._project_ue_dense_tokens(inputs.user_dense_feats))
             else:
                 ns_parts.append(
                     F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
@@ -3435,6 +3659,59 @@ class PCVRHyFormer(nn.Module):
         )  # (B, user_dense_dim + 2D + num_sequences * D)
         return F.silu(self.global_token_proj(global_concat)).unsqueeze(1)  # (B, 1, D)
 
+    def _slice_ue_dense(self, user_dense_feats: torch.Tensor) -> torch.Tensor:
+        """Return the selected UE dense slice(s) concatenated by offset order."""
+        if not self.ue_slices:
+            raise RuntimeError("_slice_ue_dense called without ue_slices")
+        parts = [
+            user_dense_feats[:, offset:offset + dim]
+            for offset, dim in self.ue_slices
+        ]
+        if len(parts) == 1:
+            return parts[0]
+        return torch.cat(parts, dim=-1)
+
+    def _slice_other_dense(self, user_dense_feats: torch.Tensor) -> torch.Tensor:
+        """Return dense features excluding the selected UE slice(s)."""
+        if not self.ue_slices:
+            return user_dense_feats
+        parts: List[torch.Tensor] = []
+        cursor = 0
+        total_dim = user_dense_feats.shape[-1]
+        for offset, dim in self.ue_slices:
+            if cursor < offset:
+                parts.append(user_dense_feats[:, cursor:offset])
+            cursor = offset + dim
+        if cursor < total_dim:
+            parts.append(user_dense_feats[:, cursor:total_dim])
+        if not parts:
+            return user_dense_feats.new_zeros((user_dense_feats.shape[0], 0))
+        if len(parts) == 1:
+            return parts[0]
+        return torch.cat(parts, dim=-1)
+
+    def _project_ue_dense(self, user_dense_feats: torch.Tensor) -> torch.Tensor:
+        """Project selected UE dense slice(s) to the model dimension."""
+        if self.ue_split_separate_tokens:
+            return self._project_ue_dense_tokens(user_dense_feats).mean(dim=1)
+        ue_feats = self._slice_ue_dense(user_dense_feats)
+        return F.silu(self.ue_proj(ue_feats))
+
+    def _project_ue_dense_tokens(
+        self, user_dense_feats: torch.Tensor
+    ) -> torch.Tensor:
+        """Project selected UE dense slice(s) as one or more NS tokens."""
+        if not self.ue_split_separate_tokens:
+            return self._project_ue_dense(user_dense_feats).unsqueeze(1)
+        if not isinstance(self.ue_proj, nn.ModuleList):
+            raise RuntimeError(
+                "ue_split_separate_tokens=True but ue_proj is not ModuleList")
+        tokens: List[torch.Tensor] = []
+        for proj, (offset, dim) in zip(self.ue_proj, self.ue_slices):
+            part = user_dense_feats[:, offset:offset + dim]
+            tokens.append(F.silu(proj(part)).unsqueeze(1))
+        return torch.cat(tokens, dim=1)
+
     def _apply_dense_bypass(
         self,
         output: torch.Tensor,
@@ -3459,9 +3736,7 @@ class PCVRHyFormer(nn.Module):
         when this flag is True.
         """
         if self.enable_ue_split:
-            left = inputs.user_dense_feats[:, :self.ue_offset]
-            right = inputs.user_dense_feats[:, self.ue_offset + self.ue_dim:]
-            other_dense = torch.cat([left, right], dim=-1)
+            other_dense = self._slice_other_dense(inputs.user_dense_feats)
         else:
             other_dense = inputs.user_dense_feats
 
@@ -3479,12 +3754,32 @@ class PCVRHyFormer(nn.Module):
         bypass = self.user_dense_bypass_proj(other_dense)  # (B, D)
         return torch.cat([output, bypass], dim=-1)  # (B, 2D)
 
+    def _apply_ue_item_interaction_bypass(
+        self,
+        output: torch.Tensor,
+        inputs: ModelInput,
+        ns_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Append explicit UE x target-item interaction to classifier input."""
+        ue_repr = self._project_ue_dense(inputs.user_dense_feats)  # (B, D)
+        item_repr = self._compute_target_repr(ns_tokens)  # (B, D)
+        interaction_in = torch.cat(
+            [ue_repr, item_repr, ue_repr * item_repr],
+            dim=-1,
+        )
+        interaction = (
+            self.ue_item_interaction_alpha
+            * self.ue_item_interaction_proj(interaction_in)
+        )
+        return torch.cat([output, interaction], dim=-1)
+
     def _apply_din_interest_bypass(
         self,
         output: torch.Tensor,
         seq_tokens_list: List[torch.Tensor],
         seq_masks_list: List[torch.Tensor],
         ns_tokens: torch.Tensor,
+        seq_time_buckets_list: Optional[List[torch.Tensor]] = None,
     ) -> torch.Tensor:
         """Concatenate DIN interest vector to the backbone output.
 
@@ -3495,8 +3790,20 @@ class PCVRHyFormer(nn.Module):
         ``D`` (compact) or ``S*D`` (per-domain).
         """
         target_repr = self._compute_target_repr(ns_tokens)  # (B, D)
-        din_interest = self.din_extractor(
-            target_repr, seq_tokens_list, seq_masks_list)  # (B, D)
+        if self.enable_tin_interest:
+            if seq_time_buckets_list is None:
+                raise RuntimeError(
+                    "enable_tin_interest=True but seq_time_buckets_list was "
+                    "not provided to _apply_din_interest_bypass")
+            din_interest = self.din_extractor(
+                target_repr,
+                seq_tokens_list,
+                seq_masks_list,
+                seq_time_buckets_list,
+            )
+        else:
+            din_interest = self.din_extractor(
+                target_repr, seq_tokens_list, seq_masks_list)
         return torch.cat([output, din_interest], dim=-1)
 
     def _apply_dcn_cross_bypass(
@@ -3540,7 +3847,7 @@ class PCVRHyFormer(nn.Module):
              | item_ns (num_item_ns) | optional item_dense]
         Robust to presence/absence of user_dense (it comes BEFORE item_ns).
         """
-        user_dense_offset = 1 if self.has_user_dense else 0
+        user_dense_offset = self.user_dense_ns_tokens if self.has_user_dense else 0
         item_ns_start = self.num_user_ns + user_dense_offset
         item_ns_end = item_ns_start + self.num_item_ns
         item_ns = ns_tokens[:, item_ns_start:item_ns_end, :]  # (B, num_item_ns, D)
@@ -3583,7 +3890,8 @@ class PCVRHyFormer(nn.Module):
             return seq_tokens_list
         if self.num_item_ns <= 0:
             return seq_tokens_list
-        item_ns_start = self.num_user_ns + (1 if self.has_user_dense else 0)
+        item_ns_start = self.num_user_ns + (
+            self.user_dense_ns_tokens if self.has_user_dense else 0)
         item_ns_end = item_ns_start + self.num_item_ns
         item_repr = ns_tokens[:, item_ns_start:item_ns_end, :].mean(dim=1)
         return self.target_item_seq_injector(seq_tokens_list, item_repr)
@@ -3605,6 +3913,9 @@ class PCVRHyFormer(nn.Module):
             ns_tokens, seq_tokens_list)
         din_seq_tokens_list = seq_tokens_list
         din_seq_masks_list = seq_masks_list
+        din_seq_time_buckets_list = [
+            inputs.seq_time_buckets[domain] for domain in self.seq_domains
+        ]
 
         # T28 · target_repr shared across all HyFormer blocks when DIN
         # integrated is enabled. Compute once to avoid re-slicing per block.
@@ -3644,10 +3955,19 @@ class PCVRHyFormer(nn.Module):
 
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(
-                output, din_seq_tokens_list, din_seq_masks_list, ns_tokens)
+                output,
+                din_seq_tokens_list,
+                din_seq_masks_list,
+                ns_tokens,
+                din_seq_time_buckets_list,
+            )
 
         if self.enable_dcn_cross:
             output = self._apply_dcn_cross_bypass(output, inputs)
+
+        if self.enable_ue_item_interaction:
+            output = self._apply_ue_item_interaction_bypass(
+                output, inputs, ns_tokens)
 
         logits = self.clsfier(output)
         return logits
@@ -3665,6 +3985,9 @@ class PCVRHyFormer(nn.Module):
             ns_tokens, seq_tokens_list)
         din_seq_tokens_list = seq_tokens_list
         din_seq_masks_list = seq_masks_list
+        din_seq_time_buckets_list = [
+            inputs.seq_time_buckets[domain] for domain in self.seq_domains
+        ]
 
         target_repr = (
             self._compute_target_repr(ns_tokens)
@@ -3702,10 +4025,19 @@ class PCVRHyFormer(nn.Module):
 
         if self.enable_din_interest:
             output = self._apply_din_interest_bypass(
-                output, din_seq_tokens_list, din_seq_masks_list, ns_tokens)
+                output,
+                din_seq_tokens_list,
+                din_seq_masks_list,
+                ns_tokens,
+                din_seq_time_buckets_list,
+            )
 
         if self.enable_dcn_cross:
             output = self._apply_dcn_cross_bypass(output, inputs)
+
+        if self.enable_ue_item_interaction:
+            output = self._apply_ue_item_interaction_bypass(
+                output, inputs, ns_tokens)
 
         logits = self.clsfier(output)
         return logits, output

@@ -1,8 +1,8 @@
-# Flight Reading Package · 2026-05-06 出差论文精读包
+# Flight Reading Package · 2026-05-22 出差论文精读包
 
 > **用途**：16 小时飞行离线精读。markdown 直接用 iPad 阅读器打开（iA Writer / Taio / Marked 2 / Obsidian / GoodNotes PDF+md），论文用原生 PDF 查看。
-> **最近更新**：2026-05-05（放弃 md→PDF 流水线，回归原生 markdown + 论文 PDF）
-> **总体量**：3 份 md（阅读指南 + 代码地图 + 代码精读）≈ 120 KB，7 份论文 PDF ≈ 8 MB
+> **最近更新**：2026-05-21（新增 TAAC final sprint 航班 primer，面向 2026-05-22 西班牙飞旧金山）
+> **总体量**：markdown 讲义 + 7 份论文 PDF。航班上优先读 13 / 12 / 11，不必从论文原文开始。
 
 ---
 
@@ -19,6 +19,7 @@
 | 10 | [`10-background-primer.md`](10-background-primer.md) ⭐ | **广告 + LLM 背景速通** — 30 分钟补齐广告/LLM 常识骨架 |
 | 11 | [`11-paper-roadmap.md`](11-paper-roadmap.md) ⭐ | **7 篇论文演进地图** — 理清 HyFormer/RankMixer/OneTrans 三者关系 |
 | 12 | [`12-code-qa.md`](12-code-qa.md) ⭐⭐ | **代码反问式讲义** — 10 个关键 class 的中文口语讲解（最核心） |
+| 13 | [`13-taac-final-sprint-primer-2026-05-22.md`](13-taac-final-sprint-primer-2026-05-22.md) ⭐⭐⭐ | **TAAC 冲刺航班版** — 当前赛题理解、验证体系、M145-M158 判读和明天 eval 决策 |
 
 ### B. 论文 PDF（arxiv 原文，iPad 任何 PDF 阅读器）
 
@@ -36,6 +37,7 @@
 
 ## iPad 阅读推荐
 
+- **2026-05-22 航班建议顺序**：先读 `13-taac-final-sprint-primer-2026-05-22.md`，再读 `12-code-qa.md`，最后读 `11-paper-roadmap.md`。论文 PDF 当字典查，不必从第一页硬啃。
 - **markdown 阅读器**：
   - [iA Writer](https://ia.net/writer)：最适合长文，字体 IBM Plex 系列，中英混排舒适，支持 dark mode
   - [Taio](https://taio.app/)：免费，支持代码 syntax highlight
@@ -77,3 +79,4 @@ curl -sL -o 07-LONGER.pdf                   "https://arxiv.org/pdf/2505.04421.pd
 - **2026-05-05 上午**：换 Pandoc + Typst 出 A5 PDF（`flight-pdfs/` → `flight-reading/`，代码段带语法高亮）
 - **2026-05-05 下午**：放弃 PDF 流水线，回归 markdown；iPad markdown 阅读器本身排版已足够好，避免在中英文字体、分页、emoji 渲染上重复造轮子
 - **2026-05-06（飞行中增补）**：新增 10/11/12 三份讲义 + blog+视频版阅读计划。起因：用户反馈"论文读不懂"。对症下药：先建背景骨架，再读代码讲义，论文作为字典而非主读物
+- **2026-05-21（飞美国前增补）**：新增 13 TAAC final sprint primer，聚焦当前 public SOTA、验证体系、M145-M158 队列和 2026-05-22 落地后的 eval 决策。
