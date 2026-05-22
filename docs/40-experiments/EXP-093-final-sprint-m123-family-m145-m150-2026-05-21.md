@@ -1,10 +1,9 @@
 # EXP-093 · Final sprint on public-positive M123/M119 family · M145-M150 · 2026-05-21
 
 > **Status**: M148 evaluated at public **0.851365**, a new team SOTA but not a
-> 0.853-sized jump. M151 evaluated at public **0.850129**, rejecting the
-> seed13+MTL high-aux signal. M145-M153, M156, and M158 returned; M154/M155/M157
-> remain pending by latest user report/context. The next normal-checkpoint eval
-> candidate is M147.
+> 0.853-sized jump. M151 public **0.850129** rejected the seed13+MTL high-aux
+> signal, and M147 public **0.849379** rejected the M123 seed5 5ep signal.
+> M154/M155/M157 remain pending by latest user report/context.
 
 ## Trigger
 
@@ -123,9 +122,9 @@ Parsed summaries:
 
 Recommended public-eval order if quota is available:
 
-1. `M147` normal `best_model` at `global_step82400`.
-2. `M146` normal `best_model` at `global_step65920`.
-3. `M153` normal `best_model` at `global_step65920` only as a backup/calibration.
+1. Wait for M154/M155/M157 if possible.
+2. If quota would otherwise expire, `M146` normal `best_model` at `global_step65920`.
+3. M153 normal `best_model` at `global_step65920` only as a lower-priority calibration.
 
 M153 does not enter the top four. Its normal best-model checkpoint is E4
 `global_step65920`, but that is only a slightly lower-primary/lower-aux rerun of
@@ -172,8 +171,8 @@ Interpretation:
 - The gain is real but small; it reduces the 0.853 gap to **+0.001635**.
 - M148 validates continuing the public-positive freshness/MTL family, but does
   not validate spending scarce quota on soup or aux side checkpoints first.
-- M151 later rejected the high-aux/high-logloss selection signal, so the next
-  public-eval candidate is **M147 best_model**, followed by **M146 best_model**.
+- M151 and M147 later rejected the high-aux/high-logloss and M123-5ep selection
+  signals. M148 remains the only positive result in this sprint batch so far.
 
 ## M151 Public Eval
 
@@ -199,7 +198,36 @@ Interpretation:
 - Strong aux m91 (**0.857198**) and strong logloss (**0.221344**) are not
   sufficient selection signals even inside the public-positive freshness family.
 - This downgrades seed rerolls and high-aux-only reasoning.
-- If quota remains, prefer **M147 best_model** next because it is the same seed5
-  M123 recipe with one extra epoch, not a new seed reroll. Then use **M146
-  best_model** for no-MTL calibration.
+- M147 later showed that the same seed5 M123 recipe with one extra epoch is
+  public-negative. Use **M146 best_model** only as no-MTL calibration if quota
+  would otherwise expire, and otherwise wait for M154/M155/M157.
 - Do not evaluate M151 soup or aux side checkpoints.
+
+## M147 Public Eval
+
+User reported:
+
+`M147-m123-vr02-mtl-seed5-auxselect-soup-gap0-5ep_eval_1779484630724`
+
+Public AUC: **0.849379** (683.46s).
+
+Public deltas:
+
+| Anchor | Public AUC | M147 delta |
+|---|---:|---:|
+| M148 `vr02+MTL` seed7 5ep | 0.851365 | **-0.001986** |
+| M123 `vr02+MTL` seed5 | 0.851011 | **-0.001632** |
+| M119 `vr02` seed7 | 0.850754 | **-0.001375** |
+| M151 `vr02+MTL` seed13 | 0.850129 | **-0.000750** |
+| M106 corrected-T38 seed5 | 0.849364 | **+0.000015** |
+
+Interpretation:
+
+- M123 seed5 + MTL + 5ep is public-negative.
+- The E5 primary/aux/logloss gains were false positives for this branch.
+- Close the general "5ep helps freshness+MTL" assumption. M148's positive result
+  is specific to its seed7/M119+MTL trajectory, not a reusable longer-training
+  rule.
+- Do not evaluate M147 soup or aux side checkpoints.
+- Remaining returned candidate M146 is now mostly a calibration/fallback, not a
+  strong 0.853 path. Prefer waiting for M154/M155/M157 if operationally possible.
