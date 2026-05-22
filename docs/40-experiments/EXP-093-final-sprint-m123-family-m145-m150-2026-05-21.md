@@ -1,10 +1,10 @@
 # EXP-093 · Final sprint on public-positive M123/M119 family · M145-M150 · 2026-05-21
 
-> **Status**: M145-M153, M156, and M158 returned; M154/M155/M157 remain pending
-> by latest user report/context. The returned batch produced several legitimate
-> freshness-family eval candidates, led by M148 and M151. These jobs
-> deliberately avoid rejected `vr015`, TIN-lite, UE61/87 concat, and broad
-> feature branches.
+> **Status**: M148 evaluated at public **0.851365**, a new team SOTA but not a
+> 0.853-sized jump. M151 evaluated at public **0.850129**, rejecting the
+> seed13+MTL high-aux signal. M145-M153, M156, and M158 returned; M154/M155/M157
+> remain pending by latest user report/context. The next normal-checkpoint eval
+> candidate is M147.
 
 ## Trigger
 
@@ -114,8 +114,8 @@ Parsed summaries:
 | M147 `M123 5ep` | E5 | 0.870843 | 0.221623 | 0.857534 | 2 members | Strong candidate; longer training helped this freshness+MTL branch. |
 | M148 `M119+MTL 5ep` | E5 | **0.871378** | 0.221600 | 0.857345 | 2 members | Best first eval candidate from the returned batch. |
 | M149 `M123 cw1.5` | E4 | 0.870833 | 0.221880 | 0.853163 | 2 members | Primary ok, aux weaker; hold. |
-| M150 `M123 cw3.0` | E4 | 0.870717 | 0.222292 | 0.854515 | 2 members | Not ahead of M148/M151/M147/M146. |
-| M151 `M123 seed13+MTL` | E4 | 0.870969 | **0.221344** | 0.857198 | 2 members | Second eval candidate; best logloss among returned candidates. |
+| M150 `M123 cw3.0` | E4 | 0.870717 | 0.222292 | 0.854515 | 2 members | Not ahead of M148/M147/M146 after M151 public miss. |
+| M151 `M123 seed13+MTL` | E4 | 0.870969 | **0.221344** | 0.857198 | 2 members | Public 0.850129; high-aux/logloss false positive. |
 | M152 `vr01 seed7+MTL` | E4 | 0.868962 | 0.226037 | 0.853201 | 2 members | Too weak; no default eval. |
 | M153 `M119 no-MTL 5ep` | E4 | 0.870980 | 0.221421 | 0.854488 | 3 members | E5 raises aux to 0.856338 but primary drops; backup only. |
 | M156 `M123 sparse_lr=0.07` | E4 | 0.870717 | 0.221962 | 0.854368 | 2 members | Healthy but lower than top candidates; hold. |
@@ -123,10 +123,9 @@ Parsed summaries:
 
 Recommended public-eval order if quota is available:
 
-1. `M148` normal `best_model` at `global_step82400`.
-2. `M151` normal `best_model` at `global_step65920`.
-3. `M147` normal `best_model` at `global_step82400`.
-4. `M146` normal `best_model` at `global_step65920`.
+1. `M147` normal `best_model` at `global_step82400`.
+2. `M146` normal `best_model` at `global_step65920`.
+3. `M153` normal `best_model` at `global_step65920` only as a backup/calibration.
 
 M153 does not enter the top four. Its normal best-model checkpoint is E4
 `global_step65920`, but that is only a slightly lower-primary/lower-aux rerun of
@@ -149,3 +148,58 @@ Interpretation:
 - M158 suggests the explicit UE61/87 separate-token + xitem clue is still not
   ready to spend quota on. The pure separate-token M157 is still pending and is
   the fairer test of that clue.
+
+## M148 Public Eval
+
+User reported:
+
+`M148-m119-vr02-mtl-seed7-auxselect-soup-gap0-5ep_eval_1779482611683`
+
+Public AUC: **0.851365**.
+
+This is a new team SOTA:
+
+| Anchor | Public AUC | M148 delta |
+|---|---:|---:|
+| M123 `vr02+MTL` seed5 | 0.851011 | **+0.000354** |
+| M119 `vr02` seed7 | 0.850754 | **+0.000611** |
+| M124 `vr01+MTL` seed5 | 0.850718 | **+0.000647** |
+| M106 corrected-T38 seed5 | 0.849364 | **+0.002001** |
+
+Interpretation:
+
+- The fresh `valid_ratio=0.02` + seed7 + MTL + 5ep branch transfers to public.
+- The gain is real but small; it reduces the 0.853 gap to **+0.001635**.
+- M148 validates continuing the public-positive freshness/MTL family, but does
+  not validate spending scarce quota on soup or aux side checkpoints first.
+- M151 later rejected the high-aux/high-logloss selection signal, so the next
+  public-eval candidate is **M147 best_model**, followed by **M146 best_model**.
+
+## M151 Public Eval
+
+User reported:
+
+`M151-m123-vr02-mtl-seed13-auxselect-soup-gap0-4ep_eval_1779483206670`
+
+Public AUC: **0.850129** (308.56s).
+
+Public deltas:
+
+| Anchor | Public AUC | M151 delta |
+|---|---:|---:|
+| M148 `vr02+MTL` seed7 5ep | 0.851365 | **-0.001236** |
+| M123 `vr02+MTL` seed5 | 0.851011 | **-0.000882** |
+| M119 `vr02` seed7 | 0.850754 | **-0.000625** |
+| M124 `vr01+MTL` seed5 | 0.850718 | **-0.000589** |
+| M106 corrected-T38 seed5 | 0.849364 | **+0.000765** |
+
+Interpretation:
+
+- Seed13+MTL was a validation false positive.
+- Strong aux m91 (**0.857198**) and strong logloss (**0.221344**) are not
+  sufficient selection signals even inside the public-positive freshness family.
+- This downgrades seed rerolls and high-aux-only reasoning.
+- If quota remains, prefer **M147 best_model** next because it is the same seed5
+  M123 recipe with one extra epoch, not a new seed reroll. Then use **M146
+  best_model** for no-MTL calibration.
+- Do not evaluate M151 soup or aux side checkpoints.
