@@ -1,9 +1,10 @@
 # EXP-093 · Final sprint on public-positive M123/M119 family · M145-M150 · 2026-05-21
 
-> **Status**: M145-M152 and M158 returned; M153-M157 remain pending by user
-> report. The returned batch produced several legitimate freshness-family eval
-> candidates, led by M148 and M151. These jobs deliberately avoid rejected
-> `vr015`, TIN-lite, UE61/87 concat, and broad feature branches.
+> **Status**: M145-M153, M156, and M158 returned; M154/M155/M157 remain pending
+> by latest user report/context. The returned batch produced several legitimate
+> freshness-family eval candidates, led by M148 and M151. These jobs
+> deliberately avoid rejected `vr015`, TIN-lite, UE61/87 concat, and broad
+> feature branches.
 
 ## Trigger
 
@@ -102,8 +103,9 @@ Stop conditions:
 
 ## Returned Results · M145-M152/M158
 
-User reported that all latest jobs except **M153-M157** returned and copied logs
-to `~/Downloads/train_log.txt`. Parsed summaries:
+User reported that all latest jobs except **M153-M157** returned, then later
+reported **M153/M156** completed and copied logs to `~/Downloads/train_log.txt`.
+Parsed summaries:
 
 | Job | Best epoch | Primary AUC | LogLoss | Aux m91 | Soup | Readout |
 |---|---:|---:|---:|---:|---|---|
@@ -115,6 +117,8 @@ to `~/Downloads/train_log.txt`. Parsed summaries:
 | M150 `M123 cw3.0` | E4 | 0.870717 | 0.222292 | 0.854515 | 2 members | Not ahead of M148/M151/M147/M146. |
 | M151 `M123 seed13+MTL` | E4 | 0.870969 | **0.221344** | 0.857198 | 2 members | Second eval candidate; best logloss among returned candidates. |
 | M152 `vr01 seed7+MTL` | E4 | 0.868962 | 0.226037 | 0.853201 | 2 members | Too weak; no default eval. |
+| M153 `M119 no-MTL 5ep` | E4 | 0.870980 | 0.221421 | 0.854488 | 3 members | E5 raises aux to 0.856338 but primary drops; backup only. |
+| M156 `M123 sparse_lr=0.07` | E4 | 0.870717 | 0.221962 | 0.854368 | 2 members | Healthy but lower than top candidates; hold. |
 | M158 `septok 61/87+xitem a0.3` | E4 | 0.870462 | 0.222107 | 0.853288 | skipped | Separate-token+xitem did not beat M123-family anchors; wait for pure M157. |
 
 Recommended public-eval order if quota is available:
@@ -123,6 +127,11 @@ Recommended public-eval order if quota is available:
 2. `M151` normal `best_model` at `global_step65920`.
 3. `M147` normal `best_model` at `global_step82400`.
 4. `M146` normal `best_model` at `global_step65920`.
+
+M153 does not enter the top four. Its normal best-model checkpoint is E4
+`global_step65920`, but that is only a slightly lower-primary/lower-aux rerun of
+the M146 no-MTL branch; its E5 aux/blend side checkpoint is not preferred
+because primary/logloss move backward.
 
 Use normal best-model checkpoints before dense-only soup for the first public
 pass. The soup checkpoints are useful side artifacts, but no post-soup internal
