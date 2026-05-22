@@ -3,6 +3,8 @@
 > **Status**: M148 evaluated at public **0.851365**, a new team SOTA but not a
 > 0.853-sized jump. M151 public **0.850129** rejected the seed13+MTL high-aux
 > signal, and M147 public **0.849379** rejected the M123 seed5 5ep signal.
+> M148 dense-only `weight_soup` later evaluated at public **0.850563**, rejecting
+> soup as a default score-max side checkpoint for this branch.
 > M154/M155/M157 remain pending by latest user report/context.
 
 ## Trigger
@@ -173,6 +175,36 @@ Interpretation:
   not validate spending scarce quota on soup or aux side checkpoints first.
 - M151 and M147 later rejected the high-aux/high-logloss and M123-5ep selection
   signals. M148 remains the only positive result in this sprint batch so far.
+
+## M148 Weight-Soup Public Eval
+
+User reported:
+
+`M148-m119-vr02-mtl-seed7-auxselect-soup-gap0-5ep-weight_soup_eval_1779486427228`
+
+Public AUC: **0.850563** (690.98s).
+
+Public deltas:
+
+| Anchor | Public AUC | M148 weight_soup delta |
+|---|---:|---:|
+| M148 best_model | 0.851365 | **-0.000802** |
+| M123 `vr02+MTL` seed5 | 0.851011 | **-0.000448** |
+| M119 `vr02` seed7 | 0.850754 | **-0.000191** |
+
+Interpretation:
+
+- Dense-only same-run averaging did not stabilize this branch; it diluted the
+  best public checkpoint.
+- For final-day M148-lineage jobs, keep soup as a cheap side artifact only.
+- Default public eval target becomes the normal `best_model`; evaluate soup only
+  after a matching normal checkpoint validates the branch and quota is abundant.
+- Later final-day M148-lineage helper templates disable `--enable_weight_soup`
+  to save post-train time and keep the checkpoint list cleaner.
+- An exact M148 rerun is reasonable only as a low-risk queue filler: prior
+  exact/rerun evidence shows small variance, so it should not displace
+  first-tier M148-lineage perturbations, but it can be useful if overnight
+  capacity would otherwise idle.
 
 ## M151 Public Eval
 
