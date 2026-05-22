@@ -1,9 +1,9 @@
 # EXP-093 · Final sprint on public-positive M123/M119 family · M145-M150 · 2026-05-21
 
-> **Status**: Prepared queue candidates after M144 public negative and M142 logs-only.
-> The training candidate queue was empty while corrected M137 and M141 were
-> still running. These jobs deliberately avoid rejected `vr015`, TIN-lite,
-> UE61/87 concat, and broad feature branches.
+> **Status**: M145-M152 and M158 returned; M153-M157 remain pending by user
+> report. The returned batch produced several legitimate freshness-family eval
+> candidates, led by M148 and M151. These jobs deliberately avoid rejected
+> `vr015`, TIN-lite, UE61/87 concat, and broad feature branches.
 
 ## Trigger
 
@@ -99,3 +99,44 @@ Stop conditions:
 - Do not evaluate UE61/87 concat or xitem offspring based only on high aux.
 - Do not trust high tiny-window primary alone; require consistency with the
   public-positive M119/M123 family.
+
+## Returned Results · M145-M152/M158
+
+User reported that all latest jobs except **M153-M157** returned and copied logs
+to `~/Downloads/train_log.txt`. Parsed summaries:
+
+| Job | Best epoch | Primary AUC | LogLoss | Aux m91 | Soup | Readout |
+|---|---:|---:|---:|---:|---|---|
+| M145 `M123+selector+soup` | E4 | 0.870540 | 0.221967 | 0.853691 | 2 members | Healthy rerun, but slightly below M123; hold. |
+| M146 `M119+selector` | E4 | 0.871047 | 0.221636 | 0.855842 | skipped | Low-risk eval candidate; direct M119 public-positive branch. |
+| M147 `M123 5ep` | E5 | 0.870843 | 0.221623 | 0.857534 | 2 members | Strong candidate; longer training helped this freshness+MTL branch. |
+| M148 `M119+MTL 5ep` | E5 | **0.871378** | 0.221600 | 0.857345 | 2 members | Best first eval candidate from the returned batch. |
+| M149 `M123 cw1.5` | E4 | 0.870833 | 0.221880 | 0.853163 | 2 members | Primary ok, aux weaker; hold. |
+| M150 `M123 cw3.0` | E4 | 0.870717 | 0.222292 | 0.854515 | 2 members | Not ahead of M148/M151/M147/M146. |
+| M151 `M123 seed13+MTL` | E4 | 0.870969 | **0.221344** | 0.857198 | 2 members | Second eval candidate; best logloss among returned candidates. |
+| M152 `vr01 seed7+MTL` | E4 | 0.868962 | 0.226037 | 0.853201 | 2 members | Too weak; no default eval. |
+| M158 `septok 61/87+xitem a0.3` | E4 | 0.870462 | 0.222107 | 0.853288 | skipped | Separate-token+xitem did not beat M123-family anchors; wait for pure M157. |
+
+Recommended public-eval order if quota is available:
+
+1. `M148` normal `best_model` at `global_step82400`.
+2. `M151` normal `best_model` at `global_step65920`.
+3. `M147` normal `best_model` at `global_step82400`.
+4. `M146` normal `best_model` at `global_step65920`.
+
+Use normal best-model checkpoints before dense-only soup for the first public
+pass. The soup checkpoints are useful side artifacts, but no post-soup internal
+validation is computed; after M144's public miss, they should not outrank the
+matching best-model checkpoint unless a quota would otherwise expire or a
+matching best-model public result is already known.
+
+Interpretation:
+
+- The current viable lane remains **freshness + MTL**, not UE/TIN/history/time.
+- Five epochs are not globally safe, but in the fresh `vr02` M123/M119 family
+  both M147 and M148 improved primary, logloss, and aux at E5.
+- High aux alone is insufficient after M136, but high aux plus healthy primary
+  and logloss inside the proven M119/M123 family is the best current evidence.
+- M158 suggests the explicit UE61/87 separate-token + xitem clue is still not
+  ready to spend quota on. The pure separate-token M157 is still pending and is
+  the fairer test of that clue.
