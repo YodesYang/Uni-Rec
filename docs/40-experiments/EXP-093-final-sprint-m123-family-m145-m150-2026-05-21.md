@@ -5,12 +5,18 @@
 > signal, and M147 public **0.849379** rejected the M123 seed5 5ep signal.
 > M148 dense-only `weight_soup` later evaluated at public **0.850563**, rejecting
 > soup as a default score-max side checkpoint for this branch.
-> M154/M155/M157 remain pending by latest user report/context.
+> M154/M155/M157 later returned; M154 is numerically interesting but it is a
+> close M147/M123-seed5-5ep sibling and should not displace M148-lineage
+> candidates by default. M159 later returned as a healthy M148-lineage lower-LR
+> run but public eval was **0.851279**, slightly below M148. M165 then evaluated
+> at **0.851162**, lower than both M148 and M159. M161/M163/M167/M168 later
+> returned but are no-eval by default.
 
 ## Trigger
 
-Current team public SOTA remains **M123 = 0.851011**. The new target is
-**0.853**, and user reports public Top1/SOTA around **0.85349**.
+Current team public SOTA remains **M148 = 0.851365**. The target is to clear
+**0.852** first, then chase **0.853+**; user reports public Top1/SOTA around
+**0.85401**.
 
 Recent negative calibration is strong:
 
@@ -119,14 +125,35 @@ Parsed summaries:
 | M151 `M123 seed13+MTL` | E4 | 0.870969 | **0.221344** | 0.857198 | 2 members | Public 0.850129; high-aux/logloss false positive. |
 | M152 `vr01 seed7+MTL` | E4 | 0.868962 | 0.226037 | 0.853201 | 2 members | Too weak; no default eval. |
 | M153 `M119 no-MTL 5ep` | E4 | 0.870980 | 0.221421 | 0.854488 | 3 members | E5 raises aux to 0.856338 but primary drops; backup only. |
+| M154 `M123 lr=7e-5 5ep` | E5 | 0.870880 | 0.221613 | **0.858290** | 3 members | Highest aux, but close M147 sibling after M147 public miss; risky information candidate only. |
+| M155 `M123 sparse_lr=0.03` | E4 | 0.870171 | 0.222290 | 0.854241 | 2 members | Weaker than M123/M148; no default eval. |
 | M156 `M123 sparse_lr=0.07` | E4 | 0.870717 | 0.221962 | 0.854368 | 2 members | Healthy but lower than top candidates; hold. |
+| M157 `septok 61/87 no xitem` | E4 | 0.869781 | 0.222716 | 0.851257 | 2 members | True separate-token pure test is weak; no default eval. |
 | M158 `septok 61/87+xitem a0.3` | E4 | 0.870462 | 0.222107 | 0.853288 | skipped | Separate-token+xitem did not beat M123-family anchors; wait for pure M157. |
+| M159 `M148 lr=7e-5 seed7 5ep` | E5 | 0.871099 | 0.221668 | **0.859701** | disabled | Public 0.851279; near miss below M148, so low-LR/high-aux does not become SOTA. |
+| M161 `M148 sparse_lr=0.07` | E5 | 0.870414 | 0.221893 | 0.858332 | disabled | Aux ok but primary too low; no default eval. |
+| M163 `M148 cw=3.0` | E5 | 0.870217 | 0.221840 | 0.855860 | disabled | Conversion-weight increase is weak; no eval. |
+| M165 `M148 exact 6ep` | E5 | 0.871193 | **0.221476** | 0.857794 | disabled | Public 0.851162; below M148/M159, so exact/continued M148-lineage does not solve the gap. |
+| M167 `septok 61/87+xitem a0.3 seed7` | E5 | 0.870154 | 0.221767 | 0.856182 | disabled | M148-lineage separate-token+xitem remains weak; no eval. |
+| M168 `M148 seed42 5ep` | E5 | 0.871011 | **0.221326** | 0.852665 | disabled | Healthy seed42 rerun with strong logloss, but primary trails M148/M165/M159 and aux is far below M159; no default eval. |
 
 Recommended public-eval order if quota is available:
 
-1. Wait for M154/M155/M157 if possible.
-2. If quota would otherwise expire, `M146` normal `best_model` at `global_step65920`.
-3. M153 normal `best_model` at `global_step65920` only as a lower-priority calibration.
+1. After M159 public **0.851279** and M165 public **0.851162**, do not spend
+   more quota on returned local M148-lineage variants unless no stronger
+   candidate returns before quota expiry.
+2. Prefer later M148-lineage optimizer/objective candidates only if they return
+   clearly stronger than M159/M165/M148 (M160/M162/M164/M166 or M170-M173 when
+   healthy).
+3. Do not evaluate M168 by default; its logloss is attractive, but M151/M159/M165
+   show that single-metric wins without a balanced public-positive signature can
+   be public-negative.
+4. If quota would otherwise expire and only this batch is available, M154 normal
+   `best_model` is the only new information candidate, but expected score-max
+   value is limited by M147's public failure.
+5. Otherwise, `M146` normal `best_model` at `global_step65920` remains the
+   low-risk no-MTL calibration candidate; M153 normal `best_model` at
+   `global_step65920` is lower priority.
 
 M153 does not enter the top four. Its normal best-model checkpoint is E4
 `global_step65920`, but that is only a slightly lower-primary/lower-aux rerun of
@@ -147,8 +174,8 @@ Interpretation:
 - High aux alone is insufficient after M136, but high aux plus healthy primary
   and logloss inside the proven M119/M123 family is the best current evidence.
 - M158 suggests the explicit UE61/87 separate-token + xitem clue is still not
-  ready to spend quota on. The pure separate-token M157 is still pending and is
-  the fairer test of that clue.
+  ready to spend quota on. M157 later confirms the pure separate-token version
+  is also weak in this M123 seed5 form.
 
 ## M148 Public Eval
 
@@ -232,7 +259,8 @@ Interpretation:
 - This downgrades seed rerolls and high-aux-only reasoning.
 - M147 later showed that the same seed5 M123 recipe with one extra epoch is
   public-negative. Use **M146 best_model** only as no-MTL calibration if quota
-  would otherwise expire, and otherwise wait for M154/M155/M157.
+  would otherwise expire. After later readouts, **M159 best_model** is the
+  preferred successor candidate.
 - Do not evaluate M151 soup or aux side checkpoints.
 
 ## M147 Public Eval
@@ -262,4 +290,5 @@ Interpretation:
   rule.
 - Do not evaluate M147 soup or aux side checkpoints.
 - Remaining returned candidate M146 is now mostly a calibration/fallback, not a
-  strong 0.853 path. Prefer waiting for M154/M155/M157 if operationally possible.
+  strong 0.853 path. Later M159 supersedes M154/M155/M157 as the preferred
+  current eval candidate.
