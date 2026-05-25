@@ -9,6 +9,7 @@
 
 | 你想 | 看这个 |
 |------|--------|
+| 明年快速回忆整季结论 / 起手策略 | [`60-season-review/`](./60-season-review/) |
 | 知道当前在做什么 / 下一步做什么 | [`20-tasks/active.md`](./20-tasks/active.md) |
 | 看赛题规则 / 时间表 / 红线 | [`00-context/competition.md`](./00-context/competition.md) |
 | 看数据结构（120 列怎么分） | [`00-context/data-schema.md`](./00-context/data-schema.md) |
@@ -59,6 +60,11 @@ docs/
 ├── 50-paper/                              # 技术报告（KDD 答辩用）
 │   └── draft-v0.md                        # T6 草稿（迭代覆盖）
 │
+├── 60-season-review/                      # 赛季结束后的压缩记忆（明年先读）
+│   ├── README.md                          # 本目录入口
+│   ├── final-recap-2026.md                # 最终复盘：主线 / 负结果 / 继承资产
+│   └── next-year-playbook.md              # 明年比赛开局手册
+│
 └── 99-raw/                                # 原始数据（备份用）
     ├── community-snapshots/               # 乐享社区抓取快照（带 diff 脚本）
     └── platform-pdf/                      # Tencent Angel 原始 PDF
@@ -104,6 +110,6 @@ docs/
 
 ## 当前赛事状态（一行快速看）
 
-距初赛 ddl **25 天**（5/25）· 当前最佳 Leaderboard **0.84381**（swiglu encoder）· 社区 SOTA **0.85809**（差 +0.0143）· 评估额度每天 **4 次** / 资源 **4** 配额（榜单重置补偿）· T7 / T9 已结案 → 当前最高 ROI 动作：**重新发布 transformer step=38050 ckpt**（30 秒，+0.002 预期）+ 新一轮 platform job 验证 T8 时间切。
+TAAC x KDD Cup 2026 工业组已结束 · 最终排名 **32/689 (Top 4.6%)** · 最佳 public AUC **0.851365** · 最佳模型 **M148 normal best_model** · 未过约 **0.852** 晋级线，但形成完整工业推荐竞赛资产。
 
-详见 [`20-tasks/active.md`](./20-tasks/active.md) 顶部「最近一次审视」一行。
+明年重启时先读 [`60-season-review/`](./60-season-review/)，查细节再回到 [`00-context/platform-state.md`](./00-context/platform-state.md) 和 [`40-experiments/`](./40-experiments/)。
