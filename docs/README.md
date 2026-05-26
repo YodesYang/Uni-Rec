@@ -110,6 +110,6 @@ docs/
 
 ## 当前赛事状态（一行快速看）
 
-TAAC x KDD Cup 2026 工业组已结束 · 最终排名 **32/689 (Top 4.6%)** · 最佳 public AUC **0.851365** · 最佳模型 **M148 normal best_model** · 未过约 **0.852** 晋级线，但形成完整工业推荐竞赛资产。
+TAAC x KDD Cup 2026 工业组已结束 · 最终排名 **35/689 (Top 5.1%)** · 最佳 public AUC **0.851365** · 最佳模型 **M148 normal best_model** · 未过约 **0.852** 晋级线，但形成完整工业推荐竞赛资产。
 
 明年重启时先读 [`60-season-review/`](./60-season-review/)，查细节再回到 [`00-context/platform-state.md`](./00-context/platform-state.md) 和 [`40-experiments/`](./40-experiments/)。

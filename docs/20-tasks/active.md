@@ -1,6 +1,6 @@
 # Active Tasks · TAAC 2026
 
-> **2026 season closed**: 本文件保留为赛季中期任务流历史，不再代表当前可执行队列。明年快速回忆请先读 [`docs/60-season-review/`](../60-season-review/)；最终结果为 **Industrial Track 32/689 (Top 4.6%)**, best public AUC **0.851365**。
+> **2026 season closed**: 本文件保留为赛季中期任务流历史，不再代表当前可执行队列。明年快速回忆请先读 [`docs/60-season-review/`](../60-season-review/)；最终结果为 **Industrial Track 35/689 (Top 5.1%)**, best public AUC **0.851365**。
 >
 > **单一事实源**。任何 task 的状态变更只在本文件落定。
 > meta-spec（审视清单 / 状态约定 / 编号约定）见 `docs/20-tasks/README.md`。

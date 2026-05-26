@@ -7,8 +7,8 @@
 | 项目 | 结果 |
 |---|---:|
 | 赛道 | Industrial Track |
-| 最终排名 | **32 / 689** |
-| 百分位 | **Top 4.6%** |
+| 最终排名 | **35 / 689** |
+| 百分位 | **Top 5.1%** |
 | 最佳 public AUC | **0.851365** |
 | 最佳公开提交 | `M148-m119-vr02-mtl-seed7-auxselect-soup-gap0-5ep` |
 | 最佳 checkpoint | normal `best_model` |
@@ -28,7 +28,7 @@
 ## 最短记忆版
 
 ```text
-最终最好：M148 public 0.851365，最终排名 32/689。
+最终最好：M148 public 0.851365，最终排名 35/689。
 真正上分主线：corrected T38 -> M106 -> fresh-tail M119 -> MTL M123 -> M148。
 核心认知：验证体系比模块花样更重要；普通 local AUC 经常误导。
 最该继承：time-aware split、clean windows、aux windows、public-calibrated family reasoning。
